@@ -641,7 +641,7 @@ bool GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::UpdatePredictionCache(
 
   CHECK_GT(out_preds.Size(), 0U);
 
-  const size_t stride = out_preds.Stride(0)
+  const size_t stride = out_preds.Stride(0);
   const int buffer_size = out_preds.Size()*stride - stride + 1;
   sycl::buffer<float, 1> out_preds_buf(&out_preds(0), buffer_size);
 
