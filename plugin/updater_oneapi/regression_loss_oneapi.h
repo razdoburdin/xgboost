@@ -67,7 +67,7 @@ struct SquaredLogErrorOneAPI {
 
   static const char* Name() { return "reg:squaredlogerror_oneapi"; }
 
-  static ObjInfo Info() { return {ObjInfo::kRegression, true}; }
+  static ObjInfo Info() { return {ObjInfo::kRegression, false}; }
 };
 
 // logistic loss for probability regression task
@@ -104,7 +104,7 @@ struct LogisticRegressionOneAPI {
 
   static const char* Name() { return "reg:logistic_oneapi"; }
 
-  static ObjInfo Info() { return {ObjInfo::kRegression, true}; }
+  static ObjInfo Info() { return {ObjInfo::kRegression, false}; }
 };
 
 // logistic loss for binary classification task
@@ -144,7 +144,7 @@ struct LogisticRawOneAPI : public LogisticRegressionOneAPI {
 
   static const char* Name() { return "binary:logitraw_oneapi"; }
 
-  static ObjInfo Info() { return {ObjInfo::kRegression, true}; }
+  static ObjInfo Info() { return {ObjInfo::kRegression, false}; }
 };
 
 }  // namespace obj

@@ -15,7 +15,7 @@ if (PLUGIN_RMM)
   target_compile_definitions(objxgboost PUBLIC -DXGBOOST_USE_RMM=1)
 endif (PLUGIN_RMM)
 
-if (PLUGIN_UPDATER_ONEAPI)
+if (PLUGIN_UPDATER_ONEAPI AND FALSE)
   add_library(oneapi_plugin OBJECT
     ${xgboost_SOURCE_DIR}/plugin/updater_oneapi/hist_util_oneapi.cc
     ${xgboost_SOURCE_DIR}/plugin/updater_oneapi/regression_obj_oneapi.cc
@@ -42,4 +42,4 @@ if (PLUGIN_UPDATER_ONEAPI)
   target_link_libraries(objxgboost PUBLIC oneapi_plugin)
   # Add all objects of oneapi_plugin to objxgboost
   target_sources(objxgboost INTERFACE $<TARGET_OBJECTS:oneapi_plugin>)
-endif (PLUGIN_UPDATER_ONEAPI)
+  endif (PLUGIN_UPDATER_ONEAPI AND FALSE)

@@ -78,8 +78,9 @@ class RegLossObjOneAPI : public ObjFunction {
 	}
 
     auto scale_pos_weight = param_.scale_pos_weight;
+
     if (!is_null_weight) {
-      CHECK_EQ(info.weights_.Size(), ndata)
+      CHECK_EQ(info.weights_.Size(), info.labels.Shape(0))
         << "Number of weights should be equal to number of data points.";
     }
 
@@ -144,6 +145,11 @@ class RegLossObjOneAPI : public ObjFunction {
   struct ObjInfo Task() const override {
     return Loss::Info();
   };
+
+  uint32_t Targets(MetaInfo const& info) const override {
+    // Multi-target regression.
+    return std::max(static_cast<size_t>(1), info.labels.Shape(1));
+  }
 
   void SaveConfig(Json* p_out) const override {
     auto& out = *p_out;
