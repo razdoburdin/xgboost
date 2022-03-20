@@ -35,7 +35,9 @@ class QuantileHistMock : public QuantileHistMaker {
                       std::vector<GradientPair>* gpair,
                       DMatrix* p_fmat,
                       const RegTree& tree) {
-      RealImpl::InitData(gmat, *p_fmat, tree, gpair);
+      common::ColumnMatrix column_matrix;
+      column_matrix.Init(gmat, 1, 1);
+      RealImpl::template InitData<uint8_t>(gmat, column_matrix, *p_fmat, tree, gpair);
       ASSERT_EQ(this->data_layout_, RealImpl::DataLayout::kSparseData);
 
       /* The creation of HistCutMatrix and GHistIndexMatrix are not technically
@@ -95,6 +97,153 @@ class QuantileHistMock : public QuantileHistMaker {
         }
       }
     }
+// <<<<<<< HEAD
+// =======
+
+    void TestInitDataSampling(const GHistIndexMatrix& gmat,
+                      std::vector<GradientPair>* gpair,
+                      DMatrix* p_fmat,
+                      const RegTree& tree) {
+      // check SimpleSkip
+      size_t initial_seed = 777;
+      RandomReplace::EngineT eng_first(initial_seed);
+      for (size_t i = 0; i < 100; ++i) {
+        eng_first();
+      }
+      uint64_t initial_seed_th = RandomReplace::SimpleSkip(100, initial_seed, 16807, RandomReplace::kMod);
+      RandomReplace::EngineT eng_second(initial_seed_th);
+      ASSERT_EQ(eng_first(), eng_second());
+
+      const size_t nthreads = omp_get_num_threads();
+      // save state of global rng engine
+      auto initial_rnd = common::GlobalRandom();
+      auto initial_rnd_copy = initial_rnd;
+      initial_seed = initial_rnd_copy();
+      RandomReplace::EngineT test_eng(initial_seed);
+      std::vector<size_t> unused_rows;
+      std::bernoulli_distribution coin_flip(RealImpl::param_.subsample);
+
+      for (size_t i = 0; i < gpair->size(); ++i) {
+        if (!coin_flip(test_eng)) {
+          unused_rows.push_back(i);
+        }
+      }
+
+      for (size_t i_nthreads = 1; i_nthreads < 4; ++i_nthreads) {
+        omp_set_num_threads(i_nthreads);
+        // return initial state of global rng engine
+        common::GlobalRandom() = initial_rnd;
+        common::ColumnMatrix column_matrix;
+        column_matrix.Init(gmat, 1, 1);
+        RealImpl::template InitData<uint8_t>(gmat, column_matrix, *p_fmat, tree, gpair);
+        for (const size_t unused_row : unused_rows) {
+          ASSERT_EQ((*gpair)[unused_row], GradientPair(0));
+        }
+      }
+      omp_set_num_threads(nthreads);
+    }
+
+    void TestApplySplit(const RegTree& tree) {
+      const size_t initial_nthreads = omp_get_num_threads();
+      omp_set_num_threads(1);
+      std::vector<GradientPair> row_gpairs =
+          { {1.23f, 0.24f}, {0.24f, 0.25f}, {0.26f, 0.27f}, {2.27f, 0.28f},
+            {0.27f, 0.29f}, {0.37f, 0.39f}, {-0.47f, 0.49f}, {0.57f, 0.59f} };
+      size_t constexpr kMaxBins = 4;
+      CPUExpandEntry node(RegTree::kRoot, 0, 0.0f);
+      std::vector<uint16_t> nodes(1, 0);
+      std::vector<uint16_t> curr_level_nodes(2);
+      std::vector<uint32_t> split_nodes(1, 0);
+      curr_level_nodes[0] = 1;
+      curr_level_nodes[1] = 2;
+      const bst_uint fid = tree[node.nid].SplitIndex();
+      // let's left is small
+      std::vector<bool> smalest_nodes_mask(3, false);
+      smalest_nodes_mask[1] = true;
+
+      // try out different sparsity to get different number of missing values
+      for (double sparsity : {0.0, 0.1, 0.2}) {
+        // kNRows samples with kNCols features
+        auto dmat = RandomDataGenerator(kNRows, kNCols, sparsity).Seed(3).GenerateDMatrix();
+        // GHistIndexMatrix(DMatrix* x, int32_t max_bin, double sparse_thresh, bool sorted_sketch,
+        //                  int32_t n_threads, common::Span<float> hess = {});
+        GHistIndexMatrix gmat(dmat.get(), kMaxBins, 1, false, common::OmpGetNumThreads(0));
+        common::ColumnMatrix cm;
+
+        // treat everything as dense, as this is what we intend to test here
+        cm.Init(gmat, 0.0, common::OmpGetNumThreads(0));
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(cm.GetIndexData());
+        RealImpl::template InitData<uint8_t>(gmat, cm, *dmat, tree, &row_gpairs);
+        const size_t num_row = dmat->Info().num_row_;
+        // split by feature 0
+        const size_t bin_id_min = gmat.cut.Ptrs()[0];
+        const size_t bin_id_max = gmat.cut.Ptrs()[1];
+
+        RealImpl::opt_partition_builder_.SetSlice(node.nid, 0, num_row);
+        const size_t depth_begin = RealImpl::opt_partition_builder_.DepthBegin(nodes,
+                                                                     &tree, false);
+        const size_t depth_size = RealImpl::opt_partition_builder_.DepthSize(gmat, nodes,
+                                                                   &tree, false);
+        // attempt to split at different bins
+        for (size_t split = 0; split < 4; split++) {
+          size_t left_cnt = 0, right_cnt = 0;
+
+          // manually compute how many samples go left or right
+          for (size_t rid = 0; rid < num_row; ++rid) {
+            for (size_t offset = gmat.row_ptr[rid]; offset < gmat.row_ptr[rid + 1]; ++offset) {
+              const size_t bin_id = gmat.index[offset];
+              if (bin_id >= bin_id_min && bin_id < bin_id_max) {
+                if (bin_id <= split) {
+                  left_cnt++;
+                } else {
+                  right_cnt++;
+                }
+              }
+            }
+          }
+
+          // if any were missing due to sparsity, we add them to the left or to the right
+          size_t missing = kNRows - left_cnt - right_cnt;
+          if (tree[0].DefaultLeft()) {
+            left_cnt += missing;
+          } else {
+            right_cnt += missing;
+          }
+
+          std::vector<int32_t> split_conditions(1, split - gmat.cut.Ptrs()[fid]);
+          std::vector<uint64_t> split_ind(1, fid*((gmat.IsDense() ? num_row : 1)));
+          std::vector<uint16_t> node_ids(num_row, 0);
+          if (gmat.IsDense()) {
+            RealImpl::opt_partition_builder_.template CommonPartition<
+              uint8_t, false, true>(0, depth_begin,
+                                        depth_size, data,
+                                        node_ids.data(),
+                                        &split_conditions,
+                                        &split_ind,
+                                        smalest_nodes_mask, row_gpairs,
+                                        &curr_level_nodes,
+                                        cm, split_nodes);
+          } else {
+            RealImpl::opt_partition_builder_.template CommonPartition<
+              uint8_t, false, false>(0, depth_begin,
+                                        depth_size, data,
+                                        node_ids.data(),
+                                        &split_conditions,
+                                        &split_ind,
+                                        smalest_nodes_mask, row_gpairs,
+                                        &curr_level_nodes,
+                                        cm, split_nodes);
+          }
+          RealImpl::opt_partition_builder_.UpdateRowBuffer(node_ids, &tree,
+                                                           gmat, gmat.cut.Ptrs().size() - 1,
+                                                           0, node_ids, false);
+          ASSERT_EQ(RealImpl::opt_partition_builder_.summ_size, left_cnt);
+          ASSERT_EQ(num_row - RealImpl::opt_partition_builder_.summ_size, right_cnt);
+        }
+      }
+      omp_set_num_threads(initial_nthreads);
+    }
+// >>>>>>> a20b4d1a... partition optimizations
   };
 
   int static constexpr kNRows = 8, kNCols = 16;
@@ -156,11 +305,6 @@ TEST(QuantileHist, Partitioner) {
   GenericParameter ctx;
   ctx.InitAllowUnknown(Args{});
 
-  HistRowPartitioner partitioner{n_samples, base_rowid, ctx.Threads()};
-  ASSERT_EQ(partitioner.base_rowid, base_rowid);
-  ASSERT_EQ(partitioner.Size(), 1);
-  ASSERT_EQ(partitioner.Partitions()[0].Size(), n_samples);
-
   auto Xy = RandomDataGenerator{n_samples, n_features, 0}.GenerateDMatrix(true);
   std::vector<CPUExpandEntry> candidates{{0, 0, 0.4}};
 
@@ -172,38 +316,91 @@ TEST(QuantileHist, Partitioner) {
   for (auto const& page : Xy->GetBatches<GHistIndexMatrix>({64, 0.5})) {
     bst_feature_t const split_ind = 0;
     common::ColumnMatrix column_indices;
-    column_indices.Init(page, 0.5, ctx.Threads());
+    column_indices.Init(page, 0.5, 1);
     {
       auto min_value = page.cut.MinValues()[split_ind];
       RegTree tree;
-      HistRowPartitioner partitioner{n_samples, base_rowid, ctx.Threads()};
+      HistRowPartitioner partitioner{&ctx, page, column_indices, &tree, 8, false};
+      // HistRowPartitioner partitioner{n_samples, base_rowid, 1};
       GetSplit(&tree, min_value, &candidates);
-      partitioner.UpdatePosition<false, true>(&ctx, page, column_indices, candidates, &tree);
-      ASSERT_EQ(partitioner.Size(), 3);
-      ASSERT_EQ(partitioner[1].Size(), 0);
-      ASSERT_EQ(partitioner[2].Size(), n_samples);
+
+      std::unordered_map<uint32_t, bool> smalest_nodes_mask;
+      smalest_nodes_mask[2] = true;
+      // const std::vector<GradientPair> &gpair_h;
+      const bool loss_guide = false;
+      std::unordered_map<uint32_t, int32_t> split_conditions_;
+      // split_conditions_[0] = min_value;
+      std::unordered_map<uint32_t, uint64_t> split_ind_;
+      split_ind_[0] = split_ind;
+      const size_t max_depth = 8;
+      std::vector<uint16_t> complete_trees_depth_wise_(3, 0);
+      complete_trees_depth_wise_[0] = 1;
+      complete_trees_depth_wise_[1] = 2;
+      std::unordered_map<uint32_t, uint16_t> curr_level_nodes;
+      curr_level_nodes[0] = 1;
+      curr_level_nodes[1] = 2;
+
+      partitioner.UpdatePosition<false, uint8_t, false, true>(&ctx, page, column_indices, candidates, &tree,
+                                                              0, &smalest_nodes_mask, false,
+                                                              &split_conditions_, &split_ind_,
+                                                              8, &complete_trees_depth_wise_, &curr_level_nodes);
+
+      auto const & assignments = partitioner.GetNodeAssignments();
+      std::vector<size_t> result(3, 0);
+      size_t count = 0;
+      for (auto node_id : assignments) {
+        CHECK_NE(node_id, 0);
+        CHECK_LT(node_id, 3);
+        ++result[node_id];
+        ++count;
+      }
+      bool is_cat = tree.GetSplitTypes()[0] == FeatureType::kCategorical;
+      ASSERT_EQ(count, assignments.size());
+      ASSERT_EQ(result[0], 0);
+      ASSERT_EQ(result[2], assignments.size());
     }
     {
-      HistRowPartitioner partitioner{n_samples, base_rowid, ctx.Threads()};
+      // HistRowPartitioner partitioner{n_samples, base_rowid, 1};
       auto ptr = page.cut.Ptrs()[split_ind + 1];
       float split_value = page.cut.Values().at(ptr / 2);
       RegTree tree;
+      HistRowPartitioner partitioner{&ctx, page, column_indices, &tree, 8, false};
       GetSplit(&tree, split_value, &candidates);
       auto left_nidx = tree[RegTree::kRoot].LeftChild();
-      partitioner.UpdatePosition<false, true>(&ctx, page, column_indices, candidates, &tree);
 
-      auto elem = partitioner[left_nidx];
-      ASSERT_LT(elem.Size(), n_samples);
-      ASSERT_GT(elem.Size(), 1);
-      for (auto it = elem.begin; it != elem.end; ++it) {
-        auto value = page.cut.Values().at(page.index[*it]);
-        ASSERT_LE(value, split_value);
-      }
-      auto right_nidx = tree[RegTree::kRoot].RightChild();
-      elem = partitioner[right_nidx];
-      for (auto it = elem.begin; it != elem.end; ++it) {
-        auto value = page.cut.Values().at(page.index[*it]);
-        ASSERT_GT(value, split_value) << *it;
+      std::unordered_map<uint32_t, bool> smalest_nodes_mask;
+      smalest_nodes_mask[2] = true;
+      const bool loss_guide = false;
+      std::unordered_map<uint32_t, int32_t> split_conditions_;
+      std::unordered_map<uint32_t, uint64_t> split_ind_;
+      split_ind_[0] = split_ind;
+      const size_t max_depth = 8;
+      std::vector<uint16_t> complete_trees_depth_wise_(3, 0);
+      complete_trees_depth_wise_[0] = 1;
+      complete_trees_depth_wise_[1] = 2;
+      std::unordered_map<uint32_t, uint16_t> curr_level_nodes;
+      curr_level_nodes[0] = 1;
+      curr_level_nodes[1] = 2;
+
+      partitioner.UpdatePosition<false, uint8_t, false, true>(&ctx, page, column_indices, candidates, &tree,
+                                                              0, &smalest_nodes_mask, false,
+                                                              &split_conditions_, &split_ind_,
+                                                              8, &complete_trees_depth_wise_, &curr_level_nodes);
+      auto const & assignments = partitioner.GetNodeAssignments();
+      size_t it = 0;
+      for (auto node_id : assignments) {
+        CHECK_NE(node_id, 0);
+        CHECK_LT(node_id, 3);
+        if (node_id == 1) {
+          auto value = page.cut.Values().at(page.index[it]);
+          ASSERT_LE(value, split_value);
+        } else if (node_id == 2) {
+          auto value = page.cut.Values().at(page.index[it]);
+          ASSERT_GT(value, split_value);
+        } else {
+          ASSERT_EQ(1,0);
+        }
+        ++it;
       }
     }
   }

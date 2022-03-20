@@ -34,6 +34,8 @@ struct CPUExpandEntry {
     if (param.max_depth > 0 && depth == param.max_depth) {
       return false;
     }
+    // std::cout << "#############num_leaves: " << num_leaves << std::endl;
+    // std::cout << "#############param.max_leaves: " << param.max_leaves << std::endl;
     if (param.max_leaves > 0 && num_leaves == param.max_leaves) {
       return false;
     }

@@ -9,8 +9,12 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include <algorithm>
+#include <unordered_map>
 
 #include "../common/partition_builder.h"
+#include "../common/opt_partition_builder.h"
+#include "../common/column_matrix.h"
 #include "../common/random.h"
 #include "constraints.h"
 #include "driver.h"
@@ -24,23 +28,30 @@
 namespace xgboost {
 namespace tree {
 class ApproxRowPartitioner {
-  static constexpr size_t kPartitionBlockSize = 2048;
-  common::PartitionBuilder<kPartitionBlockSize> partition_builder_;
-  common::RowSetCollection row_set_collection_;
+  common::OptPartitionBuilder opt_partition_builder_;
+  std::vector<uint16_t> node_ids_;
 
  public:
   bst_row_t base_rowid = 0;
+  bool is_loss_guided = false;
 
   static auto SearchCutValue(bst_row_t ridx, bst_feature_t fidx, GHistIndexMatrix const &index,
                              std::vector<uint32_t> const &cut_ptrs,
                              std::vector<float> const &cut_values) {
     int32_t gidx = -1;
+// <<<<<<< HEAD
+// =======
+    auto const &row_ptr = index.row_ptr;
+    // CHECK_LT(ridx, row_ptr.size());
+    auto get_rid = [&](size_t ridx) { return row_ptr[ridx]; };
+
+// >>>>>>> a20b4d1a... partition optimizations
     if (index.IsDense()) {
       // RowIdx returns the starting pos of this row
-      gidx = index.index[index.RowIdx(ridx) + fidx];
+      gidx = index.index[get_rid(ridx) + fidx];
     } else {
-      auto begin = index.RowIdx(ridx);
-      auto end = index.RowIdx(ridx + 1);
+      auto begin = get_rid(ridx);
+      auto end = get_rid(ridx + 1);
       auto f_begin = cut_ptrs[fidx];
       auto f_end = cut_ptrs[fidx + 1];
       gidx = common::BinarySearchBin(begin, end, index.index, f_begin, f_end);
@@ -52,38 +63,51 @@ class ApproxRowPartitioner {
   }
 
  public:
-  void UpdatePosition(GenericParameter const *ctx, GHistIndexMatrix const &index,
-                      std::vector<CPUExpandEntry> const &candidates, RegTree const *p_tree) {
-    size_t n_nodes = candidates.size();
-
+  void UpdatePosition(GenericParameter const *ctx,
+                      const GHistIndexMatrix & index,
+                      std::unordered_map<uint32_t, CPUExpandEntry>* candidates,
+                      RegTree const *p_tree,
+                      std::unordered_map<uint32_t, bool>* smalest_nodes_mask,
+                      std::unordered_map<uint32_t, uint16_t>* curr_level_nodes,
+                      const std::vector<uint16_t>& complete_trees_depth_wise,
+                      int depth, bool is_left_small = true) {
     auto const &cut_values = index.cut.Values();
     auto const &cut_ptrs = index.cut.Ptrs();
-
-    common::BlockedSpace2d space{n_nodes,
-                                 [&](size_t node_in_set) {
-                                   auto candidate = candidates[node_in_set];
-                                   int32_t nid = candidate.nid;
-                                   return row_set_collection_[nid].Size();
-                                 },
-                                 kPartitionBlockSize};
-    partition_builder_.Init(space.Size(), n_nodes, [&](size_t node_in_set) {
-      auto candidate = candidates[node_in_set];
-      const int32_t nid = candidate.nid;
-      const size_t size = row_set_collection_[nid].Size();
-      const size_t n_tasks = size / kPartitionBlockSize + !!(size % kPartitionBlockSize);
-      return n_tasks;
-    });
+    const size_t depth_begin = opt_partition_builder_.DepthBegin(complete_trees_depth_wise,
+                                                               p_tree, is_loss_guided, depth);
+    const size_t depth_size = opt_partition_builder_.DepthSize(index, complete_trees_depth_wise,
+                                                             p_tree, is_loss_guided, depth);
     auto node_ptr = p_tree->GetCategoriesMatrix().node_ptr;
     auto categories = p_tree->GetCategoriesMatrix().categories;
-    common::ParallelFor2d(space, ctx->Threads(), [&](size_t node_in_set, common::Range1d r) {
-      auto candidate = candidates[node_in_set];
-      auto is_cat = candidate.split.is_cat;
-      const int32_t nid = candidate.nid;
-      auto fidx = candidate.split.SplitIndex();
-      const size_t task_id = partition_builder_.GetTaskIdx(node_in_set, r.begin());
-      partition_builder_.AllocateForTask(task_id);
-      partition_builder_.PartitionRange(
-          node_in_set, nid, r, fidx, &row_set_collection_, [&](size_t row_id) {
+
+    std::vector<uint16_t> curr_level_nodes_data_vec;
+    std::vector<bool> smalest_nodes_mask_vec;
+    if (opt_partition_builder_.max_depth != 0 && false) {
+      curr_level_nodes_data_vec.resize((1 << (opt_partition_builder_.max_depth + 2)), 0);
+      smalest_nodes_mask_vec.resize((1 << (opt_partition_builder_.max_depth + 2)), 0);
+      for (size_t nid = 0; nid < (1 << (opt_partition_builder_.max_depth + 2)); ++nid) {
+        curr_level_nodes_data_vec[nid] = (*curr_level_nodes)[nid];
+        smalest_nodes_mask_vec[nid] = (*smalest_nodes_mask)[nid];
+      }
+    #pragma omp parallel num_threads(ctx->Threads())
+      {
+        size_t tid = omp_get_thread_num();
+        size_t chunck_size = common::GetBlockSize(depth_size, ctx->Threads());
+        size_t begin = chunck_size * tid;
+        size_t end = std::min(begin + chunck_size, depth_size);
+        begin += depth_begin;
+        end += depth_begin;
+        opt_partition_builder_.PartitionRange(tid, begin, end,
+                                              node_ids_.data(), [&](size_t row_id) {
+            const uint16_t check_node_id = (~(static_cast<uint16_t>(1) << 15)) &
+                                          node_ids_.data()[row_id];
+            size_t node_in_set = check_node_id;
+            // CHECK_LT(node_in_set, candidates.size());
+            auto candidate = (*candidates)[node_in_set];
+            auto is_cat = candidate.split.is_cat;
+            const int32_t nid = candidate.nid;
+            // CHECK_EQ(nid, node_in_set);
+            auto fidx = candidate.split.SplitIndex();
             auto cut_value = SearchCutValue(row_id, fidx, index, cut_ptrs, cut_values);
             if (std::isnan(cut_value)) {
               return candidate.split.DefaultLeft();
@@ -92,51 +116,122 @@ class ApproxRowPartitioner {
             auto segment = node_ptr[nidx];
             auto node_cats = categories.subspan(segment.beg, segment.size);
             bool go_left = true;
+              // CHECK_EQ(1, 0);
             if (is_cat) {
               go_left = common::Decision(node_cats, cut_value, candidate.split.DefaultLeft());
             } else {
+              // CHECK_EQ(1, 0);
               go_left = cut_value <= candidate.split.split_value;
             }
             return go_left;
-          });
-    });
-
-    partition_builder_.CalculateRowOffsets();
-    common::ParallelFor2d(space, ctx->Threads(), [&](size_t node_in_set, common::Range1d r) {
-      auto candidate = candidates[node_in_set];
-      const int32_t nid = candidate.nid;
-      partition_builder_.MergeToArray(node_in_set, r.begin(),
-                                      const_cast<size_t *>(row_set_collection_[nid].begin));
-    });
-    for (size_t i = 0; i < candidates.size(); ++i) {
-      auto const &candidate = candidates[i];
-      auto nidx = candidate.nid;
-      auto n_left = partition_builder_.GetNLeftElems(i);
-      auto n_right = partition_builder_.GetNRightElems(i);
-      CHECK_EQ(n_left + n_right, row_set_collection_[nidx].Size());
-      bst_node_t left_nidx = (*p_tree)[nidx].LeftChild();
-      bst_node_t right_nidx = (*p_tree)[nidx].RightChild();
-      row_set_collection_.AddSplit(nidx, left_nidx, right_nidx, n_left, n_right);
+          }, &smalest_nodes_mask_vec, &curr_level_nodes_data_vec, is_loss_guided, depth);
+      }
+    } else {
+    #pragma omp parallel num_threads(ctx->Threads())
+      {
+        size_t tid = omp_get_thread_num();
+        size_t chunck_size = common::GetBlockSize(depth_size, ctx->Threads());
+        size_t begin = chunck_size * tid;
+        size_t end = std::min(begin + chunck_size, depth_size);
+        begin += depth_begin;
+        end += depth_begin;
+        opt_partition_builder_.PartitionRange(tid, begin, end,
+                                              node_ids_.data(), [&](size_t row_id) {
+            const uint16_t check_node_id = (~(static_cast<uint16_t>(1) << 15)) &
+                                          node_ids_.data()[row_id];
+            size_t node_in_set = check_node_id;
+            // CHECK_LT(node_in_set, candidates.size());
+            auto candidate = (*candidates)[node_in_set];
+            auto is_cat = candidate.split.is_cat;
+            const int32_t nid = candidate.nid;
+            // CHECK_EQ(nid, node_in_set);
+            auto fidx = candidate.split.SplitIndex();
+            auto cut_value = SearchCutValue(row_id, fidx, index, cut_ptrs, cut_values);
+            if (std::isnan(cut_value)) {
+              return candidate.split.DefaultLeft();
+            }
+            bst_node_t nidx = candidate.nid;
+            auto segment = node_ptr[nidx];
+            auto node_cats = categories.subspan(segment.beg, segment.size);
+            bool go_left = true;
+              // CHECK_EQ(1, 0);
+            if (is_cat) {
+              go_left = common::Decision(node_cats, cut_value, candidate.split.DefaultLeft());
+            } else {
+              // CHECK_EQ(1, 0);
+              go_left = cut_value <= candidate.split.split_value;
+            }
+            return go_left;
+          }, smalest_nodes_mask, curr_level_nodes, is_loss_guided, depth);
+      }
+    }
+    /*Calculate threads work: UpdateRowBuffer, UpdateThreadsWork*/
+    if (depth != opt_partition_builder_.max_depth || is_loss_guided) {
+      opt_partition_builder_.UpdateRowBuffer(complete_trees_depth_wise,
+                                            p_tree, index, index.cut.Ptrs().size() - 1, depth,
+                                            node_ids_, is_loss_guided);
+      opt_partition_builder_.UpdateThreadsWork(complete_trees_depth_wise, index,
+                                              index.cut.Ptrs().size() - 1, depth, is_loss_guided,
+                                              is_left_small, true);
     }
   }
 
-  auto const &Partitions() const { return row_set_collection_; }
+  std::vector<uint16_t> &GetNodeAssignments() { return node_ids_; }
 
-  auto operator[](bst_node_t nidx) { return row_set_collection_[nidx]; }
-  auto const &operator[](bst_node_t nidx) const { return row_set_collection_[nidx]; }
+  auto const &GetThreadTasks(const size_t tid) const {
+    return opt_partition_builder_.GetSlices(tid);
+  }
 
-  size_t Size() const {
-    return std::distance(row_set_collection_.begin(), row_set_collection_.end());
+  auto const &GetOptPartition() const {
+    return opt_partition_builder_;
   }
 
   ApproxRowPartitioner() = default;
-  explicit ApproxRowPartitioner(bst_row_t num_row, bst_row_t _base_rowid)
-      : base_rowid{_base_rowid} {
-    row_set_collection_.Clear();
-    auto p_positions = row_set_collection_.Data();
-    p_positions->resize(num_row);
-    std::iota(p_positions->begin(), p_positions->end(), base_rowid);
-    row_set_collection_.Init();
+  explicit ApproxRowPartitioner(GenericParameter const *ctx,
+                                GHistIndexMatrix const &gmat,
+                                common::ColumnMatrix const &column_matrix,
+                                const RegTree* p_tree_local,
+                                size_t max_depth,
+                                bool is_loss_guide) {
+    is_loss_guided = is_loss_guide;
+
+    const size_t block_size = common::GetBlockSize(gmat.row_ptr.size() - 1, ctx->Threads());
+
+    if (is_loss_guided) {
+      opt_partition_builder_.ResizeRowsBuffer(gmat.row_ptr.size() - 1);
+      uint32_t* row_set_collection_vec_p = opt_partition_builder_.GetRowsBuffer();
+      #pragma omp parallel num_threads(ctx->Threads())
+      {
+        const size_t tid = omp_get_thread_num();
+        const size_t ibegin = tid * block_size;
+        const size_t iend = std::min(static_cast<size_t>(ibegin + block_size),
+            static_cast<size_t>(gmat.row_ptr.size() - 1));
+        for (size_t i = ibegin; i < iend; ++i) {
+          row_set_collection_vec_p[i] = i;
+        }
+      }
+    }
+    switch (column_matrix.GetTypeSize()) {
+      case common::kUint8BinsTypeSize:
+        opt_partition_builder_.Init<uint8_t>(gmat, column_matrix, p_tree_local,
+                                                ctx->Threads(), max_depth,
+                                                is_loss_guide);
+        break;
+      case common::kUint16BinsTypeSize:
+        opt_partition_builder_.Init<uint16_t>(gmat, column_matrix, p_tree_local,
+                                                ctx->Threads(), max_depth,
+                                                is_loss_guide);
+        break;
+      case common::kUint32BinsTypeSize:
+        opt_partition_builder_.Init<uint32_t>(gmat, column_matrix, p_tree_local,
+                                                ctx->Threads(), max_depth,
+                                                is_loss_guide);
+        break;
+      default:
+        CHECK(false);  // no default behavior
+    }
+    opt_partition_builder_.SetSlice(0, 0, gmat.row_ptr.size() - 1);
+    node_ids_.resize(gmat.row_ptr.size() - 1, 0);
   }
 };
 }  // namespace tree

@@ -6,10 +6,14 @@
 #include "updater_approx.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <memory>
 #include <vector>
+#include <set>
 
 #include "../common/random.h"
+#include "../common/column_matrix.h"
+
 #include "../data/gradient_index.h"
 #include "constraints.h"
 #include "driver.h"
@@ -20,10 +24,11 @@
 #include "xgboost/base.h"
 #include "xgboost/json.h"
 #include "xgboost/tree_updater.h"
+#include "algorithm"
 
 namespace xgboost {
 namespace tree {
-
+using BinIdxType = uint8_t;
 DMLC_REGISTRY_FILE_TAG(updater_approx);
 
 namespace {
@@ -55,6 +60,12 @@ class GloablApproxBuilder {
   size_t n_batches_{0};
   // Cache for histogram cuts.
   common::HistogramCuts feature_values_;
+  std::vector<common::ColumnMatrix> column_matrix_;
+  std::unordered_map<uint32_t, uint16_t> curr_level_nodes_;
+  // std::vector<int32_t> split_conditions_;
+  // std::vector<uint64_t> split_ind_;
+  std::vector<uint16_t> complete_trees_depth_wise_;
+  bool init_column_matrix{true};
 
  public:
   void InitData(DMatrix *p_fmat, common::Span<float> hess) {
@@ -64,6 +75,17 @@ class GloablApproxBuilder {
     int32_t n_total_bins = 0;
     partitioner_.clear();
     // Generating the GHistIndexMatrix is quite slow, is there a way to speed it up?
+
+    // if (init_column_matrix) {
+    //   size_t n_pages = 0;
+    //   // // // std::cout  << "### 81 p_fmat->GetBatches<GHistIndexMatrix>" << std::endl;
+    //   for (auto const &page :
+    //       p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess, evaluator_))) {
+    //       ++n_pages;
+    //   }
+    //   column_matrix_.resize(n_pages);
+    // }
+      // // // std::cout  << "### 88 p_fmat->GetBatches<GHistIndexMatrix>" << std::endl;
     for (auto const &page :
          p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess, evaluator_))) {
       if (n_total_bins == 0) {
@@ -72,12 +94,21 @@ class GloablApproxBuilder {
       } else {
         CHECK_EQ(n_total_bins, page.cut.TotalBins());
       }
-      partitioner_.emplace_back(page.Size(), page.base_rowid);
+
+      if (init_column_matrix) {
+        column_matrix_.emplace_back();
+        column_matrix_[n_batches_].Init(page, param_.sparse_threshold, ctx_->Threads());
+      }
+
+      partitioner_.emplace_back(ctx_, page, column_matrix_[n_batches_],
+                                p_last_tree_, param_.max_depth,
+                                param_.grow_policy == TrainParam::kLossGuide);
       n_batches_++;
     }
+    init_column_matrix = false;
 
-    histogram_builder_.Reset(n_total_bins, BatchSpec(param_, hess), ctx_->Threads(), n_batches_,
-                             rabit::IsDistributed());
+    histogram_builder_.Reset(n_total_bins, param_.max_bin,
+                             ctx_->Threads(), n_batches_, param_.max_depth, rabit::IsDistributed());
     monitor_->Stop(__func__);
   }
 
@@ -94,10 +125,29 @@ class GloablApproxBuilder {
     rabit::Allreduce<rabit::op::Sum, double>(reinterpret_cast<double *>(&root_sum), 2);
     std::vector<CPUExpandEntry> nodes{best};
     size_t i = 0;
-    auto space = this->ConstructHistSpace(nodes);
-    for (auto const &page : p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess))) {
-      histogram_builder_.BuildHist(i, space, page, p_tree, partitioner_.at(i).Partitions(), nodes,
-                                   {}, gpair);
+    // auto space = this->ConstructHistSpace(nodes);
+      // // // std::cout  << "### 128 p_fmat->GetBatches<GHistIndexMatrix>" << std::endl;
+    for (auto const &page :
+         p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess))) {
+      switch (page.index.GetBinTypeSize()) {
+        case common::kUint8BinsTypeSize:
+          histogram_builder_.template BuildHist<uint8_t, true> (i, page, p_tree, nodes,
+                                   {}, gpair, &(partitioner_[i].GetOptPartition()),
+                                   &(partitioner_[i].GetNodeAssignments()));
+          break;
+        case common::kUint16BinsTypeSize:
+          histogram_builder_.template BuildHist<uint16_t, true> (i, page, p_tree, nodes,
+                                   {}, gpair, &(partitioner_[i].GetOptPartition()),
+                                   &(partitioner_[i].GetNodeAssignments()));
+          break;
+        case common::kUint32BinsTypeSize:
+          histogram_builder_.template BuildHist<uint32_t, true> (i, page, p_tree, nodes,
+                                   {}, gpair, &(partitioner_[i].GetOptPartition()),
+                                   &(partitioner_[i].GetNodeAssignments()));
+          break;
+        default:
+          CHECK(false);
+      }
       i++;
     }
 
@@ -126,70 +176,85 @@ class GloablApproxBuilder {
     auto evaluator = evaluator_.Evaluator();
     auto const &tree = *p_last_tree_;
     auto const &snode = evaluator_.Stats();
+    size_t page_disp = 0;
+    size_t i = 0;
     for (auto &part : partitioner_) {
-      CHECK_EQ(part.Size(), n_nodes);
-      common::BlockedSpace2d space(
-          part.Size(), [&](size_t node) { return part[node].Size(); }, 1024);
-      common::ParallelFor2d(space, ctx_->Threads(), [&](size_t nidx, common::Range1d r) {
-        if (tree[nidx].IsLeaf()) {
-          const auto rowset = part[nidx];
-          auto const &stats = snode.at(nidx);
-          auto leaf_value =
-              evaluator.CalcWeight(nidx, param_, GradStats{stats.stats}) * param_.learning_rate;
-          for (const size_t *it = rowset.begin + r.begin(); it < rowset.begin + r.end(); ++it) {
-            out_preds(*it) += leaf_value;
+      common::BlockedSpace2d space(1, [&](size_t node) {
+        return part.GetNodeAssignments().size();
+      }, 1024);
+      common::ParallelFor2d(space, ctx_->Threads(), [&](size_t node, common::Range1d r) {
+        int tid = omp_get_thread_num();
+        for (size_t it = r.begin(); it <  r.end(); ++it) {
+          bst_float leaf_value;
+          // if a node is marked as deleted by the pruner, traverse upward to locate
+          // a non-deleted leaf.
+          int nid = (~(static_cast<uint16_t>(1) << 15)) & part.GetNodeAssignments()[it];
+          if ((*p_last_tree_)[nid].IsDeleted()) {
+            while ((*p_last_tree_)[nid].IsDeleted()) {
+              nid = (*p_last_tree_)[nid].Parent();
+            }
           }
+          CHECK((*p_last_tree_)[nid].IsLeaf());
+          leaf_value = (*p_last_tree_)[nid].LeafValue();
+          out_preds(it + page_disp) += leaf_value;
         }
       });
+      page_disp += part.GetNodeAssignments().size();
     }
     monitor_->Stop(__func__);
   }
 
-  // Construct a work space for building histogram.  Eventually we should move this
-  // function into histogram builder once hist tree method supports external memory.
-  common::BlockedSpace2d ConstructHistSpace(
-      std::vector<CPUExpandEntry> const &nodes_to_build) const {
-    std::vector<size_t> partition_size(nodes_to_build.size(), 0);
-    for (auto const &partition : partitioner_) {
-      size_t k = 0;
-      for (auto node : nodes_to_build) {
-        auto n_rows_in_node = partition.Partitions()[node.nid].Size();
-        partition_size[k] = std::max(partition_size[k], n_rows_in_node);
-        k++;
-      }
-    }
-    common::BlockedSpace2d space{nodes_to_build.size(),
-                                 [&](size_t nidx_in_set) { return partition_size[nidx_in_set]; },
-                                 256};
-    return space;
-  }
-
   void BuildHistogram(DMatrix *p_fmat, RegTree *p_tree,
                       std::vector<CPUExpandEntry> const &valid_candidates,
-                      std::vector<GradientPair> const &gpair, common::Span<float> hess) {
+                      std::vector<GradientPair> const &gpair, common::Span<float> hess,
+                      const std::vector<CPUExpandEntry>& nodes_to_build,
+                      const std::vector<CPUExpandEntry>& nodes_to_sub) {
     monitor_->Start(__func__);
-    std::vector<CPUExpandEntry> nodes_to_build;
-    std::vector<CPUExpandEntry> nodes_to_sub;
-
-    for (auto const &c : valid_candidates) {
-      auto left_nidx = (*p_tree)[c.nid].LeftChild();
-      auto right_nidx = (*p_tree)[c.nid].RightChild();
-      auto fewer_right = c.split.right_sum.GetHess() < c.split.left_sum.GetHess();
-
-      auto build_nidx = left_nidx;
-      auto subtract_nidx = right_nidx;
-      if (fewer_right) {
-        std::swap(build_nidx, subtract_nidx);
-      }
-      nodes_to_build.push_back(CPUExpandEntry{build_nidx, p_tree->GetDepth(build_nidx), {}});
-      nodes_to_sub.push_back(CPUExpandEntry{subtract_nidx, p_tree->GetDepth(subtract_nidx), {}});
-    }
 
     size_t i = 0;
-    auto space = this->ConstructHistSpace(nodes_to_build);
-    for (auto const &page : p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess))) {
-      histogram_builder_.BuildHist(i, space, page, p_tree, partitioner_.at(i).Partitions(),
-                                   nodes_to_build, nodes_to_sub, gpair);
+    // auto space = this->ConstructHistSpace(nodes_to_build);
+    std::vector<std::set<uint16_t>> merged_thread_ids_set(nodes_to_build.size());
+    std::vector<std::vector<uint16_t>> merged_thread_ids(nodes_to_build.size());
+    for (size_t nid = 0; nid < nodes_to_build.size(); ++nid) {
+      const auto &entry = nodes_to_build[nid];
+      for (size_t partition_id = 0; partition_id < partitioner_.size(); ++partition_id) {
+        for (size_t tid = 0; tid <
+             partitioner_[partition_id].GetOptPartition().
+             GetThreadIdsForNode(entry.nid).size(); ++tid) {
+          merged_thread_ids_set[nid].insert(
+            partitioner_[partition_id].GetOptPartition().
+            GetThreadIdsForNode(entry.nid)[tid]);
+        }
+      }
+      merged_thread_ids[nid].resize(merged_thread_ids_set[nid].size());
+      std::copy(merged_thread_ids_set[nid].begin(),
+                merged_thread_ids_set[nid].end(), merged_thread_ids[nid].begin());
+    }
+      // // // std::cout  << "### 232 p_fmat->GetBatches<GHistIndexMatrix>" << std::endl;
+    for (auto const &page :
+         p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess))) {
+      switch (page.index.GetBinTypeSize()) {
+        case common::kUint8BinsTypeSize:
+          histogram_builder_.template BuildHist<uint8_t, false> (i, page,
+            p_tree, nodes_to_build, nodes_to_sub,
+            gpair, &(partitioner_[i].GetOptPartition()),
+            &(partitioner_[i].GetNodeAssignments()), &merged_thread_ids);
+          break;
+        case common::kUint16BinsTypeSize:
+          histogram_builder_.template BuildHist<uint16_t, false> (i, page,
+            p_tree, nodes_to_build, nodes_to_sub,
+            gpair, &(partitioner_[i].GetOptPartition()),
+            &(partitioner_[i].GetNodeAssignments()), &merged_thread_ids);
+          break;
+        case common::kUint32BinsTypeSize:
+          histogram_builder_.template BuildHist<uint32_t, false> (i, page,
+            p_tree, nodes_to_build, nodes_to_sub,
+            gpair, &(partitioner_[i].GetOptPartition()),
+            &(partitioner_[i].GetNodeAssignments()), &merged_thread_ids);
+          break;
+        default:
+          CHECK(false);
+      }
       i++;
     }
     monitor_->Stop(__func__);
@@ -209,12 +274,18 @@ class GloablApproxBuilder {
                   DMatrix *p_fmat) {
     p_last_tree_ = p_tree;
     this->InitData(p_fmat, hess);
+    curr_level_nodes_.clear();
+    // curr_level_nodes_.resize(1 << (param_.max_depth + 2), 0);
+    complete_trees_depth_wise_.clear();
+    complete_trees_depth_wise_.emplace_back(0);
 
     Driver<CPUExpandEntry> driver(static_cast<TrainParam::TreeGrowPolicy>(param_.grow_policy));
+    // CHECK_EQ(param_.grow_policy, 0);
     auto &tree = *p_tree;
     driver.Push({this->InitRoot(p_fmat, gpair, hess, p_tree)});
     bst_node_t num_leaves = 1;
     auto expand_set = driver.Pop();
+    int depth = 0;
 
     /**
      * Note for update position
@@ -227,34 +298,95 @@ class GloablApproxBuilder {
      */
 
     while (!expand_set.empty()) {
+      complete_trees_depth_wise_.clear();
+      std::unordered_map<uint32_t, CPUExpandEntry> applied;
+      std::unordered_map<uint32_t, bool> smalest_nodes_mask;
+      depth = expand_set[0].depth + 1;
       // candidates that can be further splited.
       std::vector<CPUExpandEntry> valid_candidates;
+      bool is_applied = false;
       // candidates that can be applied.
-      std::vector<CPUExpandEntry> applied;
       for (auto const &candidate : expand_set) {
         if (!candidate.IsValid(param_, num_leaves)) {
+          curr_level_nodes_[2*candidate.nid] = static_cast<uint16_t>(1) << 15 |
+                                          static_cast<uint16_t>(candidate.nid);
+          curr_level_nodes_[2*candidate.nid + 1] = curr_level_nodes_[2*candidate.nid];
           continue;
         }
         evaluator_.ApplyTreeSplit(candidate, p_tree);
-        applied.push_back(candidate);
+        // CHECK_LT(candidate.nid, applied.size());
+        applied[candidate.nid] = candidate;
+        is_applied = true;
+        CHECK_EQ(applied[candidate.nid].nid, candidate.nid);
         num_leaves++;
         int left_child_nidx = tree[candidate.nid].LeftChild();
         if (CPUExpandEntry::ChildIsValid(param_, p_tree->GetDepth(left_child_nidx), num_leaves)) {
           valid_candidates.emplace_back(candidate);
+        } else {
+          if (param_.grow_policy == TrainParam::kLossGuide) {
+            smalest_nodes_mask[left_child_nidx] = true;
+          }
+          complete_trees_depth_wise_.push_back(left_child_nidx);
+          complete_trees_depth_wise_.push_back(tree[candidate.nid].RightChild());
+          curr_level_nodes_[2*candidate.nid] = static_cast<uint16_t>(1) << 15 |
+                                          static_cast<uint16_t>(left_child_nidx);
+          curr_level_nodes_[2*candidate.nid + 1] = static_cast<uint16_t>(1) << 15 |
+                                          static_cast<uint16_t>(tree[candidate.nid].RightChild());
         }
       }
 
+      std::vector<CPUExpandEntry> nodes_to_build;
+      std::vector<CPUExpandEntry> nodes_to_sub;
+      bool is_left_small = true;
+      for (auto const &c : valid_candidates) {
+        auto left_nidx = (*p_tree)[c.nid].LeftChild();
+        auto right_nidx = (*p_tree)[c.nid].RightChild();
+        curr_level_nodes_[2*c.nid] = left_nidx;
+        curr_level_nodes_[2*c.nid + 1] = right_nidx;
+        CHECK_NE(left_nidx, right_nidx);
+        auto fewer_right = c.split.right_sum.GetHess() < c.split.left_sum.GetHess();
+        auto build_nidx = left_nidx;
+        auto subtract_nidx = right_nidx;
+
+        if (param_.grow_policy == TrainParam::kLossGuide) {
+          smalest_nodes_mask[left_nidx] = true;
+          if (fewer_right) {
+            is_left_small = false;
+            std::swap(build_nidx, subtract_nidx);
+          }
+        } else if (fewer_right) {
+          std::swap(build_nidx, subtract_nidx);
+          smalest_nodes_mask[right_nidx] = true;
+        } else {
+          smalest_nodes_mask[left_nidx] = true;
+        }
+        complete_trees_depth_wise_.push_back(left_nidx);
+        complete_trees_depth_wise_.push_back(right_nidx);
+        nodes_to_build.push_back(CPUExpandEntry{build_nidx, p_tree->GetDepth(build_nidx), {}});
+        nodes_to_sub.push_back(CPUExpandEntry{subtract_nidx, p_tree->GetDepth(subtract_nidx), {}});
+      }
       monitor_->Start("UpdatePosition");
       size_t i = 0;
-      for (auto const &page : p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess))) {
-        partitioner_.at(i).UpdatePosition(ctx_, page, applied, p_tree);
-        i++;
+      if (is_applied) {
+      // // // std::cout  << "### 371 p_fmat->GetBatches<GHistIndexMatrix>" << std::endl;
+// // std::cout  << "UpdatePosition!" << std::endl;
+        for (auto const &page :
+             p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess))) {
+          partitioner_.at(i).UpdatePosition(ctx_, page, &applied, p_tree, &smalest_nodes_mask,
+            &curr_level_nodes_, complete_trees_depth_wise_, depth, is_left_small);
+          i++;
+        }
+// // std::cout  << "UpdatePosition finished!" << std::endl;
       }
       monitor_->Stop("UpdatePosition");
+// // std::cout  << "393!!!" << std::endl;
 
       std::vector<CPUExpandEntry> best_splits;
       if (!valid_candidates.empty()) {
-        this->BuildHistogram(p_fmat, p_tree, valid_candidates, gpair, hess);
+// // std::cout  << "BuildHistogram started!" << std::endl;
+        this->BuildHistogram(p_fmat, p_tree, valid_candidates, gpair,
+                             hess, nodes_to_build, nodes_to_sub);
+// // std::cout  << "BuildHistogram finished!" << std::endl;
         for (auto const &candidate : valid_candidates) {
           int left_child_nidx = tree[candidate.nid].LeftChild();
           int right_child_nidx = tree[candidate.nid].RightChild();
@@ -269,8 +401,10 @@ class GloablApproxBuilder {
         evaluator_.EvaluateSplits(histograms, feature_values_, ft, *p_tree, &best_splits);
         monitor_->Stop("EvaluateSplits");
       }
+// // std::cout  << "Push!" << std::endl;
       driver.Push(best_splits.begin(), best_splits.end());
       expand_set = driver.Pop();
+// // std::cout  << "Pop!" << std::endl;
     }
   }
 };
