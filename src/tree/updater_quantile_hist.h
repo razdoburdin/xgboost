@@ -184,12 +184,13 @@ class QuantileHistMaker: public TreeUpdater {
                              const GHistIndexMatrix& gmat,
                              std::unordered_map<uint32_t, int32_t>* split_conditions);
 
-    template <typename BinIdxType, bool any_missing>
+    template <typename BinIdxType, bool any_missing, bool hist_fit_to_l2>
     void InitRoot(const GHistIndexMatrix &gmat,
                   DMatrix* p_fmat,
                   RegTree *p_tree,
                   const std::vector<GradientPair> &gpair_h,
-                  int *num_leaves, std::vector<CPUExpandEntry> *expand);
+                  int *num_leaves, std::vector<CPUExpandEntry> *expand,
+                  const common::ColumnMatrix& column_matrix);
 
     // Split nodes to 2 sets depending on amount of rows in each node
     // Histograms for small nodes will be built explicitly
@@ -204,7 +205,24 @@ class QuantileHistMaker: public TreeUpdater {
                          std::vector<CPUExpandEntry>* nodes_for_apply_split,
                          std::unordered_map<uint32_t, bool>* smalest_nodes_mask_ptr, size_t depth);
 
-    template <typename BinIdxType, bool any_missing>
+    template <typename BinIdxType,
+              bool any_missing,
+              bool hist_fit_to_l2>
+    void ExpandTree(const GHistIndexMatrix& gmat,
+                    const common::ColumnMatrix& column_matrix,
+                    DMatrix* p_fmat,
+                    RegTree* p_tree,
+                    const std::vector<GradientPair>& gpair_h);
+
+    template <typename BinIdxType,
+              bool any_missing>
+    void ExpandTree(const GHistIndexMatrix& gmat,
+                    const common::ColumnMatrix& column_matrix,
+                    DMatrix* p_fmat,
+                    RegTree* p_tree,
+                    const std::vector<GradientPair>& gpair_h);
+
+    template <typename BinIdxType>
     void ExpandTree(const GHistIndexMatrix& gmat,
                     const common::ColumnMatrix& column_matrix,
                     DMatrix* p_fmat,

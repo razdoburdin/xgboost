@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <vector>
+#include <memory>
 
 #include "rabit/rabit.h"
 #include "xgboost/tree_model.h"
@@ -14,6 +15,7 @@
 #include "../../data/gradient_index.h"
 #include "../../common/hist_builder.h"
 #include "../../common/opt_partition_builder.h"
+#include "../../common/random.h"
 
 namespace xgboost {
 namespace tree {
@@ -29,7 +31,12 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
   common::ParallelGHistBuilder<GradientSumT> buffer_;
   rabit::Reducer<GradientPairT, GradientPairT::Reduce> reducer_;
   BatchParam param_;
-  int32_t n_threads_{-1};
+  int32_t n_threads_ = -1;
+  size_t total_bins_ = 0;
+  float colsample_bytree_ {1.0};
+  float colsample_bylevel_ {1.0};
+  float colsample_bynode_ {1.0};
+  std::shared_ptr<common::ColumnSampler> column_sampler_;
   size_t n_batches_{0};
   // Whether XGBoost is running in distributed environment.
   bool is_distributed_{false};
@@ -46,6 +53,8 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
 
   void Reset(uint32_t total_bins, int32_t max_bin_per_feat, int32_t n_threads, size_t n_batches,
              int32_t max_depth,
+             float colsample_bytree, float colsample_bylevel, float colsample_bynode,
+             std::shared_ptr<common::ColumnSampler> column_sampler,
              bool is_distributed = rabit::IsDistributed()) {
     CHECK_GE(n_threads, 1);
     n_threads_ = n_threads;
@@ -56,36 +65,122 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
     buffer_.AllocateHistBufer(max_depth, n_threads);
     builder_ = common::GHistBuilder<GradientSumT>();
     is_distributed_ = is_distributed;
+    colsample_bytree_ = colsample_bytree;
+    colsample_bylevel_ = colsample_bylevel;
+    colsample_bynode_ = colsample_bynode;
+    column_sampler_ = column_sampler;
+    total_bins_ = total_bins;
   }
 
-  template <typename BinIdxType, bool any_missing, bool is_root, typename PartitionType>
+ template<typename BinIdxType, bool any_missing, bool hist_fit_to_l2, typename BuildHistFunc>
+  BuildHistFunc GetBuildHistSrategy(int depth, const bool any_sparse_column) {
+    // now column sampling supported only for missings due to fid_least_bins_ set
+    if (any_missing
+        && (colsample_bytree_ < 0.1 || colsample_bylevel_ < 0.1)
+        && !any_sparse_column
+        && colsample_bynode_ == 1) {
+      if (depth == 0) {
+        return common::BuildHist<GradientSumT, BinIdxType,
+                               /*read_by_column*/   true,
+                               /*feature_blocking*/ false,
+                               /*is_root*/          true,
+                               /*any_missing*/      any_missing,
+                               /*column_sampling*/  true>;
+      } else {
+        return common::BuildHist<GradientSumT, BinIdxType,
+                               /*read_by_column*/   true,
+                               /*feature_blocking*/ false,
+                               /*is_root*/          false,
+                               /*any_missing*/      any_missing,
+                               /*column_sampling*/  true>;
+      }
+    } else {
+      if (depth == 0) {
+        return common::BuildHist<GradientSumT, BinIdxType,
+                               /*read_by_column*/   !hist_fit_to_l2 && !any_missing,
+                               /*feature_blocking*/ false,
+                               /*is_root*/          true,
+                               /*any_missing*/      any_missing,
+                               /*column_sampling*/  false>;
+      } else {
+        if (depth == 1) {  // make 1st depth 33% faster for hist not fitted to L2 cache
+          return common::BuildHist<GradientSumT, BinIdxType,
+                                 /*read_by_column*/   !hist_fit_to_l2 && !any_missing,
+                                 /*feature_blocking*/ false,
+                                 /*is_root*/          false,
+                                 /*any_missing*/      any_missing,
+                                 /*column_sampling*/  false>;
+        } else {
+          return common::BuildHist<GradientSumT, BinIdxType,
+                                 /*read_by_column*/   false,
+                                 /*feature_blocking*/ !hist_fit_to_l2 && !any_missing,
+                                 /*is_root*/          false,
+                                 /*any_missing*/      any_missing,
+                                 /*column_sampling*/  false>;
+        }
+      }
+    }
+  }
+
+  template <typename BinIdxType, bool any_missing, bool hist_fit_to_l2, typename PartitionType>
   void
   BuildLocalHistograms(size_t page_idx,
                        GHistIndexMatrix const &gidx,
-                       std::vector<ExpandEntry> nodes_for_explicit_hist_build,
                        const std::vector<GradientPair> &gpair_h,
+                       int depth,
+                       const common::ColumnMatrix& column_matrix,
                        const PartitionType* p_opt_partition_builder,
                        // template?
                        std::vector<uint16_t>* p_node_ids) {
+    using BuildHistFunc = void(*)(const std::vector<GradientPair>&,
+                                  const uint32_t*,
+                                  const uint32_t,
+                                  const uint32_t,
+                                  const GHistIndexMatrix&,
+                                  const size_t,
+                                  const BinIdxType*, uint16_t*,
+                                  const std::vector<std::vector<uint64_t>>&,
+                                  const common::ColumnMatrix&,
+                                  const uint16_t*, const std::vector<int>&);
+    BuildHistFunc build_hist_func = GetBuildHistSrategy<BinIdxType,
+                                                        any_missing,
+                                                        hist_fit_to_l2,
+                                                        BuildHistFunc>(
+                                                        depth, column_matrix.AnySparseColumn());
+
     const PartitionType& opt_partition_builder = *p_opt_partition_builder;
     std::vector<uint16_t>& node_ids = *p_node_ids;
     int nthreads = this->n_threads_;
-
+    std::vector<int> fids;
+    // now column sampling supported only for missings due to fid_least_bins_ set
+    if (any_missing
+        && (colsample_bytree_ < 0.1 || colsample_bylevel_ < 0.1)
+        && !column_matrix.AnySparseColumn()
+        && colsample_bynode_ == 1) {
+      const size_t n_sampled_features = column_sampler_->GetFeatureSet(depth)->Size();
+      fids.resize(n_sampled_features, 0);
+      for (size_t i = 0; i < n_sampled_features; ++i) {
+        fids[i] = column_sampler_->GetFeatureSet(depth)->ConstHostVector()[i];
+      }
+    }
 // for(size_t tid = 0; tid < nthreads; ++tid)
+    const size_t n_features = gidx.cut.Ptrs().size() - 1;
+    const uint32_t* offsets = gidx.index.Offset();
     #pragma omp parallel num_threads(nthreads)
     {
       size_t tid = omp_get_thread_num();
       const BinIdxType* numa = gidx.index.data<BinIdxType>();
       const std::vector<common::Slice>& local_slices =
         opt_partition_builder.GetSlices(tid);
-      buffer_.AllocateHistForLocalThread(
-        opt_partition_builder.GetNodes(tid), tid);
+      buffer_.template AllocateHistForLocalThread<any_missing>(
+        opt_partition_builder.node_id_for_threads[tid], tid,
+        n_features, offsets);
       for (const common::Slice& slice : local_slices) {
         const uint32_t* rows = slice.addr;
-        builder_.template BuildHist<BinIdxType, any_missing, is_root>(
-          gpair_h, rows, slice.b, slice.e, gidx, numa, node_ids.data(),
-          &buffer_.histograms_buffer[tid], buffer_.local_threads_mapping[tid].data(),
-          opt_partition_builder.base_rowid);
+        build_hist_func(gpair_h, rows, slice.b, slice.e, gidx,
+                        n_features, numa, node_ids.data(),
+                        buffer_.hists_addr[tid], column_matrix,
+                        buffer_.local_threads_mapping[tid].data(), fids);
       }
     }
   }
@@ -107,12 +202,13 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
   }
 
   /** Main entry point of this class, build histogram for tree nodes. */
-  template <typename BinIdxType, bool is_root, typename PartitionType>
+  template <typename BinIdxType, bool any_missing, bool hist_fit_to_l2, typename PartitionType>
   void BuildHist(size_t page_id, GHistIndexMatrix const &gidx,
                  RegTree *p_tree,
+                 std::vector<GradientPair> const &gpair,
+                 int depth, const common::ColumnMatrix& column_matrix,
                  std::vector<ExpandEntry> const &nodes_for_explicit_hist_build,
                  std::vector<ExpandEntry> const &nodes_for_subtraction_trick,
-                 std::vector<GradientPair> const &gpair,
                  const PartitionType* p_opt_partition_builder,
                  std::vector<uint16_t>* p_node_ids,
                  const std::vector<std::vector<uint16_t>>* merged_thread_ids = nullptr) {
@@ -123,14 +219,18 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
                         nodes_for_explicit_hist_build,
                         nodes_for_subtraction_trick, p_tree);
     }
-    if (gidx.IsDense()) {
-      this->BuildLocalHistograms<BinIdxType, false, is_root>(page_id, gidx,
-                                        nodes_for_explicit_hist_build,
-                                        gpair, p_opt_partition_builder, p_node_ids);
+    if (!any_missing || (any_missing && (colsample_bytree_ < 0.1 ||
+        colsample_bylevel_ < 0.1) && !column_matrix.AnySparseColumn() &&
+        colsample_bynode_ == 1)) {
+      BuildLocalHistograms<BinIdxType,
+                           any_missing, hist_fit_to_l2>(page_id, gidx, gpair, depth, column_matrix,
+                                                        p_opt_partition_builder,
+                                                        p_node_ids);
     } else {
-      this->BuildLocalHistograms<uint32_t, true, is_root>(page_id, gidx,
-                                       nodes_for_explicit_hist_build,
-                                       gpair, p_opt_partition_builder, p_node_ids);
+      BuildLocalHistograms<uint32_t,
+                           any_missing, hist_fit_to_l2>(page_id, gidx, gpair, depth, column_matrix,
+                                                        p_opt_partition_builder,
+                                                        p_node_ids);
     }
 
     CHECK_GE(n_batches_, 1);

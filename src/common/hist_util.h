@@ -467,6 +467,7 @@ class ParallelGHistBuilder {
  public:
   using GHistRowT = GHistRow<GradientSumT>;
   std::vector<std::vector<std::vector<GradientSumT>>> histograms_buffer;
+  std::vector<std::vector<std::vector<uint64_t>>> hists_addr;
   std::vector<std::vector<uint16_t>> local_threads_mapping;
 
   std::vector<std::vector<std::vector<GradientSumT>>>* GetHistBuffer() {
@@ -489,20 +490,24 @@ class ParallelGHistBuilder {
     max_depth_ = std::max(max_depth, 1);
     if (histograms_buffer.size() == 0) {
       histograms_buffer.resize(n_threads);
+      hists_addr.resize(n_threads);
       local_threads_mapping.resize(n_threads);
       #pragma omp parallel num_threads(n_threads)
       {
         const size_t tid = omp_get_thread_num();
         local_threads_mapping[tid].resize((1 << (max_depth_ + 2)));
         histograms_buffer[tid].resize((1 << (max_depth_ - 1)));
+        hists_addr[tid].resize((1 << (max_depth_ - 1)));
         // local_threads_mapping[tid].resize((1 << (max_depth_ + 15)));
         // histograms_buffer[tid].resize((1 << (max_depth_ - 1 + 15)));
       }
     }
   }
 
+  template <bool any_missing>
   void AllocateHistForLocalThread(const std::vector<uint16_t>& node_id_for_local_thread,
-                                  const size_t tid) {
+                                  const size_t tid, const size_t n_features,
+                                  const uint32_t* offsets) {
     size_t max_nid = 0;
     const size_t local_thread_size = node_id_for_local_thread.size();
     for (size_t nid = 0; nid < local_thread_size; ++nid) {
@@ -521,6 +526,14 @@ class ParallelGHistBuilder {
       local_threads_mapping[tid][node_id] = nid;
       if (histograms_buffer[tid][nid].size() == 0) {
         histograms_buffer[tid][nid].resize(nbins_*2, 0);
+        hists_addr[tid][nid].resize(n_features, 0);
+        uint64_t* p_hists_addr = hists_addr[tid][nid].data();
+        for (size_t i = 0; i < n_features; ++i) {
+          p_hists_addr[i] = !any_missing ?
+            reinterpret_cast<uint64_t>(histograms_buffer[tid][nid].data()) +
+            sizeof(GradientSumT)*2*static_cast<uint64_t>(offsets[i]) :
+            reinterpret_cast<uint64_t>(histograms_buffer[tid][nid].data());
+        }
       }
     }
   }

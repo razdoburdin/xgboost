@@ -65,6 +65,7 @@ class GloablApproxBuilder {
   std::unordered_map<uint32_t, int32_t> split_conditions_;
   std::unordered_map<uint32_t, uint64_t> split_ind_;
   std::vector<uint16_t> complete_trees_depth_wise_;
+
   bool init_column_matrix{true};
 
  public:
@@ -97,9 +98,76 @@ class GloablApproxBuilder {
     init_column_matrix = false;
 
     histogram_builder_.Reset(n_total_bins, param_.max_bin,
-                             ctx_->Threads(), n_batches_, param_.max_depth, rabit::IsDistributed());
+                             ctx_->Threads(), n_batches_, param_.max_depth, 
+                             param_.colsample_bytree, param_.colsample_bylevel,
+                             param_.colsample_bynode, col_sampler_, rabit::IsDistributed());
     monitor_->Stop(__func__);
   }
+
+  void BuildHist(size_t i, GHistIndexMatrix const &page, RegTree *p_tree, 
+                 std::vector<GradientPair> const &gpair, int depth,
+                 std::vector<CPUExpandEntry> const & nodes_for_explicit_hist_build,
+                 std::vector<CPUExpandEntry> const & nodes_for_subtraction_trick) {
+    switch (page.index.GetBinTypeSize()) {
+        case common::kUint8BinsTypeSize:
+          this->template BuildHist<uint8_t>(i, page, p_tree, gpair, depth,
+                                            nodes_for_explicit_hist_build,
+                                            nodes_for_subtraction_trick);
+          break;
+        case common::kUint16BinsTypeSize:
+          this->template BuildHist<uint16_t>(i, page, p_tree, gpair, depth,
+                                            nodes_for_explicit_hist_build,
+                                            nodes_for_subtraction_trick);
+          break;
+        case common::kUint32BinsTypeSize:
+          this->template BuildHist<uint32_t>(i, page, p_tree, gpair, depth,
+                                            nodes_for_explicit_hist_build,
+                                            nodes_for_subtraction_trick);
+          break;
+        default:
+          CHECK(false);
+      }
+  }
+
+  template <typename BinIdxType>
+  void BuildHist(size_t i, GHistIndexMatrix const &page, RegTree *p_tree, 
+                 std::vector<GradientPair> const &gpair, int depth,
+                 std::vector<CPUExpandEntry> const & nodes_for_explicit_hist_build,
+                 std::vector<CPUExpandEntry> const & nodes_for_subtraction_trick) {
+    if (column_matrix_[i].AnyMissing()) {
+      this->template BuildHist<uint8_t, true>(i, page, p_tree, gpair, depth,
+                                              nodes_for_explicit_hist_build,
+                                              nodes_for_subtraction_trick);
+    } else {
+      this->template BuildHist<uint8_t, false>(i, page, p_tree, gpair, depth,
+                                               nodes_for_explicit_hist_build,
+                                               nodes_for_subtraction_trick);;
+    }
+  }
+
+  template <typename BinIdxType, bool any_missing>
+  void BuildHist(size_t i, GHistIndexMatrix const &page, RegTree *p_tree, 
+                 std::vector<GradientPair> const &gpair, int depth,
+                 std::vector<CPUExpandEntry> const & nodes_for_explicit_hist_build,
+                 std::vector<CPUExpandEntry> const & nodes_for_subtraction_trick) {
+    const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*page.cut.Ptrs().back();
+    if (hist_fit_to_l2) {
+      histogram_builder_.template BuildHist<BinIdxType, any_missing, true> (i, page, p_tree, gpair, depth, 
+                                                                            column_matrix_[i],
+                                                                            nodes_for_explicit_hist_build,
+                                                                            nodes_for_subtraction_trick,
+                                                                            &(partitioner_[i].GetOptPartition()),
+                                                                            &(partitioner_[i].GetNodeAssignments()));
+    } else {
+      histogram_builder_.template BuildHist<BinIdxType, any_missing, false> (i, page, p_tree, gpair, depth, 
+                                                                            column_matrix_[i],
+                                                                            nodes_for_explicit_hist_build,
+                                                                            nodes_for_subtraction_trick,
+                                                                            &(partitioner_[i].GetOptPartition()),
+                                                                            &(partitioner_[i].GetNodeAssignments()));
+    }
+  }
+
 
   CPUExpandEntry InitRoot(DMatrix *p_fmat, std::vector<GradientPair> const &gpair,
                           common::Span<float> hess, RegTree *p_tree) {
@@ -113,28 +181,11 @@ class GloablApproxBuilder {
     }
     rabit::Allreduce<rabit::op::Sum, double>(reinterpret_cast<double *>(&root_sum), 2);
     std::vector<CPUExpandEntry> nodes{best};
+
     size_t i = 0;
     for (auto const &page :
          p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess))) {
-      switch (page.index.GetBinTypeSize()) {
-        case common::kUint8BinsTypeSize:
-          histogram_builder_.template BuildHist<uint8_t, true> (i, page, p_tree, nodes,
-                                   {}, gpair, &(partitioner_[i].GetOptPartition()),
-                                   &(partitioner_[i].GetNodeAssignments()));
-          break;
-        case common::kUint16BinsTypeSize:
-          histogram_builder_.template BuildHist<uint16_t, true> (i, page, p_tree, nodes,
-                                   {}, gpair, &(partitioner_[i].GetOptPartition()),
-                                   &(partitioner_[i].GetNodeAssignments()));
-          break;
-        case common::kUint32BinsTypeSize:
-          histogram_builder_.template BuildHist<uint32_t, true> (i, page, p_tree, nodes,
-                                   {}, gpair, &(partitioner_[i].GetOptPartition()),
-                                   &(partitioner_[i].GetNodeAssignments()));
-          break;
-        default:
-          CHECK(false);
-      }
+      this->BuildHist(i, page, p_tree, gpair, 0, nodes, {});
       i++;
     }
 
@@ -192,6 +243,7 @@ class GloablApproxBuilder {
   }
 
   void BuildHistogram(DMatrix *p_fmat, RegTree *p_tree,
+                      int depth,
                       std::vector<CPUExpandEntry> const &valid_candidates,
                       std::vector<GradientPair> const &gpair, common::Span<float> hess,
                       const std::vector<CPUExpandEntry>& nodes_to_build,
@@ -218,28 +270,7 @@ class GloablApproxBuilder {
     }
     for (auto const &page :
          p_fmat->GetBatches<GHistIndexMatrix>(BatchSpec(param_, hess))) {
-      switch (page.index.GetBinTypeSize()) {
-        case common::kUint8BinsTypeSize:
-          histogram_builder_.template BuildHist<uint8_t, false> (i, page,
-            p_tree, nodes_to_build, nodes_to_sub,
-            gpair, &(partitioner_[i].GetOptPartition()),
-            &(partitioner_[i].GetNodeAssignments()), &merged_thread_ids);
-          break;
-        case common::kUint16BinsTypeSize:
-          histogram_builder_.template BuildHist<uint16_t, false> (i, page,
-            p_tree, nodes_to_build, nodes_to_sub,
-            gpair, &(partitioner_[i].GetOptPartition()),
-            &(partitioner_[i].GetNodeAssignments()), &merged_thread_ids);
-          break;
-        case common::kUint32BinsTypeSize:
-          histogram_builder_.template BuildHist<uint32_t, false> (i, page,
-            p_tree, nodes_to_build, nodes_to_sub,
-            gpair, &(partitioner_[i].GetOptPartition()),
-            &(partitioner_[i].GetNodeAssignments()), &merged_thread_ids);
-          break;
-        default:
-          CHECK(false);
-      }
+      this->BuildHist(i, page, p_tree, gpair, depth, nodes_to_build, nodes_to_sub);
       i++;
     }
     monitor_->Stop(__func__);
@@ -729,7 +760,7 @@ class GloablApproxBuilder {
 
       std::vector<CPUExpandEntry> best_splits;
       if (!valid_candidates.empty()) {
-        this->BuildHistogram(p_fmat, p_tree, valid_candidates, gpair,
+        this->BuildHistogram(p_fmat, p_tree, depth, valid_candidates, gpair,
                              hess, nodes_to_build, nodes_to_sub);
         for (auto const &candidate : valid_candidates) {
           int left_child_nidx = tree[candidate.nid].LeftChild();

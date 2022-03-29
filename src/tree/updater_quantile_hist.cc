@@ -115,11 +115,12 @@ bool QuantileHistMaker::UpdatePredictionCache(
 
 
 template <typename GradientSumT>
-template <typename BinIdxType, bool any_missing>
+template <typename BinIdxType, bool any_missing, bool hist_fit_to_l2>
 void QuantileHistMaker::Builder<GradientSumT>::InitRoot(
     const GHistIndexMatrix &gmat,
     DMatrix *p_fmat, RegTree *p_tree, const std::vector<GradientPair> &gpair_h,
-    int *num_leaves, std::vector<CPUExpandEntry> *expand) {
+    int *num_leaves, std::vector<CPUExpandEntry> *expand,
+    const common::ColumnMatrix& column_matrix) {
   CPUExpandEntry node(RegTree::kRoot, p_tree->GetDepth(0), 0.0f);
 
   nodes_for_explicit_hist_build_.clear();
@@ -130,11 +131,14 @@ void QuantileHistMaker::Builder<GradientSumT>::InitRoot(
   for (auto const &gidx : p_fmat->GetBatches<GHistIndexMatrix>(HistBatch(param_))) {
       RowPartitioner &partitioner = this->partitioner_.front();
 
-    this->histogram_builder_->template BuildHist<BinIdxType, true>(
-        page_id, gidx, p_tree,
-        nodes_for_explicit_hist_build_, nodes_for_subtraction_trick_, gpair_h,
-        &(partitioner.GetOptPartition()),
-        &(partitioner.GetNodeAssignments()));
+    this->histogram_builder_->template BuildHist<BinIdxType,
+                                                 any_missing,
+                                                 hist_fit_to_l2>(page_id, gmat, p_tree, gpair_h,
+                                                                 0, column_matrix,
+                                                                 nodes_for_explicit_hist_build_,
+                                                                 nodes_for_subtraction_trick_,
+                                                                 &(partitioner.GetOptPartition()),
+                                                                 &(partitioner.GetNodeAssignments()));
     ++page_id;
   }
 
@@ -305,7 +309,9 @@ void QuantileHistMaker::Builder<GradientSumT>::SplitSiblings(
 }
 
 template<typename GradientSumT>
-template <typename BinIdxType, bool any_missing>
+template <typename BinIdxType,
+          bool any_missing,
+          bool hist_fit_to_l2>
 void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
     const GHistIndexMatrix& gmat,
     const common::ColumnMatrix& column_matrix,
@@ -330,7 +336,7 @@ void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
                        TrainParam::kDepthWise ? false : true;
   curr_level_nodes_.clear();
 
-  InitRoot<BinIdxType, any_missing>(gmat, p_fmat, p_tree, gpair_h, &num_leaves, &expand);
+  InitRoot<BinIdxType, any_missing, hist_fit_to_l2>(gmat, p_fmat, p_tree, gpair_h, &num_leaves, &expand, column_matrix);
   driver.Push(expand[0]);
   complete_trees_depth_wise_.clear();
   complete_trees_depth_wise_.emplace_back(0);
@@ -405,10 +411,14 @@ void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
         RowPartitioner &partitioner = this->partitioner_.front();
         builder_monitor_.Start("BuildHist");
         for (auto const &gidx : p_fmat->GetBatches<GHistIndexMatrix>(HistBatch(param_))) {
-          this->histogram_builder_->template BuildHist<BinIdxType, false>(
-              i, gidx, p_tree,
-              nodes_for_explicit_hist_build_, nodes_for_subtraction_trick_,
-              gpair_h, &(partitioner.GetOptPartition()), &(partitioner.GetNodeAssignments()));
+          this->histogram_builder_->template BuildHist<BinIdxType,
+                                                       any_missing,
+                                                       hist_fit_to_l2>(i, gidx, p_tree, gpair_h,
+                                                                       depth, column_matrix, 
+                                                                       nodes_for_explicit_hist_build_,
+                                                                       nodes_for_subtraction_trick_,
+                                                                       &(partitioner.GetOptPartition()),
+                                                                       &(partitioner.GetNodeAssignments()));
           ++i;
         }
         builder_monitor_.Stop("BuildHist");
@@ -429,6 +439,38 @@ void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
   builder_monitor_.Stop("ExpandTree");
 }
 
+template<typename GradientSumT>
+template <typename BinIdxType,
+          bool any_missing>
+void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
+    const GHistIndexMatrix& gmat,
+    const common::ColumnMatrix& column_matrix,
+    DMatrix* p_fmat,
+    RegTree* p_tree,
+    const std::vector<GradientPair>& gpair_h) {
+  const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*gmat.cut.Ptrs().back();
+  if (hist_fit_to_l2) {
+    this-> template ExpandTree<BinIdxType, any_missing, true>(gmat, column_matrix, p_fmat, p_tree, gpair_h);
+  } else {
+    this-> template ExpandTree<BinIdxType, any_missing, false>(gmat, column_matrix, p_fmat, p_tree, gpair_h);
+  }
+}
+
+template<typename GradientSumT>
+template <typename BinIdxType>
+void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
+    const GHistIndexMatrix& gmat,
+    const common::ColumnMatrix& column_matrix,
+    DMatrix* p_fmat,
+    RegTree* p_tree,
+    const std::vector<GradientPair>& gpair_h) {
+  if (column_matrix.AnyMissing()) {
+    this-> template ExpandTree<BinIdxType, true>(gmat, column_matrix, p_fmat, p_tree, gpair_h);
+  } else {
+    this-> template ExpandTree<BinIdxType, false>(gmat, column_matrix, p_fmat, p_tree, gpair_h);
+  }
+}
+
 template <typename GradientSumT>
 void QuantileHistMaker::Builder<GradientSumT>::Update(
     const GHistIndexMatrix &gmat,
@@ -446,30 +488,19 @@ void QuantileHistMaker::Builder<GradientSumT>::Update(
   }
   p_last_fmat_mutable_ = p_fmat;
 
+  CHECK_EQ(!column_matrix.AnyMissing(), gmat.IsDense());
   switch (column_matrix.GetTypeSize()) {
     case common::kUint8BinsTypeSize:
       this->InitData<uint8_t>(gmat, column_matrix, *p_fmat, *p_tree, gpair_ptr);
-      if (column_matrix.AnyMissing()) {
-        ExpandTree<uint8_t, true>(gmat, column_matrix, p_fmat, p_tree, *gpair_ptr);
-      } else {
-        ExpandTree<uint8_t, false>(gmat, column_matrix, p_fmat, p_tree, *gpair_ptr);
-      }
+      ExpandTree<uint8_t>(gmat, column_matrix, p_fmat, p_tree, *gpair_ptr);
       break;
     case common::kUint16BinsTypeSize:
       this->InitData<uint16_t>(gmat, column_matrix, *p_fmat, *p_tree, gpair_ptr);
-      if (column_matrix.AnyMissing()) {
-        ExpandTree<uint16_t, true>(gmat, column_matrix, p_fmat, p_tree, *gpair_ptr);
-      } else {
-        ExpandTree<uint16_t, false>(gmat, column_matrix, p_fmat, p_tree, *gpair_ptr);
-      }
+      ExpandTree<uint16_t>(gmat, column_matrix, p_fmat, p_tree, *gpair_ptr);
       break;
     case common::kUint32BinsTypeSize:
       this->InitData<uint32_t>(gmat, column_matrix, *p_fmat, *p_tree, gpair_ptr);
-      if (column_matrix.AnyMissing()) {
-        ExpandTree<uint32_t, true>(gmat, column_matrix, p_fmat, p_tree, *gpair_ptr);
-      } else {
-        ExpandTree<uint32_t, false>(gmat, column_matrix, p_fmat, p_tree, *gpair_ptr);
-      }
+      ExpandTree<uint32_t>(gmat, column_matrix, p_fmat, p_tree, *gpair_ptr);
       break;
     default:
       CHECK(false);  // no default behavior
@@ -575,7 +606,10 @@ void QuantileHistMaker::Builder<GradientSumT>::InitData(const GHistIndexMatrix& 
     dmlc::OMPException exc;
     exc.Rethrow();
     this->histogram_builder_->Reset(nbins, param_.max_bin, this->ctx_->Threads(), 1,
-                                    param_.max_depth, rabit::IsDistributed());
+                                    param_.max_depth,
+                                    param_.colsample_bytree, param_.colsample_bylevel,
+                                    param_.colsample_bynode, column_sampler_,
+                                    rabit::IsDistributed());
 
     if (param_.subsample < 1.0f) {
       CHECK_EQ(param_.sampling_method, TrainParam::kUniform)

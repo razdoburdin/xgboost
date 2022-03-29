@@ -150,6 +150,10 @@ class ColumnMatrix {
     return index_.data();
   }
 
+  bool AnySparseColumn() const {
+      return any_sparse_column_;
+  }
+
   // construct column matrix from GHistIndexMatrix
   inline void Init(const GHistIndexMatrix& gmat, double sparse_threshold, int32_t n_threads) {
     const int32_t nfeature = static_cast<int32_t>(gmat.cut.Ptrs().size() - 1);
@@ -165,11 +169,13 @@ class ColumnMatrix {
     bool all_dense = gmat.IsDense();
     gmat.GetFeatureCounts(&feature_counts_[0]);
     // classify features
+    any_sparse_column_ = false;
     for (int32_t fid = 0; fid < nfeature; ++fid) {
       if (static_cast<double>(feature_counts_[fid])
                  < sparse_threshold * nrow) {
         type_[fid] = kSparseColumn;
         all_dense = false;
+        any_sparse_column_ = true;
       } else {
         type_[fid] = kDenseColumn;
       }
@@ -416,6 +422,7 @@ class ColumnMatrix {
   std::vector<bool> missing_flags_;
   BinTypeSize bins_type_size_;
   bool any_missing_;
+  bool any_sparse_column_ = false;
   common::HistogramCuts cut_;
 };
 }  // namespace common
