@@ -138,7 +138,8 @@ void ColWiseBuildHist(const std::vector<GradientPair>& gpair,
         // The hint with pgh_t helps the compiler to use more effective processor instructions.
         const GradientSumT pgh_t[2] = {pgh[idx_gh], pgh[idx_gh + 1]};
         GradientSumT* hist_local = reinterpret_cast<GradientSumT*> (
-          offsets64[local_cid] + (static_cast<size_t>(gr_index_local[row_id])) * 2 * sizeof(GradientSumT));
+          offsets64[local_cid] + (static_cast<size_t>(gr_index_local[row_id])) * 2 * sizeof(GradientSumT) + 
+                                 (any_missing ? base_idx * 2 * sizeof(GradientSumT) : 0));
         *(hist_local)     +=  pgh_t[0];
         *(hist_local + 1) +=  pgh_t[1];
       }
