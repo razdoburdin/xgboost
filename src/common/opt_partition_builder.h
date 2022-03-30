@@ -64,6 +64,7 @@ class OptPartitionBuilder {
   uint32_t summ_size = 0;
   uint32_t summ_size_remain = 0;
   uint32_t max_depth = 0;
+  static constexpr double adhoc_l2_size = 1024 * 1024 * 0.8;
 
   template<typename BinIdxType>
   std::vector<std::shared_ptr<const Column<BinIdxType> >>& GetColumnsRef() {
@@ -577,7 +578,7 @@ class OptPartitionBuilder {
       summ_size += vec_rows[i][0];
     }
 
-    const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*gmat.cut.Ptrs().back();
+    const bool hist_fit_to_l2 = adhoc_l2_size > 16*gmat.cut.Ptrs().back();
     const size_t n_bins = gmat.cut.Ptrs().back();
     threads_id_for_nodes.clear();
     nodes_count.clear();
@@ -663,7 +664,7 @@ class OptPartitionBuilder {
     const size_t n_bins = gmat.cut.Ptrs().back();
     threads_addr.clear();
     threads_addr.resize(n_threads);
-    const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*gmat.cut.Ptrs().back();
+    const bool hist_fit_to_l2 = adhoc_l2_size > 16*gmat.cut.Ptrs().back();
     if (is_loss_guided) {
       const int cleft = compleate_trees_depth_wise[0];
       const int cright = compleate_trees_depth_wise[1];

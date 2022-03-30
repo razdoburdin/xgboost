@@ -448,7 +448,7 @@ void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
     DMatrix* p_fmat,
     RegTree* p_tree,
     const std::vector<GradientPair>& gpair_h) {
-  const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*gmat.cut.Ptrs().back();
+  const bool hist_fit_to_l2 = partitioner_.front().GetOptPartition().adhoc_l2_size > 16*gmat.cut.Ptrs().back();
   if (hist_fit_to_l2) {
     this-> template ExpandTree<BinIdxType, any_missing, true>(gmat, column_matrix, p_fmat, p_tree, gpair_h);
   } else {

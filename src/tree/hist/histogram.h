@@ -27,7 +27,6 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
   common::HistCollection<GradientSumT> hist_;
   /*! \brief culmulative local parent histogram of gradients. */
   common::HistCollection<GradientSumT> hist_local_worker_;
-  common::GHistBuilder<GradientSumT> builder_;
   common::ParallelGHistBuilder<GradientSumT> buffer_;
   rabit::Reducer<GradientPairT, GradientPairT::Reduce> reducer_;
   BatchParam param_;
@@ -63,7 +62,6 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
     hist_local_worker_.Init(total_bins);
     buffer_.Init(total_bins);
     buffer_.AllocateHistBufer(max_depth, n_threads);
-    builder_ = common::GHistBuilder<GradientSumT>();
     is_distributed_ = is_distributed;
     colsample_bytree_ = colsample_bytree;
     colsample_bylevel_ = colsample_bylevel;
@@ -72,57 +70,50 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
     total_bins_ = total_bins;
   }
 
- template<typename BinIdxType, bool any_missing, bool hist_fit_to_l2, typename BuildHistFunc>
-  BuildHistFunc GetBuildHistSrategy(int depth, const bool any_sparse_column) {
-    // now column sampling supported only for missings due to fid_least_bins_ set
-    if (any_missing
-        && (colsample_bytree_ < 0.1 || colsample_bylevel_ < 0.1)
-        && !any_sparse_column
-        && colsample_bynode_ == 1) {
-      if (depth == 0) {
-        return common::BuildHist<GradientSumT, BinIdxType,
-                               /*read_by_column*/   true,
-                               /*feature_blocking*/ false,
-                               /*is_root*/          true,
-                               /*any_missing*/      any_missing,
-                               /*column_sampling*/  true>;
-      } else {
-        return common::BuildHist<GradientSumT, BinIdxType,
-                               /*read_by_column*/   true,
-                               /*feature_blocking*/ false,
-                               /*is_root*/          false,
-                               /*any_missing*/      any_missing,
-                               /*column_sampling*/  true>;
-      }
+  template <typename BinIdxType, bool read_by_column, bool feature_blocking, bool is_root, bool any_missing, bool column_sampling>
+  void BuildLocalHistogramsForSlice(const std::vector<GradientPair> &gpair_h,
+                                    GHistIndexMatrix const &gidx, 
+                                    const common::Slice& slice, int depth, std::vector<uint16_t>& node_ids,
+                                    size_t tid, const common::ColumnMatrix& column_matrix, const std::vector<int>& fids) {
+    const size_t n_features = gidx.cut.Ptrs().size() - 1;
+    const BinIdxType* numa = gidx.index.data<BinIdxType>();
+    common::BuildHist<GradientSumT, BinIdxType, read_by_column, feature_blocking, is_root, any_missing, column_sampling>
+                      (gpair_h, slice.addr, slice.b, slice.e, gidx,
+                        n_features, numa, node_ids.data(),
+                        buffer_.hists_addr[tid], column_matrix,
+                        buffer_.local_threads_mapping[tid].data(), fids);
+  }
+
+  template <typename BinIdxType, bool any_missing, bool hist_fit_to_l2, bool column_sampling>
+  void BuildLocalHistogramsForSlice(const std::vector<GradientPair> &gpair_h,
+                                    GHistIndexMatrix const &gidx, 
+                                    const common::Slice& slice, int depth, std::vector<uint16_t>& node_ids,
+                                    size_t tid, const common::ColumnMatrix& column_matrix, const std::vector<int>& fids) {
+    if (depth == 0) {
+      constexpr bool feature_blocking = false;
+      constexpr bool read_by_column = column_sampling ? true : !hist_fit_to_l2 && !any_missing;
+      constexpr bool is_root = true;
+
+      BuildLocalHistogramsForSlice<BinIdxType, read_by_column, feature_blocking, is_root, any_missing, column_sampling>
+                                  (gpair_h, gidx, slice, depth, node_ids, tid, column_matrix, fids);
+    } else if (depth == 1) {
+      constexpr bool feature_blocking = false;
+      constexpr bool read_by_column = column_sampling ? true : !hist_fit_to_l2 && !any_missing;
+      constexpr bool is_root = false;
+
+      BuildLocalHistogramsForSlice<BinIdxType, read_by_column, feature_blocking, is_root, any_missing, column_sampling>
+                                  (gpair_h, gidx, slice, depth, node_ids, tid, column_matrix, fids);
     } else {
-      if (depth == 0) {
-        return common::BuildHist<GradientSumT, BinIdxType,
-                               /*read_by_column*/   !hist_fit_to_l2 && !any_missing,
-                               /*feature_blocking*/ false,
-                               /*is_root*/          true,
-                               /*any_missing*/      any_missing,
-                               /*column_sampling*/  false>;
-      } else {
-        if (depth == 1) {  // make 1st depth 33% faster for hist not fitted to L2 cache
-          return common::BuildHist<GradientSumT, BinIdxType,
-                                 /*read_by_column*/   !hist_fit_to_l2 && !any_missing,
-                                 /*feature_blocking*/ false,
-                                 /*is_root*/          false,
-                                 /*any_missing*/      any_missing,
-                                 /*column_sampling*/  false>;
-        } else {
-          return common::BuildHist<GradientSumT, BinIdxType,
-                                 /*read_by_column*/   false,
-                                 /*feature_blocking*/ !hist_fit_to_l2 && !any_missing,
-                                 /*is_root*/          false,
-                                 /*any_missing*/      any_missing,
-                                 /*column_sampling*/  false>;
-        }
-      }
+      constexpr bool feature_blocking = !hist_fit_to_l2 && !any_missing;
+      constexpr bool read_by_column = column_sampling ? true : false;
+      constexpr bool is_root = false;
+
+      BuildLocalHistogramsForSlice<BinIdxType, read_by_column, feature_blocking, is_root, any_missing, column_sampling>
+                                  (gpair_h, gidx, slice, depth, node_ids, tid, column_matrix, fids);
     }
   }
 
-  template <typename BinIdxType, bool any_missing, bool hist_fit_to_l2, typename PartitionType>
+  template <typename BinIdxType, bool any_missing, bool hist_fit_to_l2, bool column_sampling, typename PartitionType>
   void
   BuildLocalHistograms(size_t page_idx,
                        GHistIndexMatrix const &gidx,
@@ -132,55 +123,32 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
                        const PartitionType* p_opt_partition_builder,
                        // template?
                        std::vector<uint16_t>* p_node_ids) {
-    using BuildHistFunc = void(*)(const std::vector<GradientPair>&,
-                                  const uint32_t*,
-                                  const uint32_t,
-                                  const uint32_t,
-                                  const GHistIndexMatrix&,
-                                  const size_t,
-                                  const BinIdxType*, uint16_t*,
-                                  const std::vector<std::vector<uint64_t>>&,
-                                  const common::ColumnMatrix&,
-                                  const uint16_t*, const std::vector<int>&);
-    BuildHistFunc build_hist_func = GetBuildHistSrategy<BinIdxType,
-                                                        any_missing,
-                                                        hist_fit_to_l2,
-                                                        BuildHistFunc>(
-                                                        depth, column_matrix.AnySparseColumn());
-
     const PartitionType& opt_partition_builder = *p_opt_partition_builder;
     std::vector<uint16_t>& node_ids = *p_node_ids;
     int nthreads = this->n_threads_;
     std::vector<int> fids;
     // now column sampling supported only for missings due to fid_least_bins_ set
-    if (any_missing
-        && (colsample_bytree_ < 0.1 || colsample_bylevel_ < 0.1)
-        && !column_matrix.AnySparseColumn()
-        && colsample_bynode_ == 1) {
+    if (column_sampling) {
       const size_t n_sampled_features = column_sampler_->GetFeatureSet(depth)->Size();
       fids.resize(n_sampled_features, 0);
       for (size_t i = 0; i < n_sampled_features; ++i) {
         fids[i] = column_sampler_->GetFeatureSet(depth)->ConstHostVector()[i];
       }
     }
-// for(size_t tid = 0; tid < nthreads; ++tid)
+    // for(size_t tid = 0; tid < nthreads; ++tid)
     const size_t n_features = gidx.cut.Ptrs().size() - 1;
     const uint32_t* offsets = gidx.index.Offset();
     #pragma omp parallel num_threads(nthreads)
     {
       size_t tid = omp_get_thread_num();
-      const BinIdxType* numa = gidx.index.data<BinIdxType>();
       const std::vector<common::Slice>& local_slices =
         opt_partition_builder.GetSlices(tid);
       buffer_.template AllocateHistForLocalThread<any_missing>(
         opt_partition_builder.node_id_for_threads[tid], tid,
         n_features, offsets);
       for (const common::Slice& slice : local_slices) {
-        const uint32_t* rows = slice.addr;
-        build_hist_func(gpair_h, rows, slice.b, slice.e, gidx,
-                        n_features, numa, node_ids.data(),
-                        buffer_.hists_addr[tid], column_matrix,
-                        buffer_.local_threads_mapping[tid].data(), fids);
+        BuildLocalHistogramsForSlice<BinIdxType, any_missing, hist_fit_to_l2, column_sampling>
+                                    (gpair_h, gidx, slice, depth, node_ids, tid, column_matrix, fids);
       }
     }
   }
@@ -219,18 +187,23 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
                         nodes_for_explicit_hist_build,
                         nodes_for_subtraction_trick, p_tree);
     }
-    if (!any_missing || (any_missing && (colsample_bytree_ < 0.1 ||
-        colsample_bylevel_ < 0.1) && !column_matrix.AnySparseColumn() &&
-        colsample_bynode_ == 1)) {
-      BuildLocalHistograms<BinIdxType,
-                           any_missing, hist_fit_to_l2>(page_id, gidx, gpair, depth, column_matrix,
-                                                        p_opt_partition_builder,
-                                                        p_node_ids);
+
+    //TODO(razdoburdin): Verify naming.
+    bool column_sampling = !any_missing || 
+                            (any_missing && 
+                            (colsample_bytree_ < 0.1 || colsample_bylevel_ < 0.1) && 
+                            !column_matrix.AnySparseColumn() &&
+                            colsample_bynode_ == 1);
+    if (column_sampling) {
+      BuildLocalHistograms<BinIdxType, any_missing, 
+                           hist_fit_to_l2, true>(page_id, gidx, gpair, depth, column_matrix,
+                                                 p_opt_partition_builder,
+                                                 p_node_ids);
     } else {
-      BuildLocalHistograms<uint32_t,
-                           any_missing, hist_fit_to_l2>(page_id, gidx, gpair, depth, column_matrix,
-                                                        p_opt_partition_builder,
-                                                        p_node_ids);
+      BuildLocalHistograms<uint32_t, any_missing,
+                           hist_fit_to_l2, false>(page_id, gidx, gpair, depth, column_matrix,
+                                                  p_opt_partition_builder,
+                                                  p_node_ids);
     }
 
     CHECK_GE(n_batches_, 1);

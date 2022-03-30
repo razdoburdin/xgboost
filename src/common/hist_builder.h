@@ -49,7 +49,7 @@ template<bool do_prefetch,
          bool feature_blocking,
          bool is_root,
          bool any_missing,
-         bool is_single>
+         typename GradientSumT>
 inline void RowsWiseBuildHist(const BinIdxType* gradient_index,
                               const uint32_t* rows,
                               const size_t* row_ptr,
@@ -90,26 +90,21 @@ inline void RowsWiseBuildHist(const BinIdxType* gradient_index,
     const uint64_t* offsets64 = hists_addr[nid].data();
     const size_t begin = feature_blocking ? ib*13 : 0;
     const size_t end = feature_blocking ? std::min(begin + 13, n_features) : row_sizes;
-    const double pgh_d[] = {pgh[idx_gh], pgh[idx_gh + 1]};
+
+    // The hint with pgh_t helps the compiler to use more effective processor instructions.
+    const GradientSumT pgh_t[] = {pgh[idx_gh], pgh[idx_gh + 1]};
     for (size_t jb = begin;  jb < end; ++jb) {
-      if (is_single) {
-        float* hist_local = reinterpret_cast<float*>(
-          offsets64[jb] + (static_cast<size_t>(gr_index_local[jb])) * 8);
-        *(hist_local) +=  pgh[idx_gh];
-        *(hist_local + 1) +=  pgh[idx_gh + 1];
-      } else {
-        double* hist_local = reinterpret_cast<double*>(
-          offsets64[jb] + (static_cast<size_t>(gr_index_local[jb])) * 16);
-        *(hist_local) +=  pgh_d[0];
-        *(hist_local + 1) +=  pgh_d[1];
-      }
+      GradientSumT* hist_local = reinterpret_cast<GradientSumT*> (
+        offsets64[jb] + (static_cast<size_t>(gr_index_local[jb])) * 2 * sizeof(GradientSumT));
+      *(hist_local)     +=  pgh_t[0];
+      *(hist_local + 1) +=  pgh_t[1];
     }
   }
 }
 
 template<typename BinIdxType,
          bool is_root, bool any_missing,
-         bool column_sampling, bool is_single>
+         bool column_sampling, typename GradientSumT>
 void ColWiseBuildHist(const std::vector<GradientPair>& gpair,
                       const uint32_t* rows,
                       const uint32_t row_begin,
@@ -139,20 +134,13 @@ void ColWiseBuildHist(const std::vector<GradientPair>& gpair,
         const uint32_t nid = is_root ? 0 : mapping_ids[nodes_ids[row_id]];
         const size_t idx_gh = row_id << 1;
         const uint64_t* offsets64 = hists_addr[nid].data();
-        const double pgh_d[2] = {pgh[idx_gh], pgh[idx_gh + 1]};
-        if (is_single) {
-          float* hist_local = reinterpret_cast<float*>(
-            offsets64[local_cid] + (static_cast<size_t>(gr_index_local[row_id])) * 8 +
-            (any_missing ? base_idx * 8 : 0));
-          *(hist_local) +=  pgh[idx_gh];
-          *(hist_local + 1) +=  pgh[idx_gh + 1];
-        } else {
-          double* hist_local = reinterpret_cast<double*>(
-            offsets64[local_cid] + (static_cast<size_t>(gr_index_local[row_id])) * 16 +
-            (any_missing ? base_idx * 16 : 0));
-          *(hist_local) +=  pgh_d[0];
-          *(hist_local + 1) +=  pgh_d[1];
-        }
+
+        // The hint with pgh_t helps the compiler to use more effective processor instructions.
+        const GradientSumT pgh_t[2] = {pgh[idx_gh], pgh[idx_gh + 1]};
+        GradientSumT* hist_local = reinterpret_cast<GradientSumT*> (
+          offsets64[local_cid] + (static_cast<size_t>(gr_index_local[row_id])) * 2 * sizeof(GradientSumT));
+        *(hist_local)     +=  pgh_t[0];
+        *(hist_local + 1) +=  pgh_t[1];
       }
     }
   }
@@ -171,17 +159,15 @@ void BuildHist(const std::vector<GradientPair>& gpair,
                const common::ColumnMatrix& column_matrix,
                const uint16_t* mapping_ids,
                const std::vector<int>& fids) {
-  constexpr bool kIsSingle = static_cast<bool>(sizeof(GradientSumT) == 4);
-
   if (read_by_column) {
     ColWiseBuildHist<BinIdxType,
                      is_root, any_missing,
                      column_sampling,
-                     kIsSingle> (gpair, rows, row_begin,
-                                 row_end, n_features,
-                                 nodes_ids, hists_addr,
-                                 column_matrix,
-                                 mapping_ids, fids);
+                     GradientSumT> (gpair, rows, row_begin,
+                                    row_end, n_features,
+                                    nodes_ids, hists_addr,
+                                    column_matrix,
+                                    mapping_ids, fids);
   } else {
     const size_t row_size = row_end - row_begin;
     const size_t* row_ptr =  gmat.row_ptr.data();
@@ -198,117 +184,19 @@ void BuildHist(const std::vector<GradientPair>& gpair,
       RowsWiseBuildHist<true, BinIdxType,
                         feature_blocking,
                         is_root, any_missing,
-                        kIsSingle> (gradient_index, rows, row_ptr, row_begin,
+                        GradientSumT> (gradient_index, rows, row_ptr, row_begin,
                                     row_begin + size_with_prefetch,
                                     n_features, nodes_ids,
                                     hists_addr, mapping_ids, pgh, ib);
       RowsWiseBuildHist<false, BinIdxType,
                         feature_blocking,
                         is_root, any_missing,
-                        kIsSingle> (gradient_index, rows, row_ptr, row_begin + size_with_prefetch,
+                        GradientSumT> (gradient_index, rows, row_ptr, row_begin + size_with_prefetch,
                                     row_end, n_features, nodes_ids,
                                     hists_addr, mapping_ids, pgh, ib);
     }
   }
 }
-
-template<typename FPType, bool do_prefetch,
-         typename BinIdxType, bool is_root,
-         bool any_missing>
-void BuildHistKernel(const std::vector<GradientPair>& gpair,
-                     const uint32_t* rows,
-                     const size_t row_begin,
-                     const size_t row_end,
-                     const GHistIndexMatrix& gmat,
-                     const BinIdxType* numa_data,
-                     uint16_t* nodes_ids,
-                     std::vector<std::vector<FPType>>* p_hists,
-                     const uint16_t* mapping_ids, uint32_t base_rowid = 0) {
-  const size_t size = row_end - row_begin;
-  const float* pgh = reinterpret_cast<const float*>(gpair.data());
-  const BinIdxType* gradient_index = numa_data;
-  const size_t* row_ptr =  gmat.row_ptr.data();
-  const uint32_t* offsets = gmat.index.Offset();
-  const size_t n_features = row_ptr[1] - row_ptr[0];
-  const uint32_t two {2};  // Each element from 'gpair' and 'hist' contains
-                           // 2 FP values: gradient and hessian.
-                           // So we need to multiply each row-index/bin-index by 2
-                           // to work with gradient pairs as a singe row FP array
-  std::vector<std::vector<FPType>>& hists = *p_hists;
-
-  for (size_t i = row_begin; i < row_end; ++i) {
-    const size_t ri = is_root ? i : rows[i];
-    const size_t icol_start = any_missing ? row_ptr[ri] : ri * n_features;
-    const size_t icol_end =  any_missing ? row_ptr[ri+1] : icol_start + n_features;
-    const size_t row_size = icol_end - icol_start;
-    const size_t idx_gh = two * (ri + base_rowid);
-    const uint32_t nid = is_root ? 0 : mapping_ids[nodes_ids[ri]];
-
-    if (do_prefetch) {
-      const size_t icol_start_prefetch = any_missing ? row_ptr[rows[i+Prefetch::kPrefetchOffset]] :
-                                       rows[i + Prefetch::kPrefetchOffset] * n_features;
-      const size_t icol_end_prefetch = any_missing ?  row_ptr[rows[i+Prefetch::kPrefetchOffset]+1] :
-                                      icol_start_prefetch + n_features;
-
-      PREFETCH_READ_T0(pgh + two * rows[i + Prefetch::kPrefetchOffset]);
-      for (size_t j = icol_start_prefetch; j < icol_end_prefetch;
-        j+=Prefetch::GetPrefetchStep<uint32_t>()) {
-        PREFETCH_READ_T0(gradient_index + j);
-      }
-    } else if (is_root) {
-      nodes_ids[ri] = 0;
-    }
-
-    const BinIdxType* gr_index_local = gradient_index + icol_start;
-    FPType* hist_data = hists[nid].data();
-
-    for (size_t j = 0; j < row_size; ++j) {
-      const uint32_t idx_bin = two * (static_cast<uint32_t>(gr_index_local[j]) + (
-                                      any_missing ? 0 : offsets[j]));
-      hist_data[idx_bin]   += pgh[idx_gh];
-      hist_data[idx_bin+1] += pgh[idx_gh+1];
-    }
-  }
-}
-
-/*!
- * \brief builder for histograms of gradient statistics
- */
-template<typename GradientSumT>
-class GHistBuilder {
- public:
-  using GHistRowT = GHistRow<GradientSumT>;
-  GHistBuilder() = default;
-
-  // construct a histogram via histogram aggregation
-  template <typename BinIdxType, bool any_missing, bool is_root>
-  void BuildHist(const std::vector<GradientPair>& gpair,
-                 const uint32_t* rows,
-                 const size_t row_begin,
-                 const size_t row_end,
-                 const GHistIndexMatrix& gmat,
-                 const BinIdxType* numa_data,
-                 uint16_t* nodes_ids,
-                 std::vector<std::vector<GradientSumT>>* p_hists,
-                 const uint16_t* mapping_ids, uint32_t base_rowid = 0) {
-    const size_t nrows = row_end - row_begin;
-    const size_t no_prefetch_size = Prefetch::NoPrefetchSize(nrows);
-
-    if (is_root) {
-        // contiguous memory access, built-in HW prefetching is enough
-        BuildHistKernel<GradientSumT, false, BinIdxType, true, any_missing>(
-          gpair, rows, row_begin, row_end, gmat, numa_data, nodes_ids, p_hists,
-          mapping_ids, base_rowid);
-    } else {
-        BuildHistKernel<GradientSumT, true, BinIdxType, false, any_missing>(
-          gpair, rows, row_begin, row_end - no_prefetch_size,
-          gmat, numa_data, nodes_ids, p_hists, mapping_ids, base_rowid);
-        BuildHistKernel<GradientSumT, false, BinIdxType, false, any_missing>(
-          gpair, rows,  row_end - no_prefetch_size, row_end,
-          gmat, numa_data, nodes_ids, p_hists, mapping_ids, base_rowid);
-    }
-  }
-};
 
 }  // namespace common
 }  // namespace xgboost

@@ -150,7 +150,7 @@ class GloablApproxBuilder {
                  std::vector<GradientPair> const &gpair, int depth,
                  std::vector<CPUExpandEntry> const & nodes_for_explicit_hist_build,
                  std::vector<CPUExpandEntry> const & nodes_for_subtraction_trick) {
-    const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*page.cut.Ptrs().back();
+    const bool hist_fit_to_l2 = partitioner_[i].GetOptPartition().adhoc_l2_size > 16*page.cut.Ptrs().back();
     if (hist_fit_to_l2) {
       histogram_builder_.template BuildHist<BinIdxType, any_missing, true> (i, page, p_tree, gpair, depth, 
                                                                             column_matrix_[i],
