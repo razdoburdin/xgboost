@@ -568,6 +568,7 @@ class OptPartitionBuilder {
       partitions[nid].e = begin + size;
     }
   }
+  template <typename GradientSumT>
   void UpdateRowBuffer(const std::vector<uint16_t>& compleate_trees_depth_wise,
                        const RegTree* p_tree,
                        GHistIndexMatrix const& gmat, size_t n_features, size_t depth,
@@ -578,7 +579,7 @@ class OptPartitionBuilder {
       summ_size += vec_rows[i][0];
     }
 
-    const bool hist_fit_to_l2 = adhoc_l2_size > 16*gmat.cut.Ptrs().back();
+    const bool hist_fit_to_l2 = adhoc_l2_size > 2*sizeof(GradientSumT)*gmat.cut.Ptrs().back();
     const size_t n_bins = gmat.cut.Ptrs().back();
     threads_id_for_nodes.clear();
     nodes_count.clear();
@@ -656,6 +657,7 @@ class OptPartitionBuilder {
       }
     }
   }
+  template <typename GradientSumT>
   void UpdateThreadsWork(const std::vector<uint16_t>& compleate_trees_depth_wise,
                          GHistIndexMatrix const& gmat,
                          size_t n_features, size_t depth, bool is_loss_guided,
@@ -664,7 +666,7 @@ class OptPartitionBuilder {
     const size_t n_bins = gmat.cut.Ptrs().back();
     threads_addr.clear();
     threads_addr.resize(n_threads);
-    const bool hist_fit_to_l2 = adhoc_l2_size > 16*gmat.cut.Ptrs().back();
+    const bool hist_fit_to_l2 = adhoc_l2_size > 2*sizeof(GradientSumT)*gmat.cut.Ptrs().back();
     if (is_loss_guided) {
       const int cleft = compleate_trees_depth_wise[0];
       const int cright = compleate_trees_depth_wise[1];

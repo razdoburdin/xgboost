@@ -150,7 +150,8 @@ class GloablApproxBuilder {
                  std::vector<GradientPair> const &gpair, int depth,
                  std::vector<CPUExpandEntry> const & nodes_for_explicit_hist_build,
                  std::vector<CPUExpandEntry> const & nodes_for_subtraction_trick) {
-    const bool hist_fit_to_l2 = partitioner_[i].GetOptPartition().adhoc_l2_size > 16*page.cut.Ptrs().back();
+    // TODO(razdoburdin) replace "16" by named constant
+    const bool hist_fit_to_l2 = common::OptPartitionBuilder::adhoc_l2_size > 2*sizeof(GradientSumT)*page.cut.Ptrs().back();
     if (hist_fit_to_l2) {
       histogram_builder_.template BuildHist<BinIdxType, any_missing, true> (i, page, p_tree, gpair, depth, 
                                                                             column_matrix_[i],
@@ -397,7 +398,7 @@ class GloablApproxBuilder {
               if (column_matrix_[i].AnyMissing()) {
                 if (is_loss_guide) {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<true, uint8_t, true, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint8_t, true, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -410,7 +411,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<true, uint8_t, true, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint8_t, true, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -425,7 +426,7 @@ class GloablApproxBuilder {
                   }
                 } else {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<true, uint8_t, false, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint8_t, false, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -438,7 +439,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<true, uint8_t, false, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint8_t, false, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -455,7 +456,7 @@ class GloablApproxBuilder {
               } else {
                 if (is_loss_guide) {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<false, uint8_t, true, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint8_t, true, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -468,7 +469,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<false, uint8_t, true, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint8_t, true, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -483,7 +484,7 @@ class GloablApproxBuilder {
                   }
                 } else {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<false, uint8_t, false, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint8_t, false, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -496,7 +497,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<false, uint8_t, false, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint8_t, false, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -516,7 +517,7 @@ class GloablApproxBuilder {
               if (column_matrix_[i].AnyMissing()) {
                 if (is_loss_guide) {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<true, uint16_t, true, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint16_t, true, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -529,7 +530,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<true, uint16_t, true, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint16_t, true, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -544,7 +545,7 @@ class GloablApproxBuilder {
                   }
                 } else {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<true, uint16_t, false, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint16_t, false, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -557,7 +558,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<true, uint16_t, false, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint16_t, false, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -574,7 +575,7 @@ class GloablApproxBuilder {
               } else {
                 if (is_loss_guide) {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<false, uint16_t, true, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint16_t, true, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -587,7 +588,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<false, uint16_t, true, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint16_t, true, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -602,7 +603,7 @@ class GloablApproxBuilder {
                   }
                 } else {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<false, uint16_t, false, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint16_t, false, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -615,7 +616,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<false, uint16_t, false, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint16_t, false, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -635,7 +636,7 @@ class GloablApproxBuilder {
               if (column_matrix_[i].AnyMissing()) {
                 if (is_loss_guide) {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<true, uint32_t, true, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint32_t, true, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -648,7 +649,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<true, uint32_t, true, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint32_t, true, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -663,7 +664,7 @@ class GloablApproxBuilder {
                   }
                 } else {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<true, uint32_t, false, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint32_t, false, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -676,7 +677,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<true, uint32_t, false, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, true, uint32_t, false, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -693,7 +694,7 @@ class GloablApproxBuilder {
               } else {
                 if (is_loss_guide) {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<false, uint32_t, true, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint32_t, true, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -706,7 +707,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<false, uint32_t, true, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint32_t, true, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -721,7 +722,7 @@ class GloablApproxBuilder {
                   }
                 } else {
                   if (page.cut.HasCategorical()) {
-                    partitioner_.at(i).template UpdatePosition<false, uint32_t, false, true>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint32_t, false, true>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,
@@ -734,7 +735,7 @@ class GloablApproxBuilder {
                       &complete_trees_depth_wise_, &curr_level_nodes_, is_left_small,
                       /*check_is_left_small*/ true);
                   } else {
-                    partitioner_.at(i).template UpdatePosition<false, uint32_t, false, false>(ctx_,
+                    partitioner_.at(i).template UpdatePosition<GradientSumT, false, uint32_t, false, false>(ctx_,
                       page,
                       column_matrix_[i],
                       applied_vec,

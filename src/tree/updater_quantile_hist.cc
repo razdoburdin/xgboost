@@ -357,7 +357,7 @@ void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
       RowPartitioner &partitioner = this->partitioner_.front();
       if (is_loss_guide) {
         if (gmat.cut.HasCategorical()) {
-          partitioner.UpdatePosition<any_missing, BinIdxType, true, true>(this->ctx_, gmat,
+          partitioner.UpdatePosition<GradientSumT, any_missing, BinIdxType, true, true>(this->ctx_, gmat,
                       column_matrix,
                       nodes_for_apply_split, p_tree,
                       depth,
@@ -368,7 +368,7 @@ void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
                       &complete_trees_depth_wise_,
                       &curr_level_nodes_);
         } else {
-          partitioner.UpdatePosition<any_missing, BinIdxType, true, false>(this->ctx_, gmat,
+          partitioner.UpdatePosition<GradientSumT, any_missing, BinIdxType, true, false>(this->ctx_, gmat,
                       column_matrix,
                       nodes_for_apply_split, p_tree,
                       depth,
@@ -381,7 +381,7 @@ void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
         }
       } else {
         if (gmat.cut.HasCategorical()) {
-          partitioner.UpdatePosition<any_missing, BinIdxType, false, true>(this->ctx_, gmat,
+          partitioner.UpdatePosition<GradientSumT, any_missing, BinIdxType, false, true>(this->ctx_, gmat,
                       column_matrix,
                       nodes_for_apply_split, p_tree,
                       depth,
@@ -392,7 +392,7 @@ void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
                       &complete_trees_depth_wise_,
                       &curr_level_nodes_);
         } else {
-          partitioner.UpdatePosition<any_missing, BinIdxType, false, false>(this->ctx_, gmat,
+          partitioner.UpdatePosition<GradientSumT, any_missing, BinIdxType, false, false>(this->ctx_, gmat,
                       column_matrix,
                       nodes_for_apply_split, p_tree,
                       depth,
@@ -448,7 +448,7 @@ void QuantileHistMaker::Builder<GradientSumT>::ExpandTree(
     DMatrix* p_fmat,
     RegTree* p_tree,
     const std::vector<GradientPair>& gpair_h) {
-  const bool hist_fit_to_l2 = partitioner_.front().GetOptPartition().adhoc_l2_size > 16*gmat.cut.Ptrs().back();
+  const bool hist_fit_to_l2 = common::OptPartitionBuilder::adhoc_l2_size > 2*sizeof(GradientSumT)*gmat.cut.Ptrs().back();
   if (hist_fit_to_l2) {
     this-> template ExpandTree<BinIdxType, any_missing, true>(gmat, column_matrix, p_fmat, p_tree, gpair_h);
   } else {

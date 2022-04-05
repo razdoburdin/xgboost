@@ -61,7 +61,7 @@ class RowPartitioner {
     }
   }
 
-  template <bool any_missing, typename BinIdxType,
+  template <typename GradientSumT, bool any_missing, typename BinIdxType,
             bool is_loss_guided, bool any_cat>
   void UpdatePosition(GenericParameter const* ctx, GHistIndexMatrix const& gmat,
                       common::ColumnMatrix const& column_matrix,
@@ -200,10 +200,10 @@ class RowPartitioner {
     }
 
     if (depth != max_depth || loss_guide) {
-      opt_partition_builder_.UpdateRowBuffer(*complete_trees_depth_wise_,
+      opt_partition_builder_.template UpdateRowBuffer<GradientSumT>(*complete_trees_depth_wise_,
                                             p_tree, gmat, n_features, depth,
                                             node_ids_, is_loss_guided);
-      opt_partition_builder_.UpdateThreadsWork(*complete_trees_depth_wise_, gmat,
+      opt_partition_builder_.template UpdateThreadsWork<GradientSumT>(*complete_trees_depth_wise_, gmat,
                                               n_features, depth, is_loss_guided,
                                               is_left_small, check_is_left_small);
     }

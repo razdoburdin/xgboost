@@ -39,6 +39,7 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
   size_t n_batches_{0};
   // Whether XGBoost is running in distributed environment.
   bool is_distributed_{false};
+  static constexpr double colsample_th = 0.1;
 
  public:
   /**
@@ -189,21 +190,28 @@ template <typename GradientSumT, typename ExpandEntry> class HistogramBuilder {
     }
 
     //TODO(razdoburdin): Verify naming.
-    bool column_sampling = !any_missing || 
-                            (any_missing && 
-                            (colsample_bytree_ < 0.1 || colsample_bylevel_ < 0.1) && 
-                            !column_matrix.AnySparseColumn() &&
-                            colsample_bynode_ == 1);
-    if (column_sampling) {
+    if (any_missing && 
+        (colsample_bytree_ < colsample_th || colsample_bylevel_ < colsample_th) && 
+        !column_matrix.AnySparseColumn() &&
+        colsample_bynode_ == 1) {
+      constexpr bool column_sampling = true;
       BuildLocalHistograms<BinIdxType, any_missing, 
-                           hist_fit_to_l2, true>(page_id, gidx, gpair, depth, column_matrix,
-                                                 p_opt_partition_builder,
-                                                 p_node_ids);
+                           hist_fit_to_l2, column_sampling>(page_id, gidx, gpair, depth, column_matrix,
+                                                            p_opt_partition_builder,
+                                                            p_node_ids);
     } else {
-      BuildLocalHistograms<uint32_t, any_missing,
-                           hist_fit_to_l2, false>(page_id, gidx, gpair, depth, column_matrix,
-                                                  p_opt_partition_builder,
-                                                  p_node_ids);
+      constexpr bool column_sampling = false;
+      if (!any_missing) {
+        BuildLocalHistograms<BinIdxType, any_missing,
+                            hist_fit_to_l2, column_sampling>(page_id, gidx, gpair, depth, column_matrix,
+                                                              p_opt_partition_builder,
+                                                              p_node_ids);
+      } else {
+        BuildLocalHistograms<uint32_t, any_missing,
+                            hist_fit_to_l2, column_sampling>(page_id, gidx, gpair, depth, column_matrix,
+                                                              p_opt_partition_builder,
+                                                              p_node_ids);
+      }
     }
 
     CHECK_GE(n_batches_, 1);
