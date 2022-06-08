@@ -69,6 +69,36 @@ bool QuantileHistMaker::UpdatePredictionCache(const DMatrix *data,
   }
 }
 
+template <typename BinIdxType, bool any_missing, bool is_root>
+void QuantileHistMaker::Builder::BuildHist(const GHistIndexMatrix &gmat,
+                                           DMatrix *p_fmat,
+                                           RegTree *p_tree,
+                                           const std::vector<GradientPair> &gpair_h) {
+  size_t num_nodes = nodes_for_explicit_hist_build_.size();
+  std::vector<std::vector<uint16_t>> merged_thread_ids(num_nodes);
+  for (size_t nid = 0; nid < num_nodes; ++nid) {
+    auto& mt_ids = merged_thread_ids[nid];
+    const auto &entry = nodes_for_explicit_hist_build_[nid];
+    for (auto & partitioner : partitioner_) {
+      const auto& threads = partitioner.GetOptPartition().GetThreadIdsForNode(entry.nid);
+      mt_ids.insert(mt_ids.end(), threads.begin(), threads.end());
+    }
+    std::sort(mt_ids.begin(), mt_ids.end());
+  }
+
+  size_t page_id = 0;
+  for (auto const &gidx : p_fmat->GetBatches<GHistIndexMatrix>(HistBatch(param_))) {
+      CommonRowPartitioner &partitioner = this->partitioner_.at(page_id);
+
+    this->histogram_builder_->template BuildHist<BinIdxType, is_root>(
+        page_id, gidx, p_tree,
+        nodes_for_explicit_hist_build_, nodes_for_subtraction_trick_, gpair_h,
+        &(partitioner.GetOptPartition()),
+        &(partitioner.GetNodeAssignments()), &merged_thread_ids);
+    ++page_id;
+  }
+}
+
 template <typename BinIdxType, bool any_missing>
 void QuantileHistMaker::Builder::InitRoot(
     const GHistIndexMatrix &gmat,
@@ -76,39 +106,11 @@ void QuantileHistMaker::Builder::InitRoot(
     int *num_leaves, std::vector<CPUExpandEntry> *expand) {
   CPUExpandEntry node(RegTree::kRoot, p_tree->GetDepth(0), 0.0f);
 
-  nodes_for_explicit_hist_build_.clear();
+  nodes_for_explicit_hist_build_ = {node};
   nodes_for_subtraction_trick_.clear();
-  nodes_for_explicit_hist_build_.push_back(node);
+  constexpr bool is_root = true;
+  this-> template BuildHist<BinIdxType, any_missing, is_root>(gmat, p_fmat, p_tree, gpair_h);
 
-    std::vector<std::set<uint16_t>> merged_thread_ids_set(nodes_for_explicit_hist_build_.size());
-    std::vector<std::vector<uint16_t>> merged_thread_ids(nodes_for_explicit_hist_build_.size());
-    for (size_t nid = 0; nid < nodes_for_explicit_hist_build_.size(); ++nid) {
-      const auto &entry = nodes_for_explicit_hist_build_[nid];
-      for (auto & partitioner : partitioner_) {
-        size_t n_threads = partitioner.GetOptPartition().GetThreadIdsForNode(entry.nid).size();
-        for (size_t tid = 0; tid < n_threads; ++tid) {
-          merged_thread_ids_set[nid].insert(
-            partitioner.GetOptPartition().GetThreadIdsForNode(entry.nid)[tid]);
-        }
-      }
-      merged_thread_ids[nid].resize(merged_thread_ids_set[nid].size());
-      std::copy(merged_thread_ids_set[nid].begin(),
-                merged_thread_ids_set[nid].end(), merged_thread_ids[nid].begin());
-    }
-
-
-  size_t page_id = 0;
-
-  for (auto const &gidx : p_fmat->GetBatches<GHistIndexMatrix>(HistBatch(param_))) {
-      CommonRowPartitioner &partitioner = this->partitioner_.at(page_id);
-
-    this->histogram_builder_->template BuildHist<BinIdxType, true>(
-        page_id, gidx, p_tree,
-        nodes_for_explicit_hist_build_, nodes_for_subtraction_trick_, gpair_h,
-        &(partitioner.GetOptPartition()),
-        &(partitioner.GetNodeAssignments()), &merged_thread_ids);
-    ++page_id;
-  }
   {
     GradientPairPrecise grad_stat;
     if (p_fmat->IsDense()) {
@@ -292,34 +294,11 @@ void QuantileHistMaker::Builder::ExpandTree(
       monitor_->Stop("ApplySplit");
       SplitSiblings(nodes_for_apply_split, &nodes_to_evaluate, p_tree);
       if (param_.max_depth == 0 || depth < param_.max_depth) {
-        size_t i = 0;
         monitor_->Start("BuildHist");
-        size_t num_nodes = nodes_for_explicit_hist_build_.size();
-        std::vector<std::set<uint16_t>> merged_thread_ids_set(num_nodes);
-        std::vector<std::vector<uint16_t>> merged_thread_ids(num_nodes);
-        for (size_t nid = 0; nid < num_nodes; ++nid) {
-          const auto &entry = nodes_for_explicit_hist_build_[nid];
-          for (auto & partitioner : partitioner_) {
-            for (auto&  tid : partitioner.GetOptPartition().GetThreadIdsForNode(entry.nid)) {
-              merged_thread_ids_set[nid].insert(tid);
-            }
-          }
-          merged_thread_ids[nid].resize(merged_thread_ids_set[nid].size());
-          std::copy(merged_thread_ids_set[nid].begin(),
-                    merged_thread_ids_set[nid].end(), merged_thread_ids[nid].begin());
-        }
-
-        for (auto const &gidx : p_fmat->GetBatches<GHistIndexMatrix>(HistBatch(param_))) {
-          CommonRowPartitioner &partitioner = this->partitioner_.at(i);
-          this->histogram_builder_->template BuildHist<BinIdxType, false>(
-              i, gidx, p_tree,
-              nodes_for_explicit_hist_build_, nodes_for_subtraction_trick_,
-              gpair_h, &(partitioner.GetOptPartition()),
-              &(partitioner.GetNodeAssignments()), &merged_thread_ids);
-          ++i;
-        }
-
+        constexpr bool is_root = false;
+        this->template BuildHist<BinIdxType, any_missing, is_root>(gmat, p_fmat, p_tree, gpair_h);
         monitor_->Stop("BuildHist");
+
         monitor_->Start("EvaluateSplits");
         auto ft = p_fmat->Info().feature_types.ConstHostSpan();
         evaluator_->EvaluateSplits(this->histogram_builder_->Histogram(),
@@ -340,6 +319,26 @@ void QuantileHistMaker::Builder::ExpandTree(
   monitor_->Stop(__func__);
 }
 
+template <typename BinIdxType>
+void QuantileHistMaker::Builder::ExpandTree(const GHistIndexMatrix& gmat,
+                const common::ColumnMatrix& column_matrix,
+                DMatrix* p_fmat,
+                RegTree* p_tree,
+                std::vector<GradientPair>* gpair_ptr,
+                HostDeviceVector<bst_node_t>* p_out_position) {
+  const bool any_missing = column_matrix.AnyMissing();
+
+  this->InitData<BinIdxType>(gmat, column_matrix, *p_fmat, *p_tree, gpair_ptr);
+  if (any_missing) {
+    ExpandTree<BinIdxType, true>(gmat, column_matrix, p_fmat, p_tree,
+                                 *gpair_ptr, p_out_position);
+  } else {
+    ExpandTree<BinIdxType, false>(gmat, column_matrix, p_fmat, p_tree,
+                                  *gpair_ptr, p_out_position);
+  }
+}
+
+
 void QuantileHistMaker::Builder::UpdateTree(HostDeviceVector<GradientPair> *gpair, DMatrix *p_fmat,
                                             RegTree *p_tree,
                                             HostDeviceVector<bst_node_t> *p_out_position) {
@@ -355,38 +354,18 @@ void QuantileHistMaker::Builder::UpdateTree(HostDeviceVector<GradientPair> *gpai
   auto it = p_fmat->GetBatches<GHistIndexMatrix>(HistBatch(param_)).begin();
   const  GHistIndexMatrix& gmat = *(it.Page());
   const common::ColumnMatrix& column_matrix = gmat.Transpose();
-  const bool any_missing = column_matrix.AnyMissing();
   switch (column_matrix.GetTypeSize()) {
     case common::kUint8BinsTypeSize:
-      this->InitData<uint8_t>(gmat, column_matrix, *p_fmat, *p_tree, gpair_ptr);
-      if (any_missing) {
-        ExpandTree<uint8_t, true>(gmat, column_matrix, p_fmat, p_tree,
-                                  *gpair_ptr, p_out_position);
-      } else {
-        ExpandTree<uint8_t, false>(gmat, column_matrix, p_fmat, p_tree,
-                                   *gpair_ptr, p_out_position);
-      }
+      ExpandTree<uint8_t>(gmat, column_matrix, p_fmat, p_tree,
+                          gpair_ptr, p_out_position);
       break;
     case common::kUint16BinsTypeSize:
-      this->InitData<uint16_t>(gmat, column_matrix, *p_fmat, *p_tree, gpair_ptr);
-      if (any_missing) {
-        ExpandTree<uint16_t, true>(gmat, column_matrix, p_fmat, p_tree,
-                                   *gpair_ptr, p_out_position);
-      } else {
-        ExpandTree<uint16_t, false>(gmat, column_matrix, p_fmat, p_tree,
-                                    *gpair_ptr, p_out_position);
-      }
+      ExpandTree<uint16_t>(gmat, column_matrix, p_fmat, p_tree,
+                           gpair_ptr, p_out_position);
       break;
     case common::kUint32BinsTypeSize:
-      this->InitData<uint32_t>(gmat, column_matrix, *p_fmat, *p_tree, gpair_ptr);
-      if (any_missing) {
-        ExpandTree<uint32_t, true>(gmat, column_matrix, p_fmat, p_tree,
-                                   *gpair_ptr, p_out_position);
-      } else {
-        ExpandTree<uint32_t, false>(gmat, column_matrix, p_fmat, p_tree,
-                                    *gpair_ptr, p_out_position);
-      }
-      break;
+      ExpandTree<uint32_t>(gmat, column_matrix, p_fmat, p_tree,
+                           gpair_ptr, p_out_position);
     default:
       CHECK(false);  // no default behavior
   }
