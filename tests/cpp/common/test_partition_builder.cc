@@ -25,7 +25,7 @@ TEST(OptPartitionBuilder, BasicTest) {
 
   common::OptPartitionBuilder opt_partition_builder;
 
-  opt_partition_builder.template Init<uint8_t>(gmat, gmat.Transpose(), &tree,
+  opt_partition_builder.template Init<uint8_t>(gmat.Transpose(), gmat, &tree,
     1, 3, false);
   const uint8_t* data = reinterpret_cast<const uint8_t*>(gmat.Transpose().GetIndexData());
   const size_t fid = 0;

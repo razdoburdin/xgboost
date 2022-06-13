@@ -75,27 +75,24 @@ class OptPartitionBuilder {
     }
   }
 
-  void Init(GHistIndexMatrix const& gmat, const ColumnMatrix& column_matrix,
-            const RegTree* p_tree_local, size_t nthreads, size_t max_depth,
-            bool is_lossguide) {
+  template <class... Args>
+  void Init(const ColumnMatrix& column_matrix, const Args&... args) {
     switch (column_matrix.GetTypeSize()) {
       case common::kUint8BinsTypeSize:
-        Init<BinTypeMap<kUint8BinsTypeSize>::Type>(gmat, column_matrix,
-            p_tree_local, nthreads, max_depth, is_lossguide);
+        Init<BinTypeMap<kUint8BinsTypeSize>::Type>(column_matrix, args...);
         break;
       case common::kUint16BinsTypeSize:
-        Init<BinTypeMap<kUint16BinsTypeSize>::Type>(gmat, column_matrix,
-            p_tree_local, nthreads, max_depth, is_lossguide);
+        Init<BinTypeMap<kUint16BinsTypeSize>::Type>(column_matrix, args...);
         break;
       default:
-        Init<BinTypeMap<kUint32BinsTypeSize>::Type>(gmat, column_matrix,
-            p_tree_local, nthreads, max_depth, is_lossguide);
+        Init<BinTypeMap<kUint32BinsTypeSize>::Type>(column_matrix, args...);
         break;
     }
   }
 
   template <typename BinIdxType>
-  void Init(GHistIndexMatrix const& gmat, const ColumnMatrix& column_matrix,
+  void Init(const ColumnMatrix& column_matrix,
+            GHistIndexMatrix const& gmat, 
             const RegTree* p_tree_local, size_t nthreads, size_t max_depth,
             bool is_lossguide) {
     gmat_n_rows = gmat.row_ptr.size() - 1;

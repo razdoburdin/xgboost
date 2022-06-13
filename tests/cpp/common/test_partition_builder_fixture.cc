@@ -67,7 +67,7 @@ using DMatrixP = std::shared_ptr<DMatrix>;
     constexpr bool kAllDense = true;
     constexpr bool kHasCat = false;
 
-    opt_partition_builder.Init(gmat, gmat.Transpose(), &tree,
+    opt_partition_builder.Init(gmat.Transpose(), gmat, &tree,
                                kThreadCount, kMaxDepth, kIsLossGuide);
     const size_t fid = 0;
     const size_t split = 0;
