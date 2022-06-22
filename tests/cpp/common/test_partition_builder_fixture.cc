@@ -84,13 +84,14 @@ using DMatrixP = std::shared_ptr<DMatrix>;
 
     const size_t thread_id = 0;
     const size_t row_ind_begin = 0;
-    opt_partition_builder.template CommonPartition<kIsLossGuide, kAllDense, kHasCat>(thread_id,
-                row_ind_begin, row_count_,
-                node_ids.data(),
+    opt_partition_builder.template CommonPartition<kIsLossGuide, kAllDense, kHasCat>(
+                gmat.Transpose(), pred,
+                thread_id, row_ind_begin,
+                row_count_, node_ids.data(),
                 &split_conditions,
                 &split_ind,
                 &smalest_nodes_mask,  // row_gpairs,
-                gmat.Transpose(), split_nodes, pred, kDepth);
+                split_nodes, kDepth);
     opt_partition_builder.UpdateRowBuffer(node_ids,
                       gmat, gmat.cut.Ptrs().size() - 1,
                       0, node_ids, false);

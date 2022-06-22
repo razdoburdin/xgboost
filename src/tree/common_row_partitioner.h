@@ -309,9 +309,6 @@ class CommonRowPartitioner {
     #pragma omp parallel num_threads(nthreads)
       {
         size_t tid = omp_get_thread_num();
-        const BinIdxType* numa = tid < nthreads/2 ?
-          reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData()) :
-          reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData());
         size_t chunck_size = common::GetBlockSize(depth_size, nthreads);
         size_t thread_size = chunck_size;
         size_t begin = thread_size * tid;
@@ -322,21 +319,18 @@ class CommonRowPartitioner {
                                                         is_loss_guided,
                                                         !any_missing,
                                                         any_cat>(
-          tid, begin, end, numa,
+          column_matrix, pred,
+          tid, begin, end,
           node_ids_.data(),
           &split_conditions_data_vec,
           &split_ind_data_vec,
           &smalest_nodes_mask_vec,
-          column_matrix,
-          split_nodes, pred, depth);
+          split_nodes, depth);
       }
     } else {
     #pragma omp parallel num_threads(nthreads)
       {
         size_t tid = omp_get_thread_num();
-        const BinIdxType* numa = tid < nthreads/2 ?
-          reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData()) :
-          reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData());
         size_t chunck_size = common::GetBlockSize(depth_size, nthreads);
         size_t thread_size = chunck_size;
         size_t begin = thread_size * tid;
@@ -347,13 +341,13 @@ class CommonRowPartitioner {
                                                         is_loss_guided,
                                                         !any_missing,
                                                         any_cat>(
-          tid, begin, end, numa,
+          column_matrix, pred,
+          tid, begin, end,
           node_ids_.data(),
           split_conditions_,
           split_ind_,
           smalest_nodes_mask_ptr,
-          column_matrix,
-          split_nodes, pred, depth);
+          split_nodes, depth);
       }
     }
 

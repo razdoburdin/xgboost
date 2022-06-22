@@ -27,7 +27,6 @@ TEST(OptPartitionBuilder, BasicTest) {
 
   opt_partition_builder.template Init<uint8_t>(gmat.Transpose(), gmat, &tree,
     1, 3, false);
-  const uint8_t* data = reinterpret_cast<const uint8_t*>(gmat.Transpose().GetIndexData());
   const size_t fid = 0;
   const size_t split = 0;
   std::unordered_map<uint32_t, int32_t> split_conditions;
@@ -42,12 +41,13 @@ TEST(OptPartitionBuilder, BasicTest) {
   };
 
   opt_partition_builder.template CommonPartition<
-    uint8_t, false, true, false>(0, 0, kNRows, data,
+    uint8_t, false, true, false>(gmat.Transpose(), pred, 
+                          0, 0, kNRows,
                           node_ids.data(),
                           &split_conditions,
                           &split_ind,
                           &smalest_nodes_mask,// row_gpairs,
-                          gmat.Transpose(), split_nodes, pred, 1);
+                          split_nodes, 1);
   opt_partition_builder.UpdateRowBuffer(node_ids,
                                         gmat, gmat.cut.Ptrs().size() - 1,
                                         0, node_ids, false);
