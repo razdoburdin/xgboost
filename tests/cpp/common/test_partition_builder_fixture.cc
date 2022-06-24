@@ -67,7 +67,7 @@ using DMatrixP = std::shared_ptr<DMatrix>;
     constexpr bool kAllDense = true;
     constexpr bool kHasCat = false;
 
-    opt_partition_builder.Init(gmat, gmat.Transpose(), &tree,
+    opt_partition_builder.Init(gmat.Transpose(), gmat, &tree,
                                kThreadCount, kMaxDepth, kIsLossGuide);
     const size_t fid = 0;
     const size_t split = 0;
@@ -84,13 +84,11 @@ using DMatrixP = std::shared_ptr<DMatrix>;
 
     const size_t thread_id = 0;
     const size_t row_ind_begin = 0;
-    opt_partition_builder.template CommonPartition<kIsLossGuide, kAllDense, kHasCat>(thread_id,
-                row_ind_begin, row_count_,
-                node_ids.data(),
-                &split_conditions,
-                &split_ind,
-                &smalest_nodes_mask,  // row_gpairs,
-                gmat.Transpose(), split_nodes, pred, kDepth);
+    opt_partition_builder.template CommonPartition<kIsLossGuide, kAllDense, kHasCat>(
+                gmat.Transpose(), pred, thread_id, row_ind_begin, row_count_, 
+                node_ids.data(), &split_conditions, &split_ind,
+                &smalest_nodes_mask, // row_gpairs,
+                split_nodes, kDepth);
     opt_partition_builder.UpdateRowBuffer(node_ids,
                       gmat, gmat.cut.Ptrs().size() - 1,
                       0, node_ids, false);

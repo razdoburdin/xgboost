@@ -159,6 +159,12 @@ class QuantileHistMaker: public TreeUpdater {
                              const GHistIndexMatrix& gmat,
                              std::unordered_map<uint32_t, int32_t>* split_conditions);
 
+    template <typename BinIdxType, bool any_missing, bool is_root>
+    void BuildHist(const GHistIndexMatrix &gmat,
+                  DMatrix* p_fmat,
+                  RegTree *p_tree,
+                  const std::vector<GradientPair> &gpair_h);
+
     template <typename BinIdxType, bool any_missing>
     void InitRoot(const GHistIndexMatrix &gmat,
                   DMatrix* p_fmat,
@@ -174,12 +180,20 @@ class QuantileHistMaker: public TreeUpdater {
                        RegTree *p_tree);
 
     void AddSplitsToTree(const std::vector<CPUExpandEntry>& expand,
-                         Driver<CPUExpandEntry>* driver, 
+                         Driver<CPUExpandEntry>* driver,
                          RegTree *p_tree,
                          int *num_leaves,
                          std::vector<CPUExpandEntry>* nodes_for_apply_split,
                          std::unordered_map<uint32_t, bool>* smalest_nodes_mask_ptr, size_t depth,
                          bool * is_left_small);
+
+    template <typename BinIdxType>
+    void ExpandTree(const GHistIndexMatrix& gmat,
+                    const common::ColumnMatrix& column_matrix,
+                    DMatrix* p_fmat,
+                    RegTree* p_tree,
+                    std::vector<GradientPair> *gpair_ptr,
+                    HostDeviceVector<bst_node_t>* p_out_position);
 
     template <typename BinIdxType, bool any_missing>
     void ExpandTree(const GHistIndexMatrix& gmat,
