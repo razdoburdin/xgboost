@@ -28,8 +28,6 @@ class OptPartitionBuilder {
 
   ThreadsManager tm;
   std::vector<Slice> partitions;
-  // std::vector<std::vector<uint32_t>> vec_rows;
-  // std::vector<std::vector<uint32_t>> vec_rows_remain;
   std::vector<std::unordered_map<uint32_t, size_t> > states;
   const RegTree* p_tree;
   // can be common for all threads!
@@ -456,7 +454,6 @@ class OptPartitionBuilder {
       }
     } else {
       uint32_t block_size = common::GetBlockSize(summ_size, n_threads);
-      // uint32_t curr_vec_rowsid = 0;
       tm.threads_sbuffer.Reset();
       auto thread_info = tm.threads_sbuffer.GetItem();
       uint32_t curr_vec_rowssize = thread_info->vec_rows[0];
