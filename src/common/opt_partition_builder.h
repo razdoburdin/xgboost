@@ -78,7 +78,7 @@ class OptPartitionBuilder {
 
   template <typename BinIdxType>
   void Init(const ColumnMatrix& column_matrix,
-            GHistIndexMatrix const& gmat, 
+            GHistIndexMatrix const& gmat,
             const RegTree* p_tree_local, size_t nthreads, size_t max_depth,
             bool is_lossguide) {
     gmat_n_rows = gmat.row_ptr.size() - 1;
@@ -117,7 +117,8 @@ class OptPartitionBuilder {
         }
       }
     }
-    std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.nodes_count_pair.clear();});
+    std::for_each(tm.threads.begin(), tm.threads.end(),
+                  [](auto& ti) {ti.nodes_count_pair.clear();});
     UpdateRootThreadWork();
   }
 
@@ -165,7 +166,7 @@ class OptPartitionBuilder {
            typename SplitIndBufferType,
            typename SmalestNodesMaskType,
            typename Predicate>
-    void CommonPartition(const ColumnMatrix& column_matrix,Predicate&& pred, const BinIdxType* numa,
+    void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, const BinIdxType* numa,
                        size_t tid, const size_t row_indices_begin, const size_t row_indices_end,
                        uint16_t* nodes_ids,
                        SplitConditionsBufferType* split_conditions,
@@ -302,9 +303,12 @@ class OptPartitionBuilder {
 
     const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*gmat.cut.Ptrs().back();
     const size_t n_bins = gmat.cut.Ptrs().back();
-    std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.nodes_id.clear();});
-    std::for_each(tm.nodes.begin(), tm.nodes.end(), [](auto& ni) {ni.second.threads_id.clear();});
-    std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.nodes_count_pair.clear();});
+    std::for_each(tm.threads.begin(), tm.threads.end(),
+                  [](auto& ti) {ti.nodes_id.clear();});
+    std::for_each(tm.nodes.begin(), tm.nodes.end(),
+                  [](auto& ni) {ni.second.threads_id.clear();});
+    std::for_each(tm.threads.begin(), tm.threads.end(),
+                  [](auto& ti) {ti.nodes_count_pair.clear();});
     if (is_loss_guided) {
       const int cleft = compleate_trees_depth_wise[0];
       const int cright = compleate_trees_depth_wise[1];
@@ -335,7 +339,8 @@ class OptPartitionBuilder {
         for (size_t id = 0; id < tid; ++id) {
           thread_displace_left += tm.threads[id].vec_rows_remain[0];
         }
-        CHECK_LE(thread_displace_left + thread_info->vec_rows_remain[0], parent_begin + parent_size);
+        CHECK_LE(thread_displace_left + thread_info->vec_rows_remain[0],
+                 parent_begin + parent_size);
         std::copy(thread_info->vec_rows_remain.data() + 1,
                   thread_info->vec_rows_remain.data() + 1 + thread_info->vec_rows_remain[0],
                   row_indices_ptr + thread_displace_left);

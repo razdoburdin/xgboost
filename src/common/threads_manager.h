@@ -3,8 +3,12 @@
  * \file threads_manager.h
  * \brief Helper class for control threads in partition builder
  */
-#ifndef XGBOOST_COMMON_OPT_THREADS_MANAGER_H_
-#define XGBOOST_COMMON_OPT_THREADS_MANAGER_H_
+#ifndef XGBOOST_COMMON_THREADS_MANAGER_H_
+#define XGBOOST_COMMON_THREADS_MANAGER_H_
+
+#include <utility>
+#include <vector>
+#include <unordered_map>
 
 namespace xgboost {
 namespace common {
@@ -25,9 +29,13 @@ class AbstractBuffer {
   size_t counter_ = 0;
 
  public:
-  AbstractBuffer(std::vector<DataT>* storage_ptr) : storage_ptr_(storage_ptr) {}
+  explicit AbstractBuffer(std::vector<DataT>* storage_ptr) : storage_ptr_(storage_ptr) {}
 
-  virtual size_t Id() const;
+  AbstractBuffer(const AbstractBuffer&) = delete;
+  AbstractBuffer& operator=(const AbstractBuffer&) = delete;
+  virtual ~AbstractBuffer() = default;
+
+  virtual size_t Id() const = 0;
 
   void Reset() {
     counter_ = 0;
@@ -37,7 +45,7 @@ class AbstractBuffer {
     return &(storage_ptr_->at(Id()));
   }
 
-  DataT* NextItem () {
+  DataT* NextItem() {
     ++counter_;
     return GetItem();
   }
@@ -50,10 +58,10 @@ class AbstractBuffer {
 template <class DataT>
 class CyclicBuffer : public AbstractBuffer<DataT> {
  public:
-  CyclicBuffer(std::vector<DataT>* storage_ptr) : AbstractBuffer<DataT>(storage_ptr) {}
+  explicit CyclicBuffer(std::vector<DataT>* storage_ptr) : AbstractBuffer<DataT>(storage_ptr) {}
 
   size_t Id() const override {
-   return this->counter_ % this->storage_ptr_->size();
+    return this->counter_ % this->storage_ptr_->size();
   }
 
   size_t NCycles() const {
@@ -69,10 +77,12 @@ class CyclicBuffer : public AbstractBuffer<DataT> {
 template <class DataT>
 class SaturationBuffer : public AbstractBuffer<DataT> {
  public:
-  SaturationBuffer(std::vector<DataT>* storage_ptr) : AbstractBuffer<DataT>(storage_ptr) {}
+  explicit SaturationBuffer(std::vector<DataT>* storage_ptr) : AbstractBuffer<DataT>(storage_ptr) {}
 
   size_t Id() const override {
-    return this->counter_ < this->storage_ptr_->size() - 1 ? this->counter_ : this->storage_ptr_->size() - 1;
+    return this->counter_ < this->storage_ptr_->size() - 1
+           ? this->counter_
+           : this->storage_ptr_->size() - 1;
   }
 };
 
@@ -106,7 +116,7 @@ class ThreadsManager {
     CHECK_LT(tid, threads.size());
     if (nodes[nid].threads_id.empty()) {
       nodes[nid].threads_id.push_back(tid);
-      threads[tid].nodes_id.push_back(nid); 
+      threads[tid].nodes_id.push_back(nid);
     } else {
       if (nodes[nid].threads_id.back() != tid) {
         nodes[nid].threads_id.push_back(tid);
@@ -130,4 +140,4 @@ class ThreadsManager {
 }  // namespace common
 }  // namespace xgboost
 
-#endif  // XGBOOST_COMMON_OPT_PARTITION_BUILDER_H_
+#endif  // XGBOOST_COMMON_THREADS_MANAGER_H_
