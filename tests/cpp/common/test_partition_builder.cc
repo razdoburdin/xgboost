@@ -25,7 +25,7 @@ TEST(OptPartitionBuilder, BasicTest) {
   tree.ExpandNode(0, 0, 0, true, 0, 0, 0, 0, 0, 0, 0);
 
   common::OptPartitionBuilder opt_partition_builder;
-  opt_partition_builder.template Init<uint8_t>(gmat, gmat.Transpose(), &tree,
+  opt_partition_builder.template Init<uint8_t>(gmat.Transpose(), gmat, &tree,
     1, 3, false);
   const uint8_t* data = reinterpret_cast<const uint8_t*>(gmat.Transpose().GetIndexData());
 
@@ -42,12 +42,13 @@ TEST(OptPartitionBuilder, BasicTest) {
     return false;
   };
   opt_partition_builder.template CommonPartition<
-    uint8_t, false, true, false>(0, 0, kNRows, data,
+    uint8_t, false, true, false>(gmat.Transpose(), pred, data,
+                          0, 0, kNRows,
                           node_ids.data(),
                           &split_conditions,
                           &split_ind,
                           &smalest_nodes_mask,// row_gpairs,
-                          gmat.Transpose(), split_nodes, pred, 1);
+                          split_nodes, 1);
   opt_partition_builder.UpdateRowBuffer(node_ids,
                                         gmat, gmat.cut.Ptrs().size() - 1,
                                         0, node_ids, false);

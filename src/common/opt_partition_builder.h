@@ -15,33 +15,19 @@
 #include <memory>
 #include "xgboost/tree_model.h"
 #include "../common/column_matrix.h"
+#include "../common/threads_manager.h"
 
 namespace xgboost {
 namespace common {
 
-struct Slice {
-  uint32_t* addr {nullptr};
-  uint32_t b {0};
-  uint32_t e {0};
-  uint32_t Size() const {
-    return e - b;
-  }
-};
 // The builder is required for samples partition to left and rights children for set of nodes
 // template by number of rows
 class OptPartitionBuilder {
  public:
   std::vector<uint16_t> empty;
-  std::vector<std::vector<Slice>> threads_addr;
-  std::unordered_map<uint32_t, std::vector<uint16_t>> threads_id_for_nodes;
-  std::vector<std::vector<uint16_t>> node_id_for_threads;
-  std::vector<std::vector<uint32_t>> threads_rows_nodes_wise;
-  std::vector<std::unordered_map<uint32_t, uint32_t>> threads_nodes_count;
-  std::vector<std::vector<uint32_t>> threads_nodes_count_vec;
-  std::vector<std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>>> nodes_count;
+
+  ThreadsManager tm;
   std::vector<Slice> partitions;
-  std::vector<std::vector<uint32_t>> vec_rows;
-  std::vector<std::vector<uint32_t>> vec_rows_remain;
   std::vector<std::unordered_map<uint32_t, size_t> > states;
   const RegTree* p_tree;
   // can be common for all threads!
@@ -59,43 +45,40 @@ class OptPartitionBuilder {
   uint32_t max_depth = 0;
 
   const std::vector<Slice> &GetSlices(const uint32_t tid) const {
-    return threads_addr[tid];
+    return tm.threads[tid].addr;
   }
 
   const std::vector<uint16_t> &GetNodes(const uint32_t tid) const {
-    return node_id_for_threads[tid];
+    return tm.threads[tid].nodes_id;
   }
 
   const std::vector<uint16_t> &GetThreadIdsForNode(const uint32_t nid) const {
-    if (threads_id_for_nodes.find(nid) == threads_id_for_nodes.end()) {
+    if (tm.nodes.find(nid) == tm.nodes.end()) {
       return empty;
     } else {
-      const std::vector<uint16_t> & res = threads_id_for_nodes.at(nid);
+      const std::vector<uint16_t> & res = tm.nodes.at(nid).threads_id;
       return res;
     }
   }
 
-  void Init(GHistIndexMatrix const& gmat, const ColumnMatrix& column_matrix,
-            const RegTree* p_tree_local, size_t nthreads, size_t max_depth,
-            bool is_lossguide) {
+  template <class... Args>
+  void Init(const ColumnMatrix& column_matrix, const Args&... args) {
     switch (column_matrix.GetTypeSize()) {
       case common::kUint8BinsTypeSize:
-        Init<BinTypeMap<kUint8BinsTypeSize>::Type>(gmat, column_matrix,
-            p_tree_local, nthreads, max_depth, is_lossguide);
+        Init<BinTypeMap<kUint8BinsTypeSize>::Type>(column_matrix, args...);
         break;
       case common::kUint16BinsTypeSize:
-        Init<BinTypeMap<kUint16BinsTypeSize>::Type>(gmat, column_matrix,
-            p_tree_local, nthreads, max_depth, is_lossguide);
+        Init<BinTypeMap<kUint16BinsTypeSize>::Type>(column_matrix, args...);
         break;
       default:
-        Init<BinTypeMap<kUint32BinsTypeSize>::Type>(gmat, column_matrix,
-            p_tree_local, nthreads, max_depth, is_lossguide);
+        Init<BinTypeMap<kUint32BinsTypeSize>::Type>(column_matrix, args...);
         break;
     }
   }
 
   template <typename BinIdxType>
-  void Init(GHistIndexMatrix const& gmat, const ColumnMatrix& column_matrix,
+  void Init(const ColumnMatrix& column_matrix,
+            GHistIndexMatrix const& gmat,
             const RegTree* p_tree_local, size_t nthreads, size_t max_depth,
             bool is_lossguide) {
     gmat_n_rows = gmat.row_ptr.size() - 1;
@@ -116,65 +99,46 @@ class OptPartitionBuilder {
     data_hash = reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData());
     n_threads = nthreads;
     this->max_depth = max_depth;
-    vec_rows.resize(nthreads);
     if (is_lossguide) {
       partitions.resize(1 << (max_depth + 2));
-      vec_rows_remain.resize(nthreads);
     }
-    threads_nodes_count.clear();
-    threads_nodes_count.resize(n_threads);
-    threads_nodes_count_vec.clear();
-    threads_nodes_count_vec.resize(n_threads);
-    if (vec_rows[0].size() == 0) {
+
+    tm.Init(n_threads);
+    if (tm.threads[0].vec_rows.size() == 0) {
       size_t chunck_size = common::GetBlockSize(gmat_n_rows, nthreads);
     #pragma omp parallel num_threads(n_threads)
       {
         size_t tid = omp_get_thread_num();
-        if (vec_rows[tid].size() == 0) {
-          vec_rows[tid].resize(chunck_size + 2, 0);
+        if (tm.threads[tid].vec_rows.size() == 0) {
+          tm.threads[tid].vec_rows.resize(chunck_size + 2, 0);
           if (is_lossguide) {
-            vec_rows_remain[tid].resize(chunck_size + 2, 0);
+            tm.threads[tid].vec_rows_remain.resize(chunck_size + 2, 0);
           }
         }
       }
     }
-    threads_addr.clear();
-    threads_id_for_nodes.clear();
-    node_id_for_threads.clear();
-    nodes_count.clear();
+    std::for_each(tm.threads.begin(), tm.threads.end(),
+                  [](auto& ti) {ti.nodes_count_pair.clear();});
     UpdateRootThreadWork();
   }
 
-  template<bool is_loss_guided, bool all_dense, bool any_cat, typename Predicate>
-  void CommonPartition(size_t tid, const size_t row_indices_begin,
-                       const size_t row_indices_end, uint16_t* nodes_ids,
-                       std::unordered_map<uint32_t, int32_t>* split_conditions,
-                       std::unordered_map<uint32_t, uint64_t>* split_ind,
-                       std::unordered_map<uint32_t, bool>* smalest_nodes_mask,
-                       const ColumnMatrix& column_matrix,
-                       const std::vector<uint32_t>& split_nodes, Predicate&& pred, size_t depth) {
+  template<bool is_loss_guided, bool all_dense, bool any_cat, typename Predicate, class... Args>
+  void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, const Args&... args) {
     switch (column_matrix.GetTypeSize()) {
       case common::kUint8BinsTypeSize:
         CommonPartition<BinTypeMap<kUint8BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
-                           tid, row_indices_begin, row_indices_end,
-                           column_matrix.template GetIndexData<uint8_t>(),
-                           nodes_ids, split_conditions, split_ind, smalest_nodes_mask,
-                           column_matrix, split_nodes, std::forward<Predicate>(pred), depth);
+                           column_matrix, std::forward<Predicate>(pred),
+                           column_matrix.template GetIndexData<uint8_t>(), args...);
         break;
       case common::kUint16BinsTypeSize:
         CommonPartition<BinTypeMap<kUint16BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
-                           tid, row_indices_begin, row_indices_end,
-                           column_matrix.template GetIndexData<uint16_t>(),
-                           nodes_ids, split_conditions, split_ind, smalest_nodes_mask,
-                           column_matrix, split_nodes, std::forward<Predicate>(pred), depth);
+                           column_matrix, std::forward<Predicate>(pred),
+                           column_matrix.template GetIndexData<uint16_t>(), args...);
         break;
       default:
         CommonPartition<BinTypeMap<kUint32BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
-                           tid, row_indices_begin, row_indices_end,
-                           column_matrix.template GetIndexData<uint32_t>(),
-                           nodes_ids, split_conditions, split_ind, smalest_nodes_mask,
-                           column_matrix, split_nodes, std::forward<Predicate>(pred), depth);
-        break;
+                           column_matrix, std::forward<Predicate>(pred),
+                           column_matrix.template GetIndexData<uint32_t>(), args...);
     }
   }
 
@@ -202,21 +166,21 @@ class OptPartitionBuilder {
            typename SplitIndBufferType,
            typename SmalestNodesMaskType,
            typename Predicate>
-  void CommonPartition(size_t tid, const size_t row_indices_begin,
-                       const size_t row_indices_end, const BinIdxType* numa, uint16_t* nodes_ids,
+    void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, const BinIdxType* numa,
+                       size_t tid, const size_t row_indices_begin, const size_t row_indices_end,
+                       uint16_t* nodes_ids,
                        SplitConditionsBufferType* split_conditions,
                        SplitIndBufferType* split_ind,
                        SmalestNodesMaskType* smalest_nodes_mask,
-                       const ColumnMatrix& column_matrix,
-                       const std::vector<uint32_t>& split_nodes, Predicate&& pred, size_t depth) {
+                       const std::vector<uint32_t>& split_nodes, size_t depth) {
     CHECK_EQ(data_hash, reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData()));
     const auto& column_list = column_matrix.GetColumnViewList();
     uint32_t rows_count = 0;
     uint32_t rows_left_count = 0;
-    uint32_t* rows = vec_rows[tid].data();
+    uint32_t* rows = tm.threads[tid].vec_rows.data();
     uint32_t* rows_left = nullptr;
     if (is_loss_guided) {
-      rows_left = vec_rows_remain[tid].data();
+      rows_left = tm.threads[tid].vec_rows_remain.data();
     }
     auto& split_ind_data = *split_ind;
     auto& split_conditions_data = *split_conditions;
@@ -270,7 +234,7 @@ class OptPartitionBuilder {
         rows_left[1 + rows_left_count] = i;
         rows_left_count += !static_cast<bool>(inc);
       } else {
-        threads_nodes_count[tid][check_node_id] += inc;
+        tm.threads[tid].nodes_count[check_node_id] += inc;
       }
     }
 
@@ -334,15 +298,17 @@ class OptPartitionBuilder {
     summ_size = 0;
     summ_size_remain = 0;
     for (uint32_t i = 0; i < n_threads; ++i) {
-      summ_size += vec_rows[i][0];
+      summ_size += tm.threads[i].vec_rows[0];
     }
 
     const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*gmat.cut.Ptrs().back();
     const size_t n_bins = gmat.cut.Ptrs().back();
-    threads_id_for_nodes.clear();
-    nodes_count.clear();
-    node_id_for_threads.clear();
-    node_id_for_threads.resize(n_threads);
+    std::for_each(tm.threads.begin(), tm.threads.end(),
+                  [](auto& ti) {ti.nodes_id.clear();});
+    std::for_each(tm.nodes.begin(), tm.nodes.end(),
+                  [](auto& ni) {ni.second.threads_id.clear();});
+    std::for_each(tm.threads.begin(), tm.threads.end(),
+                  [](auto& ti) {ti.nodes_count_pair.clear();});
     if (is_loss_guided) {
       const int cleft = compleate_trees_depth_wise[0];
       const int cright = compleate_trees_depth_wise[1];
@@ -351,7 +317,7 @@ class OptPartitionBuilder {
       const size_t parent_begin = partitions[parent_id].b;
       const size_t parent_size = partitions[parent_id].Size();
       for (uint32_t i = 0; i < n_threads; ++i) {
-        summ_size_remain += vec_rows_remain[i][0];
+        summ_size_remain += tm.threads[i].vec_rows_remain[0];
       }
       CHECK_EQ(summ_size + summ_size_remain, parent_size);
       SetSlice(cleft, partitions[parent_id].b, summ_size);
@@ -360,39 +326,40 @@ class OptPartitionBuilder {
       #pragma omp parallel num_threads(n_threads)
       {
         uint32_t tid = omp_get_thread_num();
+        auto thread_info = &tm.threads[tid];
         uint32_t thread_displace = parent_begin;
         for (size_t id = 0; id < tid; ++id) {
-          thread_displace += vec_rows[id][0];
+          thread_displace += tm.threads[id].vec_rows[0];
         }
-        CHECK_LE(thread_displace + vec_rows[tid][0], parent_begin + summ_size);
-        std::copy(vec_rows[tid].data() + 1,
-                  vec_rows[tid].data() + 1 + vec_rows[tid][0],
+        CHECK_LE(thread_displace + thread_info->vec_rows[0], parent_begin + summ_size);
+        std::copy(thread_info->vec_rows.data() + 1,
+                  thread_info->vec_rows.data() + 1 + thread_info->vec_rows[0],
                   row_indices_ptr + thread_displace);
         uint32_t thread_displace_left = parent_begin + summ_size;
         for (size_t id = 0; id < tid; ++id) {
-          thread_displace_left += vec_rows_remain[id][0];
+          thread_displace_left += tm.threads[id].vec_rows_remain[0];
         }
-        CHECK_LE(thread_displace_left + vec_rows_remain[tid][0], parent_begin + parent_size);
-        std::copy(vec_rows_remain[tid].data() + 1,
-                  vec_rows_remain[tid].data() + 1 + vec_rows_remain[tid][0],
+        CHECK_LE(thread_displace_left + thread_info->vec_rows_remain[0],
+                 parent_begin + parent_size);
+        std::copy(thread_info->vec_rows_remain.data() + 1,
+                  thread_info->vec_rows_remain.data() + 1 + thread_info->vec_rows_remain[0],
                   row_indices_ptr + thread_displace_left);
       }
     } else if (n_features*summ_size / n_threads <
                (static_cast<size_t>(1) << (depth + 1))*n_bins ||
                (depth >= 1 && !hist_fit_to_l2)) {
-      threads_rows_nodes_wise.resize(n_threads);
-      nodes_count.resize(n_threads);
       #pragma omp parallel num_threads(n_threads)
       {
         size_t tid = omp_get_thread_num();
-        if (threads_rows_nodes_wise[tid].size() == 0) {
-          threads_rows_nodes_wise[tid].resize(vec_rows[tid].size(), 0);
+        auto thread_info = &tm.threads[tid];
+        if (thread_info->rows_nodes_wise.size() == 0) {
+          thread_info->rows_nodes_wise.resize(thread_info->vec_rows.size(), 0);
         }
         std::unordered_map<uint32_t, uint32_t> nc;
 
-        std::vector<uint32_t> unique_node_ids(threads_nodes_count[tid].size(), 0);
+        std::vector<uint32_t> unique_node_ids(thread_info->nodes_count.size(), 0);
         size_t i = 0;
-        for (const auto& tnc : threads_nodes_count[tid]) {
+        for (const auto& tnc : thread_info->nodes_count) {
           CHECK_LT(i, unique_node_ids.size());
           unique_node_ids[i++] = tnc.first;
         }
@@ -400,17 +367,17 @@ class OptPartitionBuilder {
         size_t cummulative_summ = 0;
         std::unordered_map<uint32_t, uint32_t> counts;
         for (const auto& uni : unique_node_ids) {
-          nodes_count[tid][uni].first = cummulative_summ;
+          thread_info->nodes_count_pair[uni].first = cummulative_summ;
           counts[uni] = cummulative_summ;
-          nodes_count[tid][uni].second = nodes_count[tid][uni].first +
-                                         threads_nodes_count[tid][uni];
-          cummulative_summ += threads_nodes_count[tid][uni];
+          thread_info->nodes_count_pair[uni].second = thread_info->nodes_count_pair[uni].first +
+                                            thread_info->nodes_count[uni];
+          cummulative_summ += thread_info->nodes_count[uni];
         }
-        for (size_t i = 0; i < vec_rows[tid][0]; ++i) {
-          const uint32_t row_id = vec_rows[tid][i + 1];
+        for (size_t i = 0; i < thread_info->vec_rows[0]; ++i) {
+          const uint32_t row_id = thread_info->vec_rows[i + 1];
           const uint16_t check_node_id = node_ids_[row_id];
           const uint32_t nod_id = check_node_id;
-          threads_rows_nodes_wise[tid][counts[nod_id]++] = row_id;
+          thread_info->rows_nodes_wise[counts[nod_id]++] = row_id;
         }
       }
     }
@@ -421,8 +388,7 @@ class OptPartitionBuilder {
                          bool is_left_small = true,
                          bool check_is_left_small = false) {
     const size_t n_bins = gmat.cut.Ptrs().back();
-    threads_addr.clear();
-    threads_addr.resize(n_threads);
+    std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.addr.clear();});
     const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*gmat.cut.Ptrs().back();
     if (is_loss_guided) {
       const int cleft = compleate_trees_depth_wise[0];
@@ -440,10 +406,10 @@ class OptPartitionBuilder {
         uint32_t th_end = std::min(th_begin + thread_size, min_node_size);
         if (th_end > th_begin) {
           CHECK_LT(min_node_id, partitions.size());
-          threads_addr[tid].push_back({row_indices_ptr, partitions[min_node_id].b + th_begin,
+          tm.threads[tid].addr.push_back({row_indices_ptr, partitions[min_node_id].b + th_begin,
                                        partitions[min_node_id].b + th_end});
-          threads_id_for_nodes[min_node_id].push_back(tid);
-          node_id_for_threads[tid].push_back(min_node_id);
+          tm.nodes[min_node_id].threads_id.push_back(tid);
+          tm.threads[tid].nodes_id.push_back(min_node_id);
         }
       }
     } else if (n_features*summ_size / n_threads <
@@ -451,60 +417,39 @@ class OptPartitionBuilder {
                || (depth >= 1 && !hist_fit_to_l2)) {
       uint32_t block_size = std::max(common::GetBlockSize(summ_size, n_threads),
                                      std::min(summ_size, static_cast<uint32_t>(512)));
-      uint32_t node_id = 0;
       uint32_t curr_thread_size = block_size;
       uint32_t curr_node_disp = 0;
-      uint32_t curr_thread_id = 0;
+      tm.threads_cbuffer.Reset();
+      auto thread_info = tm.threads_cbuffer.GetItem();
       for (uint32_t i = 0; i < n_threads; ++i) {
         while (curr_thread_size != 0) {
-          const uint32_t curr_thread_node_size = threads_nodes_count[curr_thread_id%
-                                                                     n_threads][node_id];
+          uint32_t node_id = tm.threads_cbuffer.NCycles();
+          const uint32_t curr_thread_node_size = thread_info->nodes_count[node_id];
           if (curr_thread_node_size == 0) {
-            ++curr_thread_id;
-            node_id = curr_thread_id / n_threads;
+            thread_info = tm.threads_cbuffer.NextItem();
           } else if (curr_thread_node_size > 0 && curr_thread_node_size <= curr_thread_size) {
-            const uint32_t begin = nodes_count[curr_thread_id%n_threads][node_id].first;
-            CHECK_EQ(nodes_count[curr_thread_id%n_threads][node_id].first + curr_thread_node_size,
-                    nodes_count[curr_thread_id%n_threads][node_id].second);
-            threads_addr[i].push_back({
-              threads_rows_nodes_wise[curr_thread_id%n_threads].data(), begin,
+            const uint32_t begin = thread_info->nodes_count_pair[node_id].first;
+            CHECK_EQ(thread_info->nodes_count_pair[node_id].first + curr_thread_node_size,
+                     thread_info->nodes_count_pair[node_id].second);
+            tm.threads[i].addr.push_back({
+              thread_info->rows_nodes_wise.data(), begin,
               begin + curr_thread_node_size
             });
-            CHECK_LT(i, node_id_for_threads.size());
-            if (threads_id_for_nodes[node_id].size() != 0) {
-              if (threads_id_for_nodes[node_id].back() != i) {
-                threads_id_for_nodes[node_id].push_back(i);
-                node_id_for_threads[i].push_back(node_id);
-              }
-            } else {
-              threads_id_for_nodes[node_id].push_back(i);
-              node_id_for_threads[i].push_back(node_id);
-            }
-            threads_nodes_count[curr_thread_id%n_threads][node_id] = 0;
+            tm.Tie(i, node_id);
+            thread_info->nodes_count[node_id] = 0;
             curr_thread_size -= curr_thread_node_size;
-            ++curr_thread_id;
-            node_id = curr_thread_id / n_threads;
+            thread_info = tm.threads_cbuffer.NextItem();
           } else {
-            const uint32_t begin = nodes_count[curr_thread_id%n_threads][node_id].first;
-            CHECK_EQ(nodes_count[curr_thread_id%n_threads][node_id].first + curr_thread_node_size,
-                    nodes_count[curr_thread_id%n_threads][node_id].second);
-            CHECK_LT(i, threads_addr.size());
-            threads_addr[i].push_back({
-              threads_rows_nodes_wise[curr_thread_id%n_threads].data(), begin,
+            const uint32_t begin = thread_info->nodes_count_pair[node_id].first;
+            CHECK_EQ(thread_info->nodes_count_pair[node_id].first + curr_thread_node_size,
+                     thread_info->nodes_count_pair[node_id].second);
+            tm.threads[i].addr.push_back({
+              thread_info->rows_nodes_wise.data(), begin,
               begin + curr_thread_size
             });
-            CHECK_LT(i, node_id_for_threads.size());
-            if (threads_id_for_nodes[node_id].size() != 0) {
-              if (threads_id_for_nodes[node_id].back() != i) {
-                threads_id_for_nodes[node_id].push_back(i);
-                node_id_for_threads[i].push_back(node_id);
-              }
-            } else {
-              threads_id_for_nodes[node_id].push_back(i);
-              node_id_for_threads[i].push_back(node_id);
-            }
-            threads_nodes_count[curr_thread_id%n_threads][node_id] -= curr_thread_size;
-            nodes_count[curr_thread_id%n_threads][node_id].first += curr_thread_size;
+            tm.Tie(i, node_id);
+            thread_info->nodes_count[node_id] -= curr_thread_size;
+            thread_info->nodes_count_pair[node_id].first += curr_thread_size;
             curr_thread_size = 0;
           }
         }
@@ -514,37 +459,36 @@ class OptPartitionBuilder {
       }
     } else {
       uint32_t block_size = common::GetBlockSize(summ_size, n_threads);
-      uint32_t curr_vec_rowsid = 0;
-      uint32_t curr_vec_rowssize = vec_rows[curr_vec_rowsid][0];
+      tm.threads_sbuffer.Reset();
+      auto thread_info = tm.threads_sbuffer.GetItem();
+      uint32_t curr_vec_rowssize = thread_info->vec_rows[0];
       uint32_t curr_thread_size = block_size;
       for (uint32_t i = 0; i < n_threads; ++i) {
         std::vector<uint32_t> borrowed_work;
         while (curr_thread_size != 0) {
+          borrowed_work.push_back(tm.threads_sbuffer.Id());
           if (curr_vec_rowssize > curr_thread_size) {
-            threads_addr[i].push_back({
-              vec_rows[curr_vec_rowsid].data(),
-              1 + vec_rows[curr_vec_rowsid][0] - curr_vec_rowssize,
-              1 + vec_rows[curr_vec_rowsid][0] - curr_vec_rowssize + curr_thread_size});
-            borrowed_work.push_back(curr_vec_rowsid);
+            tm.threads[i].addr.push_back({
+              thread_info->vec_rows.data(),
+              1 + thread_info->vec_rows[0] - curr_vec_rowssize,
+              1 + thread_info->vec_rows[0] - curr_vec_rowssize + curr_thread_size});
             curr_vec_rowssize -= curr_thread_size;
             curr_thread_size = 0;
           } else if (curr_vec_rowssize == curr_thread_size) {
-            threads_addr[i].push_back({
-              vec_rows[curr_vec_rowsid].data(),
-              1 + vec_rows[curr_vec_rowsid][0] - curr_vec_rowssize,
-              1 + vec_rows[curr_vec_rowsid][0] - curr_vec_rowssize + curr_thread_size});
-            borrowed_work.push_back(curr_vec_rowsid);
-            curr_vec_rowsid += (curr_vec_rowsid < (n_threads - 1));
-            curr_vec_rowssize = vec_rows[curr_vec_rowsid][0];
+            tm.threads[i].addr.push_back({
+              thread_info->vec_rows.data(),
+              1 + thread_info->vec_rows[0] - curr_vec_rowssize,
+              1 + thread_info->vec_rows[0] - curr_vec_rowssize + curr_thread_size});
+            thread_info = tm.threads_sbuffer.NextItem();
+            curr_vec_rowssize = thread_info->vec_rows[0];
             curr_thread_size = 0;
           } else {
-            threads_addr[i].push_back({vec_rows[curr_vec_rowsid].data(),
-                                      1 + vec_rows[curr_vec_rowsid][0] - curr_vec_rowssize,
-                                      1 + vec_rows[curr_vec_rowsid][0]});
-            borrowed_work.push_back(curr_vec_rowsid);
+            tm.threads[i].addr.push_back({thread_info->vec_rows.data(),
+                                      1 + thread_info->vec_rows[0] - curr_vec_rowssize,
+                                      1 + thread_info->vec_rows[0]});
             curr_thread_size -= curr_vec_rowssize;
-            curr_vec_rowsid += (curr_vec_rowsid < (n_threads - 1));
-            curr_vec_rowssize = vec_rows[curr_vec_rowsid][0];
+            thread_info = tm.threads_sbuffer.NextItem();
+            curr_vec_rowssize = thread_info->vec_rows[0];
           }
         }
         curr_thread_size = std::min(block_size,
@@ -552,42 +496,28 @@ class OptPartitionBuilder {
                                     summ_size - block_size*(i+1) : 0);
         for (const auto& borrowed_tid : borrowed_work) {
           for (const auto& node_id : compleate_trees_depth_wise) {
-            if (threads_nodes_count[borrowed_tid][node_id] != 0) {
-              if (threads_id_for_nodes[node_id].size() != 0) {
-                if (threads_id_for_nodes[node_id].back() != i) {
-                  threads_id_for_nodes[node_id].push_back(i);
-                  node_id_for_threads[i].push_back(node_id);
-                }
-              } else {
-                threads_id_for_nodes[node_id].push_back(i);
-                node_id_for_threads[i].push_back(node_id);
-            }
+            if (tm.threads[borrowed_tid].nodes_count[node_id] != 0) {
+              tm.Tie(i, node_id);
             }
           }
         }
       }
     }
-    threads_nodes_count.clear();
-    threads_nodes_count.resize(n_threads);
-    threads_nodes_count_vec.clear();
-    threads_nodes_count_vec.resize(n_threads);
-    nodes_count.clear();
+    std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.nodes_count.clear();});
+    std::for_each(tm.threads.begin(), tm.threads.end(),
+                  [](auto& ti) {ti.nodes_count_pair.clear();});
   }
   void UpdateRootThreadWork() {
-    threads_addr.clear();
-    threads_addr.resize(n_threads);
-    threads_id_for_nodes.clear();
-    node_id_for_threads.clear();
-    node_id_for_threads.resize(n_threads);
+    std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.addr.clear();});
+    std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.nodes_id.clear();});
     const uint32_t n_rows = gmat_n_rows;
     const uint32_t block_size = common::GetBlockSize(n_rows, n_threads);
     for (uint32_t tid = 0; tid < n_threads; ++tid) {
       const uint32_t begin = tid * block_size;
       const uint32_t end = std::min(begin + block_size, n_rows);
       if (end > begin) {
-        threads_addr[tid].push_back({nullptr, begin, end});
-        threads_id_for_nodes[0].push_back(tid);
-        node_id_for_threads[tid].push_back(0);
+        tm.threads[tid].addr.push_back({nullptr, begin, end});
+        tm.Tie(tid, 0);
       }
     }
   }

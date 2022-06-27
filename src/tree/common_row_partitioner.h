@@ -234,7 +234,7 @@ class CommonRowPartitioner {
     if (column_matrix.GetIndexData() != opt_partition_builder_.data_hash ||
         column_matrix.GetMissing() != opt_partition_builder_.missing_ptr ||
         column_matrix.GetRowId() != opt_partition_builder_.row_ind_ptr) {
-        opt_partition_builder_.Init(gmat, column_matrix, p_tree,
+        opt_partition_builder_.Init(column_matrix, gmat, p_tree,
                                                 ctx->Threads(), max_depth,
                                                 is_loss_guided);
     }
@@ -322,13 +322,13 @@ class CommonRowPartitioner {
                                                         is_loss_guided,
                                                         !any_missing,
                                                         any_cat>(
-          tid, begin, end, numa,
+          column_matrix, pred, numa,
+          tid, begin, end,
           node_ids_.data(),
           &split_conditions_data_vec,
           &split_ind_data_vec,
           &smalest_nodes_mask_vec,
-          column_matrix,
-          split_nodes, pred, depth);
+          split_nodes, depth);
       }
     } else {
     #pragma omp parallel num_threads(nthreads)
@@ -347,13 +347,13 @@ class CommonRowPartitioner {
                                                         is_loss_guided,
                                                         !any_missing,
                                                         any_cat>(
-          tid, begin, end, numa,
+          column_matrix, pred, numa,
+          tid, begin, end,
           node_ids_.data(),
           split_conditions_,
           split_ind_,
           smalest_nodes_mask_ptr,
-          column_matrix,
-          split_nodes, pred, depth);
+          split_nodes, depth);
       }
     }
 
@@ -411,7 +411,7 @@ class CommonRowPartitioner {
       }
     }
     common::ColumnMatrix const &column_matrix = gmat.Transpose();
-    opt_partition_builder_.Init(gmat, column_matrix, p_tree_local,
+    opt_partition_builder_.Init(column_matrix, gmat, p_tree_local,
                                             ctx->Threads(), max_depth,
                                             is_loss_guide);
     opt_partition_builder_.SetSlice(0, 0, gmat.row_ptr.size() - 1);
@@ -440,7 +440,7 @@ class CommonRowPartitioner {
         }
       }
     }
-    opt_partition_builder_.Init(gmat, column_matrix, p_tree_local,
+    opt_partition_builder_.Init(column_matrix, gmat, p_tree_local,
                                             ctx->Threads(), max_depth,
                                             is_loss_guide);
     opt_partition_builder_.SetSlice(0, 0, gmat.row_ptr.size() - 1);
