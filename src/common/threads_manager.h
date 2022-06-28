@@ -94,11 +94,17 @@ class ThreadsManager {
     std::unordered_map<uint32_t, uint32_t> nodes_count;
     std::vector<uint32_t> rows_nodes_wise;
 
-    /* TODO: find better name and use struct insteard of pair */
-    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> nodes_count_pair;
+    struct NodesCountRange {
+      uint32_t begin;
+      uint32_t end;
+    };
+    std::unordered_map<uint32_t, NodesCountRange> nodes_count_range;
 
     std::vector<uint32_t> vec_rows;
     std::vector<uint32_t> vec_rows_remain;
+
+    std::unordered_map<uint32_t, size_t> states;
+    std::unordered_map<uint32_t, bool> default_flags;
   };
 
   struct NodeInfo {
@@ -128,6 +134,10 @@ class ThreadsManager {
   void Init(size_t n_threads) {
     threads.resize(n_threads);
     nodes.clear();
+  }
+
+  ThreadInfo* GetThreadInfoPtr(size_t tid) {
+    return &(threads[tid]);
   }
 
   std::vector<ThreadInfo> threads;

@@ -28,10 +28,8 @@ class OptPartitionBuilder {
 
   ThreadsManager tm;
   std::vector<Slice> partitions;
-  std::vector<std::unordered_map<uint32_t, size_t> > states;
   const RegTree* p_tree;
   // can be common for all threads!
-  std::vector<std::unordered_map<uint32_t, bool>> default_flags;
   const uint8_t* data_hash;
   std::vector<uint8_t>* missing_ptr;
   size_t* row_ind_ptr;
@@ -84,17 +82,13 @@ class OptPartitionBuilder {
     gmat_n_rows = gmat.row_ptr.size() - 1;
     base_rowid = gmat.base_rowid;
     p_tree = p_tree_local;
-    if ((states.size() == 0 && column_matrix.AnyMissing()) ||
+    if ((tm.threads.size() == 0 && column_matrix.AnyMissing()) ||
         (data_hash != reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData())
         && column_matrix.AnyMissing()) ||
         (missing_ptr != column_matrix.GetMissing() && column_matrix.AnyMissing()) ||
         (row_ind_ptr != column_matrix.GetRowId())) {
       missing_ptr = const_cast<std::vector<uint8_t>*>(column_matrix.GetMissing());
       row_ind_ptr = const_cast<size_t*>(column_matrix.GetRowId());
-      states.clear();
-      default_flags.clear();
-      states.resize(nthreads);
-      default_flags.resize(nthreads);
     }
     data_hash = reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData());
     n_threads = nthreads;
@@ -118,7 +112,7 @@ class OptPartitionBuilder {
       }
     }
     std::for_each(tm.threads.begin(), tm.threads.end(),
-                  [](auto& ti) {ti.nodes_count_pair.clear();});
+                  [](auto& ti) {ti.nodes_count_range.clear();});
     UpdateRootThreadWork();
   }
 
@@ -166,21 +160,23 @@ class OptPartitionBuilder {
            typename SplitIndBufferType,
            typename SmalestNodesMaskType,
            typename Predicate>
-    void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, const BinIdxType* numa,
-                       size_t tid, const size_t row_indices_begin, const size_t row_indices_end,
-                       uint16_t* nodes_ids,
-                       SplitConditionsBufferType* split_conditions,
-                       SplitIndBufferType* split_ind,
-                       SmalestNodesMaskType* smalest_nodes_mask,
-                       const std::vector<uint32_t>& split_nodes, size_t depth) {
+    void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred,
+                         const BinIdxType* numa, size_t tid,
+                         const size_t row_indices_begin, const size_t row_indices_end,
+                         uint16_t* nodes_ids,
+                         SplitConditionsBufferType* split_conditions,
+                         SplitIndBufferType* split_ind,
+                         SmalestNodesMaskType* smalest_nodes_mask,
+                         const std::vector<uint32_t>& split_nodes, size_t depth) {
     CHECK_EQ(data_hash, reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData()));
     const auto& column_list = column_matrix.GetColumnViewList();
     uint32_t rows_count = 0;
     uint32_t rows_left_count = 0;
-    uint32_t* rows = tm.threads[tid].vec_rows.data();
+    auto thread_info = tm.GetThreadInfoPtr(tid);
+    uint32_t* rows = thread_info->vec_rows.data();
     uint32_t* rows_left = nullptr;
     if (is_loss_guided) {
-      rows_left = tm.threads[tid].vec_rows_remain.data();
+      rows_left = thread_info->vec_rows_remain.data();
     }
     auto& split_ind_data = *split_ind;
     auto& split_conditions_data = *split_conditions;
@@ -191,8 +187,8 @@ class OptPartitionBuilder {
       const uint32_t first_row_id = !is_loss_guided ? row_indices_begin :
                                                       row_indices_ptr[row_indices_begin];
       for (const auto& nid : split_nodes) {
-        states[tid][nid] = column_list[split_ind_data[nid]]->GetInitialState(first_row_id);
-        default_flags[tid][nid] = (*p_tree)[nid].DefaultLeft();
+        thread_info->states[nid] = column_list[split_ind_data[nid]]->GetInitialState(first_row_id);
+        thread_info->default_flags[nid] = (*p_tree)[nid].DefaultLeft();
       }
     }
     for (size_t ii = row_indices_begin; ii < row_indices_end; ++ii) {
@@ -215,10 +211,10 @@ class OptPartitionBuilder {
       } else {
         uint64_t si = GetBufferItem(split_ind_data, nid);
         int32_t cmp_value = column_list[si]->template GetBinIdx<BinIdxType, int32_t>(i,
-                                                                        &(states[tid][nid]));
+                                                                        &(thread_info->states[nid]));
 
         if (cmp_value == Column::kMissingId) {
-          nodes_ids[i] = default_flags[tid][nid]
+          nodes_ids[i] = thread_info->default_flags[nid]
                          ? (*p_tree)[nid].LeftChild()
                          : (*p_tree)[nid].RightChild();
         } else {
@@ -308,7 +304,7 @@ class OptPartitionBuilder {
     std::for_each(tm.nodes.begin(), tm.nodes.end(),
                   [](auto& ni) {ni.second.threads_id.clear();});
     std::for_each(tm.threads.begin(), tm.threads.end(),
-                  [](auto& ti) {ti.nodes_count_pair.clear();});
+                  [](auto& ti) {ti.nodes_count_range.clear();});
     if (is_loss_guided) {
       const int cleft = compleate_trees_depth_wise[0];
       const int cright = compleate_trees_depth_wise[1];
@@ -326,7 +322,7 @@ class OptPartitionBuilder {
       #pragma omp parallel num_threads(n_threads)
       {
         uint32_t tid = omp_get_thread_num();
-        auto thread_info = &tm.threads[tid];
+        auto thread_info = tm.GetThreadInfoPtr(tid);
         uint32_t thread_displace = parent_begin;
         for (size_t id = 0; id < tid; ++id) {
           thread_displace += tm.threads[id].vec_rows[0];
@@ -351,7 +347,7 @@ class OptPartitionBuilder {
       #pragma omp parallel num_threads(n_threads)
       {
         size_t tid = omp_get_thread_num();
-        auto thread_info = &tm.threads[tid];
+        auto thread_info = tm.GetThreadInfoPtr(tid);
         if (thread_info->rows_nodes_wise.size() == 0) {
           thread_info->rows_nodes_wise.resize(thread_info->vec_rows.size(), 0);
         }
@@ -367,10 +363,10 @@ class OptPartitionBuilder {
         size_t cummulative_summ = 0;
         std::unordered_map<uint32_t, uint32_t> counts;
         for (const auto& uni : unique_node_ids) {
-          thread_info->nodes_count_pair[uni].first = cummulative_summ;
+          auto nodes_count_range = &(thread_info->nodes_count_range[uni]);
+          nodes_count_range->begin = cummulative_summ;
           counts[uni] = cummulative_summ;
-          thread_info->nodes_count_pair[uni].second = thread_info->nodes_count_pair[uni].first +
-                                            thread_info->nodes_count[uni];
+          nodes_count_range->end = nodes_count_range->begin + thread_info->nodes_count[uni];
           cummulative_summ += thread_info->nodes_count[uni];
         }
         for (size_t i = 0; i < thread_info->vec_rows[0]; ++i) {
@@ -425,32 +421,29 @@ class OptPartitionBuilder {
         while (curr_thread_size != 0) {
           uint32_t node_id = tm.threads_cbuffer.NCycles();
           const uint32_t curr_thread_node_size = thread_info->nodes_count[node_id];
+          auto nodes_count_range = &(thread_info->nodes_count_range[node_id]);
+
           if (curr_thread_node_size == 0) {
             thread_info = tm.threads_cbuffer.NextItem();
-          } else if (curr_thread_node_size > 0 && curr_thread_node_size <= curr_thread_size) {
-            const uint32_t begin = thread_info->nodes_count_pair[node_id].first;
-            CHECK_EQ(thread_info->nodes_count_pair[node_id].first + curr_thread_node_size,
-                     thread_info->nodes_count_pair[node_id].second);
-            tm.threads[i].addr.push_back({
-              thread_info->rows_nodes_wise.data(), begin,
-              begin + curr_thread_node_size
-            });
-            tm.Tie(i, node_id);
-            thread_info->nodes_count[node_id] = 0;
-            curr_thread_size -= curr_thread_node_size;
-            thread_info = tm.threads_cbuffer.NextItem();
           } else {
-            const uint32_t begin = thread_info->nodes_count_pair[node_id].first;
-            CHECK_EQ(thread_info->nodes_count_pair[node_id].first + curr_thread_node_size,
-                     thread_info->nodes_count_pair[node_id].second);
-            tm.threads[i].addr.push_back({
-              thread_info->rows_nodes_wise.data(), begin,
-              begin + curr_thread_size
-            });
+            uint32_t* slice_addr = thread_info->rows_nodes_wise.data();
+            uint32_t slice_begin = nodes_count_range->begin;
+            uint32_t slice_end = slice_begin;
+            CHECK_EQ(nodes_count_range->begin + curr_thread_node_size,
+                     nodes_count_range->end);
             tm.Tie(i, node_id);
-            thread_info->nodes_count[node_id] -= curr_thread_size;
-            thread_info->nodes_count_pair[node_id].first += curr_thread_size;
-            curr_thread_size = 0;
+            if (curr_thread_node_size > 0 && curr_thread_node_size <= curr_thread_size) {
+              slice_end += curr_thread_node_size;
+              thread_info->nodes_count[node_id] = 0;
+              curr_thread_size -= curr_thread_node_size;
+              thread_info = tm.threads_cbuffer.NextItem();
+            } else {
+              slice_end += curr_thread_size;
+              thread_info->nodes_count[node_id] -= curr_thread_size;
+              nodes_count_range->begin += curr_thread_size;
+              curr_thread_size = 0;
+            }
+            tm.threads[i].addr.push_back({slice_addr, slice_begin, slice_end});
           }
         }
         curr_thread_size = std::min(block_size,
@@ -467,29 +460,19 @@ class OptPartitionBuilder {
         std::vector<uint32_t> borrowed_work;
         while (curr_thread_size != 0) {
           borrowed_work.push_back(tm.threads_sbuffer.Id());
+          uint32_t* slice_addr = thread_info->vec_rows.data();
+          uint32_t slice_begin = 1 + thread_info->vec_rows[0] - curr_vec_rowssize;
+          uint32_t slice_end = 1 + thread_info->vec_rows[0];
           if (curr_vec_rowssize > curr_thread_size) {
-            tm.threads[i].addr.push_back({
-              thread_info->vec_rows.data(),
-              1 + thread_info->vec_rows[0] - curr_vec_rowssize,
-              1 + thread_info->vec_rows[0] - curr_vec_rowssize + curr_thread_size});
+            slice_end += -curr_vec_rowssize + curr_thread_size;
             curr_vec_rowssize -= curr_thread_size;
             curr_thread_size = 0;
-          } else if (curr_vec_rowssize == curr_thread_size) {
-            tm.threads[i].addr.push_back({
-              thread_info->vec_rows.data(),
-              1 + thread_info->vec_rows[0] - curr_vec_rowssize,
-              1 + thread_info->vec_rows[0] - curr_vec_rowssize + curr_thread_size});
-            thread_info = tm.threads_sbuffer.NextItem();
-            curr_vec_rowssize = thread_info->vec_rows[0];
-            curr_thread_size = 0;
           } else {
-            tm.threads[i].addr.push_back({thread_info->vec_rows.data(),
-                                      1 + thread_info->vec_rows[0] - curr_vec_rowssize,
-                                      1 + thread_info->vec_rows[0]});
             curr_thread_size -= curr_vec_rowssize;
             thread_info = tm.threads_sbuffer.NextItem();
             curr_vec_rowssize = thread_info->vec_rows[0];
           }
+          tm.threads[i].addr.push_back({slice_addr, slice_begin, slice_end});
         }
         curr_thread_size = std::min(block_size,
                                     summ_size > block_size*(i+1) ?
@@ -505,7 +488,7 @@ class OptPartitionBuilder {
     }
     std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.nodes_count.clear();});
     std::for_each(tm.threads.begin(), tm.threads.end(),
-                  [](auto& ti) {ti.nodes_count_pair.clear();});
+                  [](auto& ti) {ti.nodes_count_range.clear();});
   }
   void UpdateRootThreadWork() {
     std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.addr.clear();});
