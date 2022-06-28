@@ -98,7 +98,11 @@ class ThreadsManager {
       uint32_t begin;
       uint32_t end;
     };
+
     std::unordered_map<uint32_t, NodesCountRange> nodes_count_range;
+    NodesCountRange* GetNodesCountRangePtr(size_t nid) {
+     return &(nodes_count_range[nid]);
+    }
 
     std::vector<uint32_t> vec_rows;
     std::vector<uint32_t> vec_rows_remain;

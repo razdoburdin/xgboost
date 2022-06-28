@@ -199,19 +199,17 @@ class OptPartitionBuilder {
       }
       const int32_t sc = GetBufferItem(split_conditions_data, nid);
 
+      uint64_t si = GetBufferItem(split_ind_data, nid);
       if (any_cat) {
-        uint64_t si = GetBufferItem(split_ind_data, nid);
         const int32_t cmp_value = static_cast<int32_t>(columnar_data[si + i]);
         nodes_ids[i] = pred(i, cmp_value, nid, sc) ? (*p_tree)[nid].LeftChild() :
                        (*p_tree)[nid].RightChild();
       } else if (all_dense) {
-        uint64_t si = GetBufferItem(split_ind_data, nid);
         const int32_t cmp_value = static_cast<int32_t>(columnar_data[si + i]);
         nodes_ids[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild() : (*p_tree)[nid].RightChild();
       } else {
-        uint64_t si = GetBufferItem(split_ind_data, nid);
-        int32_t cmp_value = column_list[si]->template GetBinIdx<BinIdxType, int32_t>(i,
-                                                                        &(thread_info->states[nid]));
+        int32_t cmp_value = column_list[si]->template GetBinIdx<BinIdxType, int32_t>
+                                                               (i, &(thread_info->states[nid]));
 
         if (cmp_value == Column::kMissingId) {
           nodes_ids[i] = thread_info->default_flags[nid]
@@ -288,6 +286,7 @@ class OptPartitionBuilder {
       partitions[nid].e = begin + size;
     }
   }
+
   void UpdateRowBuffer(const std::vector<uint16_t>& compleate_trees_depth_wise,
                        GHistIndexMatrix const& gmat, size_t n_features, size_t depth,
                        const std::vector<uint16_t>& node_ids_, bool is_loss_guided) {
@@ -421,7 +420,7 @@ class OptPartitionBuilder {
         while (curr_thread_size != 0) {
           uint32_t node_id = tm.threads_cbuffer.NCycles();
           const uint32_t curr_thread_node_size = thread_info->nodes_count[node_id];
-          auto nodes_count_range = &(thread_info->nodes_count_range[node_id]);
+          auto nodes_count_range = thread_info->GetNodesCountRangePtr(node_id);
 
           if (curr_thread_node_size == 0) {
             thread_info = tm.threads_cbuffer.NextItem();
