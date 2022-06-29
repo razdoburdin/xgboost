@@ -89,9 +89,10 @@ using DMatrixP = std::shared_ptr<DMatrix>;
                 node_ids.data(), &split_conditions, &split_ind,
                 &smalest_nodes_mask, // row_gpairs,
                 split_nodes, kDepth);
-    opt_partition_builder.UpdateRowBuffer(node_ids,
-                      gmat, gmat.cut.Ptrs().size() - 1,
-                      0, node_ids, false);
+    opt_partition_builder.template UpdateRowBuffer <false>(
+                      node_ids, gmat,
+                      gmat.cut.Ptrs().size() - 1,
+                      0, node_ids);
     size_t split_bin_id = 0;
     size_t left_cnt; 
     size_t right_cnt;

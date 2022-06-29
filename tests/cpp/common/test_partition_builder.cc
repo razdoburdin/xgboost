@@ -49,9 +49,10 @@ TEST(OptPartitionBuilder, BasicTest) {
                           &split_ind,
                           &smalest_nodes_mask,// row_gpairs,
                           split_nodes, 1);
-  opt_partition_builder.UpdateRowBuffer(node_ids,
-                                        gmat, gmat.cut.Ptrs().size() - 1,
-                                        0, node_ids, false);
+  opt_partition_builder.template UpdateRowBuffer <false> (
+                                        node_ids, gmat,
+                                        gmat.cut.Ptrs().size() - 1,
+                                        0, node_ids);
   size_t left_cnt = 0, right_cnt = 0;
   const size_t bin_id_min = gmat.cut.Ptrs()[0];
   const size_t bin_id_max = gmat.cut.Ptrs()[1];
