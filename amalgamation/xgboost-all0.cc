@@ -78,6 +78,7 @@
 #include "../src/common/hist_util.cc"
 #include "../src/common/io.cc"
 #include "../src/common/json.cc"
+#include "../src/common/opt_partition_builder.cc"
 #include "../src/common/pseudo_huber.cc"
 #include "../src/common/survival_util.cc"
 #include "../src/common/threading_utils.cc"
