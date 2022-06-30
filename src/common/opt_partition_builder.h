@@ -14,8 +14,9 @@
 #include <utility>
 #include <memory>
 #include "xgboost/tree_model.h"
-#include "../common/column_matrix.h"
-#include "../common/threads_manager.h"
+#include "column_matrix.h"
+#include "threads_manager.h"
+#include "../tree/hist/expand_entry.h"
 
 namespace xgboost {
 namespace common {
@@ -23,6 +24,10 @@ namespace common {
 // The builder is required for samples partition to left and rights children for set of nodes
 // template by number of rows
 class OptPartitionBuilder {
+  size_t depth_;
+  uint16_t* node_ids_ptr;
+  std::vector<uint32_t> split_nodes_;
+
  public:
   std::vector<uint16_t> empty;
 
@@ -78,7 +83,8 @@ class OptPartitionBuilder {
   void Init(const ColumnMatrix& column_matrix,
             GHistIndexMatrix const& gmat,
             const RegTree* p_tree_local, size_t nthreads, size_t max_depth,
-            bool is_lossguide) {
+            uint16_t* node_ids, bool is_lossguide) {
+    node_ids_ptr = node_ids;
     gmat_n_rows = gmat.row_ptr.size() - 1;
     base_rowid = gmat.base_rowid;
     p_tree = p_tree_local;
@@ -154,6 +160,18 @@ class OptPartitionBuilder {
                                         map_buffer.at(item_idx) : 0;
   }
 
+  void SetDepth(size_t depth) {
+    depth_ = depth;
+  }
+
+  void SetNodeIdsPtr(uint16_t* node_ids) {
+    node_ids_ptr = node_ids;
+  }
+
+  void SetSplitNodes(std::vector<uint32_t>&& split_nodes) {
+    split_nodes_ = split_nodes;
+  }
+
   template<typename BinIdxType, bool is_loss_guided,
            bool all_dense, bool any_cat,
            typename SplitConditionsBufferType,
@@ -163,11 +181,9 @@ class OptPartitionBuilder {
     void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred,
                          const BinIdxType* numa, size_t tid,
                          const size_t row_indices_begin, const size_t row_indices_end,
-                         uint16_t* nodes_ids,
                          SplitConditionsBufferType* split_conditions,
                          SplitIndBufferType* split_ind,
-                         SmalestNodesMaskType* smalest_nodes_mask,
-                         const std::vector<uint32_t>& split_nodes, size_t depth) {
+                         SmalestNodesMaskType* smalest_nodes_mask) {
     CHECK_EQ(data_hash, reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData()));
     const auto& column_list = column_matrix.GetColumnViewList();
     uint32_t rows_count = 0;
@@ -186,14 +202,14 @@ class OptPartitionBuilder {
     if (!all_dense && row_indices_begin < row_indices_end) {
       const uint32_t first_row_id = !is_loss_guided ? row_indices_begin :
                                                       row_indices_ptr[row_indices_begin];
-      for (const auto& nid : split_nodes) {
+      for (const auto& nid : split_nodes_) {
         thread_info->states[nid] = column_list[split_ind_data[nid]]->GetInitialState(first_row_id);
         thread_info->default_flags[nid] = (*p_tree)[nid].DefaultLeft();
       }
     }
     for (size_t ii = row_indices_begin; ii < row_indices_end; ++ii) {
       const uint32_t i = !is_loss_guided ? ii : row_indices_ptr[ii];
-      const uint32_t nid = nodes_ids[i];
+      const uint32_t nid = node_ids_ptr[i];
       if ((*p_tree)[nid].IsLeaf()) {
         continue;
       }
@@ -202,25 +218,25 @@ class OptPartitionBuilder {
       uint64_t si = GetBufferItem(split_ind_data, nid);
       if (any_cat) {
         const int32_t cmp_value = static_cast<int32_t>(columnar_data[si + i]);
-        nodes_ids[i] = pred(i, cmp_value, nid, sc) ? (*p_tree)[nid].LeftChild() :
+        node_ids_ptr[i] = pred(i, cmp_value, nid, sc) ? (*p_tree)[nid].LeftChild() :
                        (*p_tree)[nid].RightChild();
       } else if (all_dense) {
         const int32_t cmp_value = static_cast<int32_t>(columnar_data[si + i]);
-        nodes_ids[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild() : (*p_tree)[nid].RightChild();
+        node_ids_ptr[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild() : (*p_tree)[nid].RightChild();
       } else {
         int32_t cmp_value = column_list[si]->template GetBinIdx<BinIdxType, int32_t>
                                                                (i, &(thread_info->states[nid]));
 
         if (cmp_value == Column::kMissingId) {
-          nodes_ids[i] = thread_info->default_flags[nid]
+          node_ids_ptr[i] = thread_info->default_flags[nid]
                          ? (*p_tree)[nid].LeftChild()
                          : (*p_tree)[nid].RightChild();
         } else {
-          nodes_ids[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild() :
+          node_ids_ptr[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild() :
                          (*p_tree)[nid].RightChild();
         }
       }
-      const uint16_t check_node_id = nodes_ids[i];
+      const uint16_t check_node_id = node_ids_ptr[i];
       uint32_t inc = GetBufferItem(smalest_nodes_mask_data, check_node_id);
       rows[1 + rows_count] = i;
       rows_count += inc;
@@ -302,25 +318,24 @@ class OptPartitionBuilder {
                   [](auto& ti) {ti.nodes_count_range.clear();});
   }
 
-  bool NeedsBufferUpdate(GHistIndexMatrix const& gmat, size_t n_features, size_t depth) {
+  bool NeedsBufferUpdate(GHistIndexMatrix const& gmat, size_t n_features) {
     const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*gmat.cut.Ptrs().back();
     const size_t n_bins = gmat.cut.Ptrs().back();
 
     bool ans = n_features*summ_size / n_threads <
-                (static_cast<size_t>(1) << (depth + 1))*n_bins ||
-                (depth >= 1 && !hist_fit_to_l2);
+                (static_cast<size_t>(1) << (depth_ + 1))*n_bins ||
+                (depth_ >= 1 && !hist_fit_to_l2);
     return ans;
   }
 
   template <bool is_loss_guided>
   void UpdateRowBuffer(const std::vector<uint16_t>& compleate_trees_depth_wise,
-                       GHistIndexMatrix const& gmat, size_t n_features, size_t depth,
-                       const std::vector<uint16_t>& node_ids_);
+                       GHistIndexMatrix const& gmat, size_t n_features);
 
   template <bool is_loss_guide>
   void UpdateThreadsWork(const std::vector<uint16_t>& compleate_trees_depth_wise,
                          GHistIndexMatrix const& gmat,
-                         size_t n_features, size_t depth,
+                         size_t n_features,
                          bool is_left_small = true,
                          bool check_is_left_small = false);
 

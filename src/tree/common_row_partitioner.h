@@ -218,83 +218,54 @@ class CommonRowPartitioner {
     }
   }
 
-  template<typename BinIdxType, bool is_loss_guided,
-           bool all_dense, bool any_cat,
-           typename Predicate, class... Args>
-  void CommonPartition(const common::ColumnMatrix& column_matrix, Predicate&& pred,
-                       int nthreads, size_t depth_begin, size_t depth_size, Args... args) {
-    size_t tid = omp_get_thread_num();
-    const BinIdxType* numa = tid < nthreads/2 ?
-          reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData()) :
-          reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData());
-    size_t chunck_size = common::GetBlockSize(depth_size, nthreads);
-    size_t thread_size = chunck_size;
-    size_t begin = thread_size * tid;
-    size_t end = std::min(begin + thread_size, depth_size);
-    begin += depth_begin;
-    end += depth_begin;
-    opt_partition_builder_.template CommonPartition<BinIdxType,
-                                                    is_loss_guided,
-                                                    all_dense,
-                                                    any_cat>(
-      column_matrix, std::forward<Predicate>(pred), numa, tid, begin, end, args...);
-  }
+  template <typename BinIdxType, bool is_loss_guided,
+            bool all_dense, bool any_cat>
+  class PositionUpdater {
+   public:
+    PositionUpdater(common::ColumnMatrix const& column_matrix,
+                    common::OptPartitionBuilder* partition_builder,
+                    int nthreads, size_t depth_begin, size_t depth_size) :
+      column_matrix(column_matrix), partition_builder(partition_builder),
+      nthreads(nthreads), depth_begin(depth_begin), depth_size(depth_size) {}
 
+    template<typename Predicate, class... Args>
+    void CommonPartition(Predicate&& pred, Args... args) {
+      size_t tid = omp_get_thread_num();
+      const BinIdxType* numa = tid < nthreads/2 ?
+        reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData()) :
+        reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData());
 
-  template <bool any_missing, typename BinIdxType,
-            bool is_loss_guided, bool any_cat>
-  void UpdatePosition(GenericParameter const* ctx, GHistIndexMatrix const& gmat,
-    std::vector<CPUExpandEntry> const& nodes, RegTree const* p_tree,
-    int depth,
-    NodeMaskListT* smalest_nodes_mask_ptr,
-    const bool loss_guide,
-    SplitFtrListT* split_conditions_,
-    SplitIndListT* split_ind_, const size_t max_depth,
-    NodeIdListT* child_node_ids_,
-    bool is_left_small = true,
-    bool check_is_left_small = false) {
-    common::ColumnMatrix const& column_matrix = gmat.Transpose();
-    if (column_matrix.GetIndexData() != opt_partition_builder_.data_hash ||
-        column_matrix.GetMissing() != opt_partition_builder_.missing_ptr ||
-        column_matrix.GetRowId() != opt_partition_builder_.row_ind_ptr) {
-        opt_partition_builder_.Init(column_matrix, gmat, p_tree,
-                                                ctx->Threads(), max_depth,
-                                                is_loss_guided);
+      size_t chunck_size = common::GetBlockSize(depth_size, nthreads);
+      size_t thread_size = chunck_size;
+      size_t begin = thread_size * tid;
+      size_t end = std::min(begin + thread_size, depth_size);
+      begin += depth_begin;
+      end += depth_begin;
+      partition_builder->template CommonPartition
+          <BinIdxType, is_loss_guided, all_dense, any_cat>
+          (column_matrix, std::forward<Predicate>(pred), numa, tid, begin, end, args...);
     }
 
-    // 1. Find split condition for each split
-    const size_t n_nodes = nodes.size();
-    FindSplitConditions(nodes, *p_tree, gmat, split_conditions_);
-    // 2.1 Create a blocked space of size SUM(samples in each node)
-    const uint32_t* offsets = gmat.index.Offset();
-    const uint64_t rows_offset = gmat.row_ptr.size() - 1;
-    std::vector<uint32_t> split_nodes(n_nodes, 0);
-    for (size_t i = 0; i < n_nodes; ++i) {
-        const int32_t nid = nodes[i].nid;
-        split_nodes[i] = nid;
-        const uint64_t fid = (*p_tree)[nid].SplitIndex();
-        (*split_ind_)[nid] = fid*((gmat.IsDense() ? rows_offset : 1));
-        (*split_conditions_)[nid] = (*split_conditions_)[nid] - gmat.cut.Ptrs()[fid];
-    }
+   private:
+    common::ColumnMatrix const& column_matrix;
+    common::OptPartitionBuilder* partition_builder;
+    const int nthreads;
+    const size_t depth_begin;
+    const size_t depth_size;
+  };
 
-    const size_t n_features = gmat.cut.Ptrs().size() - 1;
-    int nthreads = ctx->Threads();
-    nthreads = std::max(nthreads, 1);
-    const size_t depth_begin = opt_partition_builder_.DepthBegin(*child_node_ids_,
-                                                                 loss_guide);
-    const size_t depth_size = opt_partition_builder_.DepthSize(gmat, *child_node_ids_,
-                                                               loss_guide);
-
-    auto const& index = gmat.index;
-    auto const& cut_values = gmat.cut.Values();
-    auto const& cut_ptrs = gmat.cut.Ptrs();
-    RegTree const tree = *p_tree;
-    auto pred = [&](auto ridx, auto bin_id, auto nid, auto split_cond) {
+  template <bool any_cat>
+  auto GetPredicate(const RegTree& tree, const GHistIndexMatrix& gmat) {
+    auto pred = [&tree, &gmat](auto ridx, auto bin_id, auto nid, auto split_cond) {
       if (!any_cat) {
         return bin_id <= split_cond;
       }
       bool is_cat = tree.GetSplitTypes()[nid] == FeatureType::kCategorical;
       if (any_cat && is_cat) {
+        auto const& index = gmat.index;
+        auto const& cut_values = gmat.cut.Values();
+        auto const& cut_ptrs = gmat.cut.Ptrs();
+
         const bst_uint fid = tree[nid].SplitIndex();
         const bool default_left = tree[nid].DefaultLeft();
         auto node_cats = tree.NodeCats(nid);
@@ -316,6 +287,60 @@ class CommonRowPartitioner {
         return bin_id <= split_cond;
       }
     };
+    return pred;
+  }
+
+  template <bool any_missing, typename BinIdxType,
+            bool is_loss_guided, bool any_cat>
+  void UpdatePosition(GenericParameter const* ctx, GHistIndexMatrix const& gmat,
+    std::vector<CPUExpandEntry> const& nodes, RegTree const* p_tree,
+    int depth,
+    NodeMaskListT* smalest_nodes_mask_ptr,
+    const bool loss_guide,
+    SplitFtrListT* split_conditions_,
+    SplitIndListT* split_ind_, const size_t max_depth,
+    NodeIdListT* child_node_ids_,
+    bool is_left_small = true,
+    bool check_is_left_small = false) {
+    opt_partition_builder_.SetDepth(depth);
+    opt_partition_builder_.SetNodeIdsPtr(node_ids_.data());
+    common::ColumnMatrix const& column_matrix = gmat.Transpose();
+    if (column_matrix.GetIndexData() != opt_partition_builder_.data_hash ||
+        column_matrix.GetMissing() != opt_partition_builder_.missing_ptr ||
+        column_matrix.GetRowId() != opt_partition_builder_.row_ind_ptr) {
+        opt_partition_builder_.Init(column_matrix, gmat, p_tree,
+                                    ctx->Threads(), max_depth, node_ids_.data(),
+                                    is_loss_guided);
+    }
+
+    // 1. Find split condition for each split
+    const size_t n_nodes = nodes.size();
+    FindSplitConditions(nodes, *p_tree, gmat, split_conditions_);
+    // 2.1 Create a blocked space of size SUM(samples in each node)
+    const uint32_t* offsets = gmat.index.Offset();
+    const uint64_t rows_offset = gmat.row_ptr.size() - 1;
+    std::vector<uint32_t> split_nodes(n_nodes, 0);
+    for (size_t i = 0; i < n_nodes; ++i) {
+        const int32_t nid = nodes[i].nid;
+        split_nodes[i] = nid;
+        const uint64_t fid = (*p_tree)[nid].SplitIndex();
+        (*split_ind_)[nid] = fid*((gmat.IsDense() ? rows_offset : 1));
+        (*split_conditions_)[nid] = (*split_conditions_)[nid] - gmat.cut.Ptrs()[fid];
+    }
+    opt_partition_builder_.SetSplitNodes(std::move(split_nodes));
+
+    auto pred = GetPredicate<any_cat>(*p_tree, gmat);
+
+    const size_t n_features = gmat.cut.Ptrs().size() - 1;
+    int nthreads = std::max(ctx->Threads(), 1);
+    const size_t depth_begin = opt_partition_builder_.DepthBegin(*child_node_ids_,
+                                                                 loss_guide);
+    const size_t depth_size = opt_partition_builder_.DepthSize(gmat, *child_node_ids_,
+                                                               loss_guide);
+    PositionUpdater<BinIdxType, is_loss_guided, !any_missing, any_cat>
+      position_updater(column_matrix, &opt_partition_builder_, nthreads,
+                       depth_begin, depth_size);
+
     if (max_depth != 0) {
       const size_t nodes_amount = 1 << (max_depth + 2);
       std::vector<uint64_t> split_ind_data_vec(nodes_amount, 0);
@@ -326,32 +351,26 @@ class CommonRowPartitioner {
         split_conditions_data_vec[nid] = (*split_conditions_)[nid];
         smalest_nodes_mask_vec[nid] = (*smalest_nodes_mask_ptr)[nid];
       }
-    #pragma omp parallel num_threads(nthreads)
+      #pragma omp parallel num_threads(nthreads)
       {
-        CommonPartition<BinIdxType, is_loss_guided, !any_missing, any_cat>
-                       (column_matrix, pred, nthreads, depth_begin, depth_size,
-                        node_ids_.data(), &split_conditions_data_vec,
-                        &split_ind_data_vec, &smalest_nodes_mask_vec,
-                        split_nodes, depth);
+        position_updater.CommonPartition(pred, &split_conditions_data_vec,
+                                         &split_ind_data_vec, &smalest_nodes_mask_vec);
       }
     } else {
-    #pragma omp parallel num_threads(nthreads)
+      #pragma omp parallel num_threads(nthreads)
       {
-        CommonPartition<BinIdxType, is_loss_guided, !any_missing, any_cat>
-                       (column_matrix, pred, nthreads, depth_begin, depth_size,
-                        node_ids_.data(), split_conditions_,
-                        split_ind_, smalest_nodes_mask_ptr,
-                        split_nodes, depth);
+        position_updater.CommonPartition(pred, split_conditions_, 
+                                         split_ind_, smalest_nodes_mask_ptr);
       }
     }
 
     if (depth != max_depth || loss_guide) {
       opt_partition_builder_.template UpdateRowBuffer<is_loss_guided>(
                                              *child_node_ids_, gmat,
-                                             n_features, depth, node_ids_);
+                                             n_features);
       opt_partition_builder_.template UpdateThreadsWork<is_loss_guided>(
                                                *child_node_ids_, gmat,
-                                               n_features, depth, is_left_small,
+                                               n_features, is_left_small,
                                                check_is_left_small);
     }
   }
@@ -402,6 +421,7 @@ class CommonRowPartitioner {
     common::ColumnMatrix const &column_matrix = gmat.Transpose();
     opt_partition_builder_.Init(column_matrix, gmat, p_tree_local,
                                             ctx->Threads(), max_depth,
+                                            node_ids_.data(),
                                             is_loss_guide);
     opt_partition_builder_.SetSlice(0, 0, gmat.row_ptr.size() - 1);
     node_ids_.resize(gmat.row_ptr.size() - 1, 0);
@@ -431,6 +451,7 @@ class CommonRowPartitioner {
     }
     opt_partition_builder_.Init(column_matrix, gmat, p_tree_local,
                                             ctx->Threads(), max_depth,
+                                            node_ids_.data(),
                                             is_loss_guide);
     opt_partition_builder_.SetSlice(0, 0, gmat.row_ptr.size() - 1);
     node_ids_.resize(gmat.row_ptr.size() - 1, 0);

@@ -1,4 +1,4 @@
-  /*!
+/*!
  * Copyright 2022 by Contributors
  * \file opt_partition_builder.cc
  * \brief Quick Utility to compute subset of rows
@@ -15,8 +15,7 @@ namespace common {
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<true>(
                   const std::vector<uint16_t>& compleate_trees_depth_wise,
-                  GHistIndexMatrix const& gmat, size_t n_features, size_t depth,
-                  const std::vector<uint16_t>& node_ids_) {
+                  GHistIndexMatrix const& gmat, size_t n_features) {
   PrepareToUpdateRowBuffer();
   const int cleft = compleate_trees_depth_wise[0];
   const int cright = compleate_trees_depth_wise[1];
@@ -58,10 +57,9 @@ void OptPartitionBuilder::UpdateRowBuffer<true>(
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<false>(
                   const std::vector<uint16_t>& compleate_trees_depth_wise,
-                  GHistIndexMatrix const& gmat, size_t n_features, size_t depth,
-                  const std::vector<uint16_t>& node_ids_) {
+                  GHistIndexMatrix const& gmat, size_t n_features) {
   PrepareToUpdateRowBuffer();
-  if (NeedsBufferUpdate(gmat, n_features, depth)) {
+  if (NeedsBufferUpdate(gmat, n_features)) {
     #pragma omp parallel num_threads(n_threads)
     {
       size_t tid = omp_get_thread_num();
@@ -91,7 +89,7 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
 
       for (size_t i = 0; i < thread_info->vec_rows[0]; ++i) {
         const uint32_t row_id = thread_info->vec_rows[i + 1];
-        const uint16_t check_node_id = node_ids_[row_id];
+        const uint16_t check_node_id = node_ids_ptr[row_id];
         const uint32_t nod_id = check_node_id;
         thread_info->rows_nodes_wise[counts[nod_id]++] = row_id;
       }
@@ -102,7 +100,7 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
 template <>
 void OptPartitionBuilder::UpdateThreadsWork<true>(
                   const std::vector<uint16_t>& compleate_trees_depth_wise,
-                  GHistIndexMatrix const& gmat, size_t n_features, size_t depth,
+                  GHistIndexMatrix const& gmat, size_t n_features,
                   bool is_left_small, bool check_is_left_small) {
   std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.addr.clear();});
   const int cleft = compleate_trees_depth_wise[0];
@@ -217,10 +215,10 @@ void OptPartitionBuilder::UpdateThreadsWork<false, false>(
 template <>
 void OptPartitionBuilder::UpdateThreadsWork<false>(
                   const std::vector<uint16_t>& compleate_trees_depth_wise,
-                  GHistIndexMatrix const& gmat, size_t n_features, size_t depth,
+                  GHistIndexMatrix const& gmat, size_t n_features,
                   bool is_left_small, bool check_is_left_small) {
   std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.addr.clear();});
-  if (NeedsBufferUpdate(gmat, n_features, depth)) {
+  if (NeedsBufferUpdate(gmat, n_features)) {
     this->template UpdateThreadsWork<false, true>(compleate_trees_depth_wise);
   } else {
     this->template UpdateThreadsWork<false, false>(compleate_trees_depth_wise);
