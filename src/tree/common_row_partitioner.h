@@ -359,7 +359,7 @@ class CommonRowPartitioner {
     } else {
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.CommonPartition(pred, split_conditions_, 
+        position_updater.CommonPartition(pred, split_conditions_,
                                          split_ind_, smalest_nodes_mask_ptr);
       }
     }

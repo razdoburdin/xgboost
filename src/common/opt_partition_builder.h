@@ -222,7 +222,8 @@ class OptPartitionBuilder {
                        (*p_tree)[nid].RightChild();
       } else if (all_dense) {
         const int32_t cmp_value = static_cast<int32_t>(columnar_data[si + i]);
-        node_ids_ptr[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild() : (*p_tree)[nid].RightChild();
+        node_ids_ptr[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild()
+                                          : (*p_tree)[nid].RightChild();
       } else {
         int32_t cmp_value = column_list[si]->template GetBinIdx<BinIdxType, int32_t>
                                                                (i, &(thread_info->states[nid]));
