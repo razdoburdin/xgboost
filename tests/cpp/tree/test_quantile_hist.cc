@@ -52,7 +52,7 @@ TEST(QuantileHist, Partitioner) {
       curr_level_nodes[0] = 1;
       curr_level_nodes[1] = 2;
       partitioner.UpdatePosition<false, uint8_t, false, true>(&ctx, gmat, candidates, &tree,
-                                                              0, &smalest_nodes_mask, false,
+                                                              0, &smalest_nodes_mask,
                                                               &split_conditions_, &split_ind_,
                                                               8, &complete_trees_depth_wise_);
 
@@ -90,7 +90,7 @@ TEST(QuantileHist, Partitioner) {
       curr_level_nodes[0] = 1;
       curr_level_nodes[1] = 2;
       partitioner.UpdatePosition<false, uint8_t, false, true>(&ctx, gmat, candidates, &tree,
-                                                              0, &smalest_nodes_mask, false,
+                                                              0, &smalest_nodes_mask,
                                                               &split_conditions_, &split_ind_,
                                                               8, &complete_trees_depth_wise_);
       auto const & assignments = partitioner.GetNodeAssignments();

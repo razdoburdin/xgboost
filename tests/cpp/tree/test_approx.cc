@@ -50,7 +50,7 @@ TEST(Approx, Partitioner) {
       std::unordered_map<uint32_t, uint64_t> split_ind_;
       partitioner.UpdatePosition<false, uint8_t, false, false>(&ctx, page,
         candidates_vec,
-        &tree, 0, &mask, false, &split_conditions_, &split_ind_, 2, &cnodes,
+        &tree, 0, &mask, &split_conditions_, &split_ind_, 2, &cnodes,
         true, false);
 
       auto const & assignments = partitioner.GetNodeAssignments();
@@ -88,7 +88,7 @@ TEST(Approx, Partitioner) {
       std::unordered_map<uint32_t, uint64_t> split_ind_;
       partitioner.UpdatePosition<false, uint8_t, false, false>(&ctx, page,
         candidates_vec,
-        &tree, 0, &mask, false, &split_conditions_, &split_ind_, 2, &cnodes,
+        &tree, 0, &mask, &split_conditions_, &split_ind_, 2, &cnodes,
         true, false);
 
       auto const & assignments = partitioner.GetNodeAssignments();

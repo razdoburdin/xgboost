@@ -26,15 +26,19 @@ TEST(OptPartitionBuilder, BasicTest) {
 
   std::vector<uint16_t> node_ids(kNRows, 0);
   common::OptPartitionBuilder opt_partition_builder;
-  opt_partition_builder.template Init<uint8_t>(gmat.Transpose(), gmat, &tree,
-    1, 3, node_ids.data(), false);
+  opt_partition_builder.SetNodeIdsPtr(node_ids.data());
+  opt_partition_builder.Init(gmat.Transpose(), gmat, &tree,
+    1, 3, false);
   const uint8_t* data = reinterpret_cast<const uint8_t*>(gmat.Transpose().GetIndexData());
 
   const size_t fid = 0;
   const size_t split = 0;
-  std::unordered_map<uint32_t, int32_t> split_conditions;
-  std::unordered_map<uint32_t, uint64_t> split_ind;
-  std::unordered_map<uint32_t, bool> smalest_nodes_mask;
+  using SplitConditionsBufferType = std::unordered_map<uint32_t, int32_t>;
+  using SplitIndBufferType = std::unordered_map<uint32_t, uint64_t>;
+  using SmalestNodesMaskType = std::unordered_map<uint32_t, bool>;
+  SplitConditionsBufferType split_conditions;
+  SplitIndBufferType split_ind;
+  SmalestNodesMaskType smalest_nodes_mask;
   smalest_nodes_mask[1] = true;
   std::unordered_map<uint32_t, uint16_t> nodes;//(1, 0);
   std::vector<uint32_t> split_nodes(1, 0);
@@ -43,12 +47,14 @@ TEST(OptPartitionBuilder, BasicTest) {
   };
   opt_partition_builder.SetDepth(1);
   opt_partition_builder.SetSplitNodes(std::move(split_nodes));
+  common::SplitInfo<SplitConditionsBufferType,
+                    SplitIndBufferType,
+                    SmalestNodesMaskType> split_info(
+                      &split_conditions, &split_ind, &smalest_nodes_mask);
+
   opt_partition_builder.template CommonPartition<
     uint8_t, false, true, false>(gmat.Transpose(), pred, data,
-                          0, 0, kNRows,
-                          &split_conditions,
-                          &split_ind,
-                          &smalest_nodes_mask);
+                          0, {0, kNRows}, split_info);
   opt_partition_builder.template UpdateRowBuffer <false> (
                                         node_ids, gmat,
                                         gmat.cut.Ptrs().size() - 1);

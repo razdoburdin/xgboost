@@ -129,8 +129,8 @@ void TestSyncHist(bool is_distributed) {
   ASSERT_EQ(n_nodes, 2ul);
 
   common::OptPartitionBuilder opt_partition_builder;
-  opt_partition_builder.template Init<uint8_t>(gmat.Transpose(), gmat, &tree,
-                                          1, 3, nullptr, false);
+  opt_partition_builder.Init(gmat.Transpose(), gmat, &tree,
+                                          1, 3, false);
   // initiat work
   for (auto& node : opt_partition_builder.tm.nodes) {
     node.second.threads_id.resize(1, 0);
@@ -243,8 +243,9 @@ void TestBuildHistogram(bool is_distributed) {
   common::OptPartitionBuilder opt_partition_builder;
 
   std::vector<uint16_t> node_ids(kNRows, 0);
-  opt_partition_builder.template Init<uint8_t>(gmat.Transpose(), gmat, &tree,
-    omp_get_max_threads(), 3, node_ids.data(), false);
+  opt_partition_builder.SetNodeIdsPtr(node_ids.data());
+  opt_partition_builder.Init(gmat.Transpose(), gmat, &tree,
+    omp_get_max_threads(), 3, false);
   for (auto const &gidx : p_fmat->GetBatches<GHistIndexMatrix>(
            {GenericParameter::kCpuId, kMaxBins})) {
     histogram.template BuildHist<uint8_t, true>(0, gidx, &tree,
@@ -314,8 +315,9 @@ void TestHistogramCategorical(size_t n_categories) {
     common::OptPartitionBuilder opt_partition_builder;
     auto n_rows_in_node = gidx.Size();
     std::vector<uint16_t> node_ids(n_rows_in_node, 0);
-    opt_partition_builder.template Init<uint8_t>(gidx.Transpose(), gidx, &tree,
-    omp_get_max_threads(), 8, node_ids.data(), false);
+    opt_partition_builder.SetNodeIdsPtr(node_ids.data());
+    opt_partition_builder.Init(gidx.Transpose(), gidx, &tree,
+    omp_get_max_threads(), 8, false);
 
     cat_hist.Reset(total_bins, kBins,
                       omp_get_max_threads(), 1, 8, false);
@@ -336,8 +338,9 @@ void TestHistogramCategorical(size_t n_categories) {
     common::OptPartitionBuilder opt_partition_builder;
     auto n_rows_in_node = gidx.Size();
     std::vector<uint16_t> node_ids(n_rows_in_node, 0);
-    opt_partition_builder.template Init<uint8_t>(gidx.Transpose(), gidx, &tree,
-    omp_get_max_threads(), 8, node_ids.data(), false);
+    opt_partition_builder.SetNodeIdsPtr(node_ids.data());
+    opt_partition_builder.Init(gidx.Transpose(), gidx, &tree,
+    omp_get_max_threads(), 8, false);
 
     onehot_hist.Reset(total_bins, kBins,
                       omp_get_max_threads(), 1, 8, false);
@@ -395,8 +398,9 @@ void TestHistogramExternalMemory(BatchParam batch_param, bool is_approx) {
       common::OptPartitionBuilder opt_partition_builder;
       auto n_rows_in_node = page.Size();
       std::vector<uint16_t> node_ids(n_rows_in_node, 0);
-      opt_partition_builder.template Init<uint8_t>(page.Transpose(), page, &tree,
-        omp_get_max_threads(), 8, node_ids.data(), false);
+      opt_partition_builder.SetNodeIdsPtr(node_ids.data());
+      opt_partition_builder.Init(page.Transpose(), page, &tree,
+        omp_get_max_threads(), 8, false);
       multi_build.template BuildHist<uint8_t, true>(page_idx, page, &tree, nodes, {},
                             h_gpair, &opt_partition_builder, &node_ids);
       ++page_idx;
@@ -440,8 +444,9 @@ void TestHistogramExternalMemory(BatchParam batch_param, bool is_approx) {
     size_t n_batches{0};
       common::OptPartitionBuilder opt_partition_builder;
       std::vector<uint16_t> node_ids(kEntries, 0);
-      opt_partition_builder.template Init<uint8_t>(gmat.Transpose(), gmat, &tree,
-        omp_get_max_threads(), 8, node_ids.data(), false);
+      opt_partition_builder.SetNodeIdsPtr(node_ids.data());
+      opt_partition_builder.Init(gmat.Transpose(), gmat, &tree,
+        omp_get_max_threads(), 8, false);
       single_build.template BuildHist<uint8_t, true>(0, gmat, &tree, nodes, {},
                              h_gpair, &opt_partition_builder, &node_ids);
       n_batches ++;

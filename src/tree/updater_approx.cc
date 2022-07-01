@@ -333,7 +333,6 @@ class GloablApproxBuilder {
             p_tree,
             depth,
             &smalest_nodes_mask,
-            is_loss_guide,
             &split_conditions_,
             &split_ind_, param_.max_depth,
             &child_node_ids_, is_left_small,

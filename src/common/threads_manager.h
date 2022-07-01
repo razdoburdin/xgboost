@@ -135,9 +135,24 @@ class ThreadsManager {
     }
   }
 
-  void Init(size_t n_threads) {
+  void Init(size_t n_threads, size_t chunck_size, bool is_loss_guided) {
     threads.resize(n_threads);
     nodes.clear();
+
+    if (threads[0].vec_rows.size() == 0) {
+    #pragma omp parallel num_threads(n_threads)
+      {
+        size_t tid = omp_get_thread_num();
+        if (threads[tid].vec_rows.size() == 0) {
+          threads[tid].vec_rows.resize(chunck_size + 2, 0);
+          if (is_loss_guided) {
+            threads[tid].vec_rows_remain.resize(chunck_size + 2, 0);
+          }
+        }
+      }
+    }
+    std::for_each(threads.begin(), threads.end(),
+                  [](auto& ti) {ti.nodes_count_range.clear();});
   }
 
   ThreadInfo* GetThreadInfoPtr(size_t tid) {

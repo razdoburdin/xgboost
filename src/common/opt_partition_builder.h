@@ -21,11 +21,29 @@
 namespace xgboost {
 namespace common {
 
+struct RowIndicesRange {
+  size_t begin;
+  size_t end;
+};
+
+template<typename ConditionsBufferType,
+         typename IndBufferType,
+         typename SmalestNodesMaskType>
+struct SplitInfo {
+  ConditionsBufferType* conditions;
+  IndBufferType* ind;
+  SmalestNodesMaskType* smalest_nodes_mask;
+
+  SplitInfo(ConditionsBufferType* conditions, IndBufferType* ind,
+            SmalestNodesMaskType* smalest_nodes_mask):
+    conditions(conditions), ind(ind), smalest_nodes_mask(smalest_nodes_mask) {}
+};
+
 // The builder is required for samples partition to left and rights children for set of nodes
 // template by number of rows
 class OptPartitionBuilder {
   size_t depth_;
-  uint16_t* node_ids_ptr;
+  uint16_t* node_ids_;
   std::vector<uint32_t> split_nodes_;
 
  public:
@@ -64,27 +82,10 @@ class OptPartitionBuilder {
     }
   }
 
-  template <class... Args>
-  void Init(const ColumnMatrix& column_matrix, const Args&... args) {
-    switch (column_matrix.GetTypeSize()) {
-      case common::kUint8BinsTypeSize:
-        Init<BinTypeMap<kUint8BinsTypeSize>::Type>(column_matrix, args...);
-        break;
-      case common::kUint16BinsTypeSize:
-        Init<BinTypeMap<kUint16BinsTypeSize>::Type>(column_matrix, args...);
-        break;
-      default:
-        Init<BinTypeMap<kUint32BinsTypeSize>::Type>(column_matrix, args...);
-        break;
-    }
-  }
-
-  template <typename BinIdxType>
   void Init(const ColumnMatrix& column_matrix,
             GHistIndexMatrix const& gmat,
             const RegTree* p_tree_local, size_t nthreads, size_t max_depth,
-            uint16_t* node_ids, bool is_lossguide) {
-    node_ids_ptr = node_ids;
+            bool is_loss_guided) {
     gmat_n_rows = gmat.row_ptr.size() - 1;
     base_rowid = gmat.base_rowid;
     p_tree = p_tree_local;
@@ -97,48 +98,41 @@ class OptPartitionBuilder {
       row_ind_ptr = const_cast<size_t*>(column_matrix.GetRowId());
     }
     data_hash = reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData());
-    n_threads = nthreads;
     this->max_depth = max_depth;
-    if (is_lossguide) {
+    if (is_loss_guided) {
       partitions.resize(1 << (max_depth + 2));
     }
 
-    tm.Init(n_threads);
-    if (tm.threads[0].vec_rows.size() == 0) {
-      size_t chunck_size = common::GetBlockSize(gmat_n_rows, nthreads);
-    #pragma omp parallel num_threads(n_threads)
-      {
-        size_t tid = omp_get_thread_num();
-        if (tm.threads[tid].vec_rows.size() == 0) {
-          tm.threads[tid].vec_rows.resize(chunck_size + 2, 0);
-          if (is_lossguide) {
-            tm.threads[tid].vec_rows_remain.resize(chunck_size + 2, 0);
-          }
-        }
-      }
-    }
-    std::for_each(tm.threads.begin(), tm.threads.end(),
-                  [](auto& ti) {ti.nodes_count_range.clear();});
+    n_threads = nthreads;
+    size_t chunck_size = common::GetBlockSize(gmat_n_rows, nthreads);
+    tm.Init(n_threads, chunck_size, is_loss_guided);
+
     UpdateRootThreadWork();
   }
 
-  template<bool is_loss_guided, bool all_dense, bool any_cat, typename Predicate, class... Args>
-  void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, const Args&... args) {
+  template<bool is_loss_guided, bool all_dense, bool any_cat,
+           typename SplitInfoType,
+           typename Predicate>
+  void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, size_t tid,
+                       const RowIndicesRange& row_indices, const SplitInfoType& split_info) {
     switch (column_matrix.GetTypeSize()) {
       case common::kUint8BinsTypeSize:
         CommonPartition<BinTypeMap<kUint8BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
                            column_matrix, std::forward<Predicate>(pred),
-                           column_matrix.template GetIndexData<uint8_t>(), args...);
+                           column_matrix.template GetIndexData<uint8_t>(),
+                           tid, row_indices, split_info);
         break;
       case common::kUint16BinsTypeSize:
         CommonPartition<BinTypeMap<kUint16BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
                            column_matrix, std::forward<Predicate>(pred),
-                           column_matrix.template GetIndexData<uint16_t>(), args...);
+                           column_matrix.template GetIndexData<uint16_t>(),
+                           tid, row_indices, split_info);
         break;
       default:
         CommonPartition<BinTypeMap<kUint32BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
                            column_matrix, std::forward<Predicate>(pred),
-                           column_matrix.template GetIndexData<uint32_t>(), args...);
+                           column_matrix.template GetIndexData<uint32_t>(),
+                           tid, row_indices, split_info);
     }
   }
 
@@ -165,7 +159,7 @@ class OptPartitionBuilder {
   }
 
   void SetNodeIdsPtr(uint16_t* node_ids) {
-    node_ids_ptr = node_ids;
+    node_ids_ = node_ids;
   }
 
   void SetSplitNodes(std::vector<uint32_t>&& split_nodes) {
@@ -174,16 +168,12 @@ class OptPartitionBuilder {
 
   template<typename BinIdxType, bool is_loss_guided,
            bool all_dense, bool any_cat,
-           typename SplitConditionsBufferType,
-           typename SplitIndBufferType,
-           typename SmalestNodesMaskType,
+           typename SplitInfoType,
            typename Predicate>
     void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred,
                          const BinIdxType* numa, size_t tid,
-                         const size_t row_indices_begin, const size_t row_indices_end,
-                         SplitConditionsBufferType* split_conditions,
-                         SplitIndBufferType* split_ind,
-                         SmalestNodesMaskType* smalest_nodes_mask) {
+                         const RowIndicesRange& row_indices,
+                         const SplitInfoType& split_info) {
     CHECK_EQ(data_hash, reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData()));
     const auto& column_list = column_matrix.GetColumnViewList();
     uint32_t rows_count = 0;
@@ -194,22 +184,22 @@ class OptPartitionBuilder {
     if (is_loss_guided) {
       rows_left = thread_info->vec_rows_remain.data();
     }
-    auto& split_ind_data = *split_ind;
-    auto& split_conditions_data = *split_conditions;
-    auto& smalest_nodes_mask_data = *smalest_nodes_mask;
+    auto& split_ind_data = *(split_info.ind);
+    auto& split_conditions_data = *(split_info.conditions);
+    auto& smalest_nodes_mask_data = *(split_info.smalest_nodes_mask);
     const BinIdxType* columnar_data = numa;
 
-    if (!all_dense && row_indices_begin < row_indices_end) {
-      const uint32_t first_row_id = !is_loss_guided ? row_indices_begin :
-                                                      row_indices_ptr[row_indices_begin];
+    if (!all_dense && row_indices.begin < row_indices.end) {
+      const uint32_t first_row_id = !is_loss_guided ? row_indices.begin :
+                                                      row_indices_ptr[row_indices.begin];
       for (const auto& nid : split_nodes_) {
         thread_info->states[nid] = column_list[split_ind_data[nid]]->GetInitialState(first_row_id);
         thread_info->default_flags[nid] = (*p_tree)[nid].DefaultLeft();
       }
     }
-    for (size_t ii = row_indices_begin; ii < row_indices_end; ++ii) {
+    for (size_t ii = row_indices.begin; ii < row_indices.end; ++ii) {
       const uint32_t i = !is_loss_guided ? ii : row_indices_ptr[ii];
-      const uint32_t nid = node_ids_ptr[i];
+      const uint32_t nid = node_ids_[i];
       if ((*p_tree)[nid].IsLeaf()) {
         continue;
       }
@@ -218,26 +208,26 @@ class OptPartitionBuilder {
       uint64_t si = GetBufferItem(split_ind_data, nid);
       if (any_cat) {
         const int32_t cmp_value = static_cast<int32_t>(columnar_data[si + i]);
-        node_ids_ptr[i] = pred(i, cmp_value, nid, sc) ? (*p_tree)[nid].LeftChild() :
+        node_ids_[i] = pred(i, cmp_value, nid, sc) ? (*p_tree)[nid].LeftChild() :
                        (*p_tree)[nid].RightChild();
       } else if (all_dense) {
         const int32_t cmp_value = static_cast<int32_t>(columnar_data[si + i]);
-        node_ids_ptr[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild()
+        node_ids_[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild()
                                           : (*p_tree)[nid].RightChild();
       } else {
         int32_t cmp_value = column_list[si]->template GetBinIdx<BinIdxType, int32_t>
                                                                (i, &(thread_info->states[nid]));
 
         if (cmp_value == Column::kMissingId) {
-          node_ids_ptr[i] = thread_info->default_flags[nid]
+          node_ids_[i] = thread_info->default_flags[nid]
                          ? (*p_tree)[nid].LeftChild()
                          : (*p_tree)[nid].RightChild();
         } else {
-          node_ids_ptr[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild() :
+          node_ids_[i] = cmp_value <= sc ? (*p_tree)[nid].LeftChild() :
                          (*p_tree)[nid].RightChild();
         }
       }
-      const uint16_t check_node_id = node_ids_ptr[i];
+      const uint16_t check_node_id = node_ids_[i];
       uint32_t inc = GetBufferItem(smalest_nodes_mask_data, check_node_id);
       rows[1 + rows_count] = i;
       rows_count += inc;
@@ -255,33 +245,12 @@ class OptPartitionBuilder {
     }
   }
 
+  template<bool is_loss_guided>
   size_t DepthSize(GHistIndexMatrix const& gmat,
-                   const std::vector<uint16_t>& compleate_trees_depth_wise,
-                   bool is_lossguided) {
-    if (is_lossguided) {
-      CHECK_GT(compleate_trees_depth_wise.size(), 0);
-      size_t max_nid = std::max(compleate_trees_depth_wise[0],
-                                compleate_trees_depth_wise[1]);
-      partitions.resize(max_nid + 1);
-      CHECK_LT((*p_tree)[compleate_trees_depth_wise[0]].Parent(), partitions.size());
-      return partitions[(*p_tree)[compleate_trees_depth_wise[0]].Parent()].Size();
-    } else {
-      return gmat.row_ptr.size() - 1;
-    }
-  }
-  size_t DepthBegin(const std::vector<uint16_t>& compleate_trees_depth_wise,
-                    bool is_lossguided) {
-    if (is_lossguided) {
-      CHECK_GT(compleate_trees_depth_wise.size(), 0);
-      size_t max_nid = std::max(compleate_trees_depth_wise[0],
-                                compleate_trees_depth_wise[1]);
-      partitions.resize(max_nid + 1);
-      CHECK_LT((*p_tree)[compleate_trees_depth_wise[0]].Parent(), partitions.size());
-      return partitions[(*p_tree)[compleate_trees_depth_wise[0]].Parent()].b;
-    } else {
-      return 0;
-    }
-  }
+                   const std::vector<uint16_t>& compleate_trees_depth_wise);
+
+  template <bool is_loss_guided>
+  size_t DepthBegin(const std::vector<uint16_t>& compleate_trees_depth_wise);
 
   void ResizeRowsBuffer(size_t nrows) {
     row_set_collection_vec.resize(nrows);

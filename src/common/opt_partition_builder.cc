@@ -12,6 +12,38 @@
 namespace xgboost {
 namespace common {
 
+template<>
+size_t OptPartitionBuilder::DepthSize<true>(GHistIndexMatrix const& gmat,
+                  const std::vector<uint16_t>& compleate_trees_depth_wise) {
+  CHECK_GT(compleate_trees_depth_wise.size(), 0);
+  size_t max_nid = std::max(compleate_trees_depth_wise[0],
+                            compleate_trees_depth_wise[1]);
+  partitions.resize(max_nid + 1);
+  CHECK_LT((*p_tree)[compleate_trees_depth_wise[0]].Parent(), partitions.size());
+  return partitions[(*p_tree)[compleate_trees_depth_wise[0]].Parent()].Size();
+}
+
+template<>
+size_t OptPartitionBuilder::DepthSize<false>(GHistIndexMatrix const& gmat,
+                  const std::vector<uint16_t>& compleate_trees_depth_wise) {
+    return gmat.row_ptr.size() - 1;
+}
+
+template <>
+size_t OptPartitionBuilder::DepthBegin<true>(const std::vector<uint16_t>& compleate_trees_depth_wise) {
+  CHECK_GT(compleate_trees_depth_wise.size(), 0);
+  size_t max_nid = std::max(compleate_trees_depth_wise[0],
+                            compleate_trees_depth_wise[1]);
+  partitions.resize(max_nid + 1);
+  CHECK_LT((*p_tree)[compleate_trees_depth_wise[0]].Parent(), partitions.size());
+  return partitions[(*p_tree)[compleate_trees_depth_wise[0]].Parent()].b;
+}
+
+template <>
+size_t OptPartitionBuilder::DepthBegin<false>(const std::vector<uint16_t>& compleate_trees_depth_wise) {
+  return 0;
+}
+
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<true>(
                   const std::vector<uint16_t>& compleate_trees_depth_wise,
@@ -89,7 +121,7 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
 
       for (size_t i = 0; i < thread_info->vec_rows[0]; ++i) {
         const uint32_t row_id = thread_info->vec_rows[i + 1];
-        const uint16_t check_node_id = node_ids_ptr[row_id];
+        const uint16_t check_node_id = node_ids_[row_id];
         const uint32_t nod_id = check_node_id;
         thread_info->rows_nodes_wise[counts[nod_id]++] = row_id;
       }

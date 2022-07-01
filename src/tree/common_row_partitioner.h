@@ -80,7 +80,6 @@ class CommonRowPartitioner {
       RegTree const* p_tree,
       int depth,
       NodeMaskListT* smalest_nodes_mask_ptr,
-      const bool loss_guide,
       SplitFtrListT* split_conditions,
       SplitIndListT* split_ind,
       const size_t max_depth,
@@ -94,7 +93,6 @@ class CommonRowPartitioner {
         p_tree_(p_tree),
         depth_(depth),
         smalest_nodes_mask_ptr_(smalest_nodes_mask_ptr),
-        loss_guide_(loss_guide),
         split_conditions_(split_conditions),
         split_ind_(split_ind),
         max_depth_(max_depth),
@@ -111,7 +109,6 @@ class CommonRowPartitioner {
         p_tree_,
         depth_,
         smalest_nodes_mask_ptr_,
-        loss_guide_,
         split_conditions_,
         split_ind_,
         max_depth_,
@@ -128,7 +125,6 @@ class CommonRowPartitioner {
     RegTree const* p_tree_;
     int depth_;
     NodeMaskListT* smalest_nodes_mask_ptr_;
-    const bool loss_guide_;
     SplitFtrListT* split_conditions_;
     SplitIndListT* split_ind_;
     const size_t max_depth_;
@@ -228,8 +224,14 @@ class CommonRowPartitioner {
       column_matrix(column_matrix), partition_builder(partition_builder),
       nthreads(nthreads), depth_begin(depth_begin), depth_size(depth_size) {}
 
-    template<typename Predicate, class... Args>
-    void CommonPartition(Predicate&& pred, Args... args) {
+    template<typename Predicate,
+             typename SplitConditionsBufferType,
+             typename SplitIndBufferType,
+             typename SmalestNodesMaskType>
+    void CommonPartition(Predicate&& pred,
+                         SplitConditionsBufferType* split_conditions,
+                         SplitIndBufferType* split_ind,
+                         SmalestNodesMaskType* smalest_nodes_mask) {
       size_t tid = omp_get_thread_num();
       const BinIdxType* numa = tid < nthreads/2 ?
         reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData()) :
@@ -241,9 +243,14 @@ class CommonRowPartitioner {
       size_t end = std::min(begin + thread_size, depth_size);
       begin += depth_begin;
       end += depth_begin;
+      common::RowIndicesRange range{begin, end};
+      common::SplitInfo<SplitConditionsBufferType,
+                        SplitIndBufferType,
+                        SmalestNodesMaskType> split_info(
+                          split_conditions, split_ind, smalest_nodes_mask);
       partition_builder->template CommonPartition
           <BinIdxType, is_loss_guided, all_dense, any_cat>
-          (column_matrix, std::forward<Predicate>(pred), numa, tid, begin, end, args...);
+          (column_matrix, std::forward<Predicate>(pred), numa, tid, range, split_info);
     }
 
    private:
@@ -296,10 +303,9 @@ class CommonRowPartitioner {
     std::vector<CPUExpandEntry> const& nodes, RegTree const* p_tree,
     int depth,
     NodeMaskListT* smalest_nodes_mask_ptr,
-    const bool loss_guide,
-    SplitFtrListT* split_conditions_,
-    SplitIndListT* split_ind_, const size_t max_depth,
-    NodeIdListT* child_node_ids_,
+    SplitFtrListT* split_conditions,
+    SplitIndListT* split_ind, const size_t max_depth,
+    NodeIdListT* child_node_ids,
     bool is_left_small = true,
     bool check_is_left_small = false) {
     opt_partition_builder_.SetDepth(depth);
@@ -309,13 +315,13 @@ class CommonRowPartitioner {
         column_matrix.GetMissing() != opt_partition_builder_.missing_ptr ||
         column_matrix.GetRowId() != opt_partition_builder_.row_ind_ptr) {
         opt_partition_builder_.Init(column_matrix, gmat, p_tree,
-                                    ctx->Threads(), max_depth, node_ids_.data(),
+                                    ctx->Threads(), max_depth,
                                     is_loss_guided);
     }
 
     // 1. Find split condition for each split
     const size_t n_nodes = nodes.size();
-    FindSplitConditions(nodes, *p_tree, gmat, split_conditions_);
+    FindSplitConditions(nodes, *p_tree, gmat, split_conditions);
     // 2.1 Create a blocked space of size SUM(samples in each node)
     const uint32_t* offsets = gmat.index.Offset();
     const uint64_t rows_offset = gmat.row_ptr.size() - 1;
@@ -324,8 +330,8 @@ class CommonRowPartitioner {
         const int32_t nid = nodes[i].nid;
         split_nodes[i] = nid;
         const uint64_t fid = (*p_tree)[nid].SplitIndex();
-        (*split_ind_)[nid] = fid*((gmat.IsDense() ? rows_offset : 1));
-        (*split_conditions_)[nid] = (*split_conditions_)[nid] - gmat.cut.Ptrs()[fid];
+        (*split_ind)[nid] = fid*((gmat.IsDense() ? rows_offset : 1));
+        (*split_conditions)[nid] = (*split_conditions)[nid] - gmat.cut.Ptrs()[fid];
     }
     opt_partition_builder_.SetSplitNodes(std::move(split_nodes));
 
@@ -333,22 +339,23 @@ class CommonRowPartitioner {
 
     const size_t n_features = gmat.cut.Ptrs().size() - 1;
     int nthreads = std::max(ctx->Threads(), 1);
-    const size_t depth_begin = opt_partition_builder_.DepthBegin(*child_node_ids_,
-                                                                 loss_guide);
-    const size_t depth_size = opt_partition_builder_.DepthSize(gmat, *child_node_ids_,
-                                                               loss_guide);
+    const size_t depth_begin = opt_partition_builder_.template DepthBegin<is_loss_guided>(
+                                                                           *child_node_ids);
+    const size_t depth_size = opt_partition_builder_.template DepthSize<is_loss_guided>(
+                                                                   gmat, *child_node_ids);
     PositionUpdater<BinIdxType, is_loss_guided, !any_missing, any_cat>
       position_updater(column_matrix, &opt_partition_builder_, nthreads,
                        depth_begin, depth_size);
 
     if (max_depth != 0) {
+      // Copy data to linear containers:
       const size_t nodes_amount = 1 << (max_depth + 2);
       std::vector<uint64_t> split_ind_data_vec(nodes_amount, 0);
       std::vector<int32_t> split_conditions_data_vec(nodes_amount, 0);
       std::vector<bool> smalest_nodes_mask_vec(nodes_amount, false);
       for (size_t nid = 0; nid < nodes_amount; ++nid) {
-        split_ind_data_vec[nid] = (*split_ind_)[nid];
-        split_conditions_data_vec[nid] = (*split_conditions_)[nid];
+        split_conditions_data_vec[nid] = (*split_conditions)[nid];
+        split_ind_data_vec[nid] = (*split_ind)[nid];
         smalest_nodes_mask_vec[nid] = (*smalest_nodes_mask_ptr)[nid];
       }
       #pragma omp parallel num_threads(nthreads)
@@ -359,17 +366,17 @@ class CommonRowPartitioner {
     } else {
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.CommonPartition(pred, split_conditions_,
-                                         split_ind_, smalest_nodes_mask_ptr);
+        position_updater.CommonPartition(pred, split_conditions,
+                                         split_ind, smalest_nodes_mask_ptr);
       }
     }
 
-    if (depth != max_depth || loss_guide) {
+    if (depth != max_depth || is_loss_guided) {
       opt_partition_builder_.template UpdateRowBuffer<is_loss_guided>(
-                                             *child_node_ids_, gmat,
+                                             *child_node_ids, gmat,
                                              n_features);
       opt_partition_builder_.template UpdateThreadsWork<is_loss_guided>(
-                                               *child_node_ids_, gmat,
+                                               *child_node_ids, gmat,
                                                n_features, is_left_small,
                                                check_is_left_small);
     }
@@ -421,7 +428,6 @@ class CommonRowPartitioner {
     common::ColumnMatrix const &column_matrix = gmat.Transpose();
     opt_partition_builder_.Init(column_matrix, gmat, p_tree_local,
                                             ctx->Threads(), max_depth,
-                                            node_ids_.data(),
                                             is_loss_guide);
     opt_partition_builder_.SetSlice(0, 0, gmat.row_ptr.size() - 1);
     node_ids_.resize(gmat.row_ptr.size() - 1, 0);
@@ -451,7 +457,6 @@ class CommonRowPartitioner {
     }
     opt_partition_builder_.Init(column_matrix, gmat, p_tree_local,
                                             ctx->Threads(), max_depth,
-                                            node_ids_.data(),
                                             is_loss_guide);
     opt_partition_builder_.SetSlice(0, 0, gmat.row_ptr.size() - 1);
     node_ids_.resize(gmat.row_ptr.size() - 1, 0);
