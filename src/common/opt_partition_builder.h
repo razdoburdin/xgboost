@@ -26,17 +26,10 @@ struct RowIndicesRange {
   size_t end;
 };
 
-template<typename ConditionsBufferType,
-         typename IndBufferType,
-         typename SmalestNodesMaskType>
-struct SplitInfo {
-  ConditionsBufferType* conditions;
-  IndBufferType* ind;
-  SmalestNodesMaskType* smalest_nodes_mask;
-
-  SplitInfo(ConditionsBufferType* conditions, IndBufferType* ind,
-            SmalestNodesMaskType* smalest_nodes_mask):
-    conditions(conditions), ind(ind), smalest_nodes_mask(smalest_nodes_mask) {}
+struct SplitNode {
+  int32_t condition = 0;
+  uint64_t ind = 0;
+  bool smalest_nodes_mask = false;
 };
 
 // The builder is required for samples partition to left and rights children for set of nodes
@@ -65,19 +58,22 @@ class OptPartitionBuilder {
   uint32_t summ_size_remain = 0;
   uint32_t max_depth = 0;
 
+  static constexpr double adhoc_l2_size = 1024 * 1024 * 0.8;
+
   const std::vector<Slice> &GetSlices(const uint32_t tid) const {
-    return tm.threads[tid].addr;
+    return tm.GetThreadInfoPtr(tid)->addr;
   }
 
   const std::vector<uint16_t> &GetNodes(const uint32_t tid) const {
-    return tm.threads[tid].nodes_id;
+    return tm.GetThreadInfoPtr(tid)->nodes_id;
   }
 
   const std::vector<uint16_t> &GetThreadIdsForNode(const uint32_t nid) const {
-    if (tm.nodes.find(nid) == tm.nodes.end()) {
+    if (!tm.HasNodeInfo(nid)) {
       return empty;
     } else {
-      const std::vector<uint16_t> & res = tm.nodes.at(nid).threads_id;
+      auto node_info = tm.GetNodeInfoPtr(nid);
+      const std::vector<uint16_t> & res = node_info->threads_id;
       return res;
     }
   }
@@ -89,7 +85,7 @@ class OptPartitionBuilder {
     gmat_n_rows = gmat.row_ptr.size() - 1;
     base_rowid = gmat.base_rowid;
     p_tree = p_tree_local;
-    if ((tm.threads.size() == 0 && column_matrix.AnyMissing()) ||
+    if ((tm.NumThreads() == 0 && column_matrix.AnyMissing()) ||
         (data_hash != reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData())
         && column_matrix.AnyMissing()) ||
         (missing_ptr != column_matrix.GetMissing() && column_matrix.AnyMissing()) ||
@@ -151,7 +147,7 @@ class OptPartitionBuilder {
   BufferType GetBufferItem(const std::unordered_map<uint32_t, BufferType>& map_buffer,
                            const uint32_t item_idx) {
     return map_buffer.find(item_idx) != map_buffer.end() ?
-                                        map_buffer.at(item_idx) : 0;
+                                        map_buffer.at(item_idx) : BufferType();
   }
 
   void SetDepth(size_t depth) {
@@ -184,16 +180,14 @@ class OptPartitionBuilder {
     if (is_loss_guided) {
       rows_left = thread_info->vec_rows_remain.data();
     }
-    auto& split_ind_data = *(split_info.ind);
-    auto& split_conditions_data = *(split_info.conditions);
-    auto& smalest_nodes_mask_data = *(split_info.smalest_nodes_mask);
     const BinIdxType* columnar_data = numa;
 
     if (!all_dense && row_indices.begin < row_indices.end) {
       const uint32_t first_row_id = !is_loss_guided ? row_indices.begin :
                                                       row_indices_ptr[row_indices.begin];
       for (const auto& nid : split_nodes_) {
-        thread_info->states[nid] = column_list[split_ind_data[nid]]->GetInitialState(first_row_id);
+        const SplitNode& split_node = GetBufferItem(split_info, nid);
+        thread_info->states[nid] = column_list[split_node.ind]->GetInitialState(first_row_id);
         thread_info->default_flags[nid] = (*p_tree)[nid].DefaultLeft();
       }
     }
@@ -203,9 +197,11 @@ class OptPartitionBuilder {
       if ((*p_tree)[nid].IsLeaf()) {
         continue;
       }
-      const int32_t sc = GetBufferItem(split_conditions_data, nid);
 
-      uint64_t si = GetBufferItem(split_ind_data, nid);
+      const SplitNode& split_node = GetBufferItem(split_info, nid);
+      const int32_t sc = split_node.condition;
+      uint64_t si = split_node.ind;
+
       if (any_cat) {
         const int32_t cmp_value = static_cast<int32_t>(columnar_data[si + i]);
         node_ids_[i] = pred(i, cmp_value, nid, sc) ? (*p_tree)[nid].LeftChild() :
@@ -228,14 +224,14 @@ class OptPartitionBuilder {
         }
       }
       const uint16_t check_node_id = node_ids_[i];
-      uint32_t inc = GetBufferItem(smalest_nodes_mask_data, check_node_id);
+      uint32_t inc = GetBufferItem(split_info, check_node_id).smalest_nodes_mask;
       rows[1 + rows_count] = i;
       rows_count += inc;
       if (is_loss_guided) {
         rows_left[1 + rows_left_count] = i;
         rows_left_count += !static_cast<bool>(inc);
       } else {
-        tm.threads[tid].nodes_count[check_node_id] += inc;
+        thread_info->nodes_count[check_node_id] += inc;
       }
     }
 
@@ -274,22 +270,16 @@ class OptPartitionBuilder {
   }
 
   void PrepareToUpdateRowBuffer() {
-    summ_size = 0;
+    summ_size = tm.AccumulateVecRows(n_threads);
     summ_size_remain = 0;
-    for (uint32_t i = 0; i < n_threads; ++i) {
-      summ_size += tm.threads[i].vec_rows[0];
-    }
 
-    std::for_each(tm.threads.begin(), tm.threads.end(),
-                  [](auto& ti) {ti.nodes_id.clear();});
-    std::for_each(tm.nodes.begin(), tm.nodes.end(),
-                  [](auto& ni) {ni.second.threads_id.clear();});
-    std::for_each(tm.threads.begin(), tm.threads.end(),
-                  [](auto& ti) {ti.nodes_count_range.clear();});
+    tm.ForEachThread([](auto& ti) {ti.nodes_id.clear();
+                                   ti.nodes_count_range.clear();});
+    tm.ForEachNode([](auto& ni) {ni.second.threads_id.clear();});
   }
 
   bool NeedsBufferUpdate(GHistIndexMatrix const& gmat, size_t n_features) {
-    const bool hist_fit_to_l2 = 1024*1024*0.8 > 16*gmat.cut.Ptrs().back();
+    const bool hist_fit_to_l2 = adhoc_l2_size > 2*sizeof(double)*gmat.cut.Ptrs().back();
     const size_t n_bins = gmat.cut.Ptrs().back();
 
     bool ans = n_features*summ_size / n_threads <
@@ -313,21 +303,21 @@ class OptPartitionBuilder {
   void UpdateThreadsWork(const std::vector<uint16_t>& compleate_trees_depth_wise);
 
   void UpdateRootThreadWork() {
-    std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.addr.clear();});
-    std::for_each(tm.threads.begin(), tm.threads.end(), [](auto& ti) {ti.nodes_id.clear();});
+    tm.ForEachThread([](auto& ti) {ti.addr.clear();
+                                   ti.nodes_id.clear();});
     const uint32_t n_rows = gmat_n_rows;
     const uint32_t block_size = common::GetBlockSize(n_rows, n_threads);
     for (uint32_t tid = 0; tid < n_threads; ++tid) {
       const uint32_t begin = tid * block_size;
       const uint32_t end = std::min(begin + block_size, n_rows);
       if (end > begin) {
-        tm.threads[tid].addr.push_back({nullptr, begin, end});
+        auto thread_info = tm.GetThreadInfoPtr(tid);
+        thread_info->addr.push_back({nullptr, begin, end});
         tm.Tie(tid, 0);
       }
     }
   }
 };
-
 
 }  // namespace common
 }  // namespace xgboost

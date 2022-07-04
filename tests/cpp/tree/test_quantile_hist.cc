@@ -38,12 +38,10 @@ TEST(QuantileHist, Partitioner) {
       CommonRowPartitioner partitioner{&ctx, gmat, &tree, 8, false};
       GetSplit(&tree, min_value, &candidates);
 
-      std::unordered_map<uint32_t, bool> smalest_nodes_mask;
-      smalest_nodes_mask[2] = true;
+      std::unordered_map<uint32_t, common::SplitNode> split_info;
+      split_info[2].smalest_nodes_mask = true;
       const bool loss_guide = false;
-      std::unordered_map<uint32_t, int32_t> split_conditions_;
-      std::unordered_map<uint32_t, uint64_t> split_ind_;
-      split_ind_[0] = split_ind;
+      split_info[0].ind = split_ind;
       const size_t max_depth = 8;
       std::vector<uint16_t> complete_trees_depth_wise_(3, 0);
       complete_trees_depth_wise_[0] = 1;
@@ -52,8 +50,7 @@ TEST(QuantileHist, Partitioner) {
       curr_level_nodes[0] = 1;
       curr_level_nodes[1] = 2;
       partitioner.UpdatePosition<false, uint8_t, false, true>(&ctx, gmat, candidates, &tree,
-                                                              0, &smalest_nodes_mask,
-                                                              &split_conditions_, &split_ind_,
+                                                              0, &split_info,
                                                               8, &complete_trees_depth_wise_);
 
       auto const & assignments = partitioner.GetNodeAssignments();
@@ -76,12 +73,10 @@ TEST(QuantileHist, Partitioner) {
       CommonRowPartitioner partitioner{&ctx, gmat, &tree, 8, false};
       GetSplit(&tree, split_value, &candidates);
 
-      std::unordered_map<uint32_t, bool> smalest_nodes_mask;
-      smalest_nodes_mask[2] = true;
+      std::unordered_map<uint32_t, common::SplitNode> split_info;
+      split_info[2].smalest_nodes_mask = 2;
       const bool loss_guide = false;
-      std::unordered_map<uint32_t, int32_t> split_conditions_;
-      std::unordered_map<uint32_t, uint64_t> split_ind_;
-      split_ind_[0] = split_ind;
+      split_info[0].ind = split_ind;
       const size_t max_depth = 8;
       std::vector<uint16_t> complete_trees_depth_wise_(3, 0);
       complete_trees_depth_wise_[0] = 1;
@@ -90,8 +85,7 @@ TEST(QuantileHist, Partitioner) {
       curr_level_nodes[0] = 1;
       curr_level_nodes[1] = 2;
       partitioner.UpdatePosition<false, uint8_t, false, true>(&ctx, gmat, candidates, &tree,
-                                                              0, &smalest_nodes_mask,
-                                                              &split_conditions_, &split_ind_,
+                                                              0, &split_info,
                                                               8, &complete_trees_depth_wise_);
       auto const & assignments = partitioner.GetNodeAssignments();
       size_t it = 0;

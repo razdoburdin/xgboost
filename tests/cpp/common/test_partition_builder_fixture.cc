@@ -73,13 +73,8 @@ using DMatrixP = std::shared_ptr<DMatrix>;
                                kThreadCount, kMaxDepth, kIsLossGuide);
     const size_t fid = 0;
     const size_t split = 0;
-    using SplitConditionsBufferType = std::unordered_map<uint32_t, int32_t>;
-    using SplitIndBufferType = std::unordered_map<uint32_t, uint64_t>;
-    using SmalestNodesMaskType = std::unordered_map<uint32_t, bool>;
-    SplitConditionsBufferType split_conditions;
-    SplitIndBufferType split_ind;
-    SmalestNodesMaskType smalest_nodes_mask;
-    smalest_nodes_mask[1] = true;
+    std::unordered_map<uint32_t, common::SplitNode> split_info;
+    split_info[1].smalest_nodes_mask = true;
     std::unordered_map<uint32_t, uint16_t> nodes;  // (1, 0);
     std::vector<uint32_t> split_nodes(1, 0);
     auto pred = [&](auto ridx, auto bin_id, auto nid, auto split_cond) {
@@ -90,10 +85,6 @@ using DMatrixP = std::shared_ptr<DMatrix>;
     const size_t row_ind_begin = 0;
     opt_partition_builder.SetDepth(kDepth);
     opt_partition_builder.SetSplitNodes(std::move(split_nodes));
-    common::SplitInfo<SplitConditionsBufferType,
-                    SplitIndBufferType,
-                    SmalestNodesMaskType> split_info(
-                      &split_conditions, &split_ind, &smalest_nodes_mask);
     opt_partition_builder.template CommonPartition<kIsLossGuide, kAllDense, kHasCat>(
                 gmat.Transpose(), pred, thread_id, {row_ind_begin, row_count_}, split_info);
 

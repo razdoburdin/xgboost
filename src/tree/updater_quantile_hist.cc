@@ -160,9 +160,8 @@ void QuantileHistMaker::Builder::AddSplitsToTree(
           RegTree *p_tree,
           int *num_leaves,
           std::vector<CPUExpandEntry>* nodes_for_apply_split,
-          std::unordered_map<uint32_t, bool>* smalest_nodes_mask_ptr,
+          std::unordered_map<uint32_t, common::SplitNode>* split_info,
           size_t depth, bool * is_left_small) {
-  std::unordered_map<uint32_t, bool>& smalest_nodes_mask = *smalest_nodes_mask_ptr;
   const bool is_loss_guided = static_cast<TrainParam::TreeGrowPolicy>(param_.grow_policy)
                               != TrainParam::kDepthWise;
   std::vector<uint16_t> complete_node_ids;
@@ -173,11 +172,11 @@ void QuantileHistMaker::Builder::AddSplitsToTree(
       complete_node_ids.push_back((*p_tree)[entry.nid].RightChild());
       *is_left_small = entry.split.left_sum.GetHess() <= entry.split.right_sum.GetHess();
       if (entry.split.left_sum.GetHess() <= entry.split.right_sum.GetHess() || is_loss_guided) {
-        smalest_nodes_mask[(*p_tree)[entry.nid].LeftChild()] = true;
-        smalest_nodes_mask[(*p_tree)[entry.nid].RightChild()] = false;
+        (*split_info)[(*p_tree)[entry.nid].LeftChild()].smalest_nodes_mask = true;
+        (*split_info)[(*p_tree)[entry.nid].RightChild()].smalest_nodes_mask = false;
       } else {
-        smalest_nodes_mask[(*p_tree)[entry.nid].RightChild()] = true;
-        smalest_nodes_mask[ (*p_tree)[entry.nid].LeftChild()] = false;
+        (*split_info)[(*p_tree)[entry.nid].RightChild()].smalest_nodes_mask = true;
+        (*split_info)[(*p_tree)[entry.nid].LeftChild()].smalest_nodes_mask = false;
       }
   }
   child_node_ids_ = complete_node_ids;
@@ -233,8 +232,7 @@ void QuantileHistMaker::Builder::ExpandTree(
     HostDeviceVector<bst_node_t> *p_out_position) {
   monitor_->Start("ExpandTree");
   int num_leaves = 0;
-  split_conditions_.clear();
-  split_ind_.clear();
+  split_info_.clear();
   Driver<CPUExpandEntry> driver(param_);
   std::vector<CPUExpandEntry> expand;
   size_t page_id{0};
@@ -256,7 +254,8 @@ void QuantileHistMaker::Builder::ExpandTree(
   child_node_ids_.emplace_back(0);
   int32_t depth = 0;
   while (!driver.IsEmpty()) {
-    std::unordered_map<uint32_t, bool> smalest_nodes_mask;
+    std::for_each(split_info_.begin(), split_info_.end(),
+                  [](auto& si) {si.second.smalest_nodes_mask = false;});
     expand = driver.Pop();
     if (expand.size()) {
       depth = expand[0].depth + 1;
@@ -267,7 +266,7 @@ void QuantileHistMaker::Builder::ExpandTree(
     nodes_for_subtraction_trick_.clear();
     bool is_left_small = false;
     AddSplitsToTree(expand, &driver, p_tree, &num_leaves, &nodes_for_apply_split,
-                    &smalest_nodes_mask, depth, &is_left_small);
+                    &split_info_, depth, &is_left_small);
     if (nodes_for_apply_split.size() != 0) {
       monitor_->Start("ApplySplit");
       size_t page_id{0};
@@ -281,9 +280,8 @@ void QuantileHistMaker::Builder::ExpandTree(
           nodes_for_apply_split,
           p_tree,
           depth,
-          &smalest_nodes_mask,
-          &split_conditions_,
-          &split_ind_, param_.max_depth,
+          &split_info_,
+          param_.max_depth,
           &child_node_ids_, is_left_small,
           true);
         ++page_id;
@@ -376,7 +374,6 @@ bool QuantileHistMaker::Builder::UpdatePredictionCache(DMatrix const *data,
   if (!p_last_fmat_ || !p_last_tree_ || data != p_last_fmat_) {
     return false;
   }
-// <<<<<<< HEAD
   monitor_->Start("UpdatePredictionCache");
   CHECK_GT(out_preds.Size(), 0U);
   size_t page_id{0};
@@ -409,12 +406,6 @@ bool QuantileHistMaker::Builder::UpdatePredictionCache(DMatrix const *data,
     page_disp += partitioner.GetNodeAssignments().size();
   }
   monitor_->Stop("UpdatePredictionCache");
-// =======
-//   monitor_->Start(__func__);
-//   CHECK_EQ(out_preds.Size(), data->Info().num_row_);
-//   UpdatePredictionCacheImpl(ctx_, p_last_tree_, partitioner_, *evaluator_, out_preds);
-//   monitor_->Stop(__func__);
-// >>>>>>> 0725fd60819f9758fbed6ee54f34f3696a2fb2f8
   return true;
 }
 

@@ -184,7 +184,7 @@ class QuantileHistMaker: public TreeUpdater {
                          RegTree *p_tree,
                          int *num_leaves,
                          std::vector<CPUExpandEntry>* nodes_for_apply_split,
-                         std::unordered_map<uint32_t, bool>* smalest_nodes_mask_ptr, size_t depth,
+                         std::unordered_map<uint32_t, common::SplitNode>* split_info, size_t depth,
                          bool * is_left_small);
 
     template <typename BinIdxType>
@@ -212,8 +212,7 @@ class QuantileHistMaker: public TreeUpdater {
     // the internal row sets
     common::RowSetCollection row_set_collection_;
     std::vector<uint16_t> node_ids_;
-    std::unordered_map<uint32_t, int32_t> split_conditions_;
-    std::unordered_map<uint32_t, uint64_t> split_ind_;
+    std::unordered_map<uint32_t, common::SplitNode> split_info_;
     std::vector<uint16_t> child_node_ids_;
     std::vector<GradientPair> gpair_local_;
     common::HistogramCuts feature_values_;

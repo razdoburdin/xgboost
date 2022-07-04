@@ -132,14 +132,15 @@ void TestSyncHist(bool is_distributed) {
   opt_partition_builder.Init(gmat.Transpose(), gmat, &tree,
                                           1, 3, false);
   // initiat work
-  for (auto& node : opt_partition_builder.tm.nodes) {
-    node.second.threads_id.resize(1, 0);
-  }
-  opt_partition_builder.tm.threads.resize(1);
-  opt_partition_builder.tm.threads[0].nodes_id.resize(2);
-  opt_partition_builder.tm.threads[0].nodes_id[0] = 3;
-  opt_partition_builder.tm.threads[0].nodes_id[1] = 5;
-  histogram.Buffer().AllocateHistForLocalThread(opt_partition_builder.tm.threads[0].nodes_id, 0);
+  auto& tm = opt_partition_builder.tm;
+  tm.Init(1);
+  tm.ForEachNode([] (auto& ni) {ni.second.threads_id.resize(1, 0);});
+  tm.ForEachThread([&histogram] (auto& ti) {
+    ti.nodes_id.resize(2);
+    ti.nodes_id[0] = 3;
+    ti.nodes_id[1] = 5;
+    histogram.Buffer().AllocateHistForLocalThread(ti.nodes_id, 0);
+  });
 
   // set values to specific nodes hist
   std::vector<size_t> n_ids = {1, 2};

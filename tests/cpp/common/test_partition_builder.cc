@@ -9,7 +9,6 @@
 namespace xgboost {
 namespace common {
 
-// <<<<<<< HEAD
 TEST(OptPartitionBuilder, BasicTest) {
   size_t constexpr kNRows = 8, kNCols = 16;
   int32_t constexpr kMaxBins = 4;
@@ -33,13 +32,8 @@ TEST(OptPartitionBuilder, BasicTest) {
 
   const size_t fid = 0;
   const size_t split = 0;
-  using SplitConditionsBufferType = std::unordered_map<uint32_t, int32_t>;
-  using SplitIndBufferType = std::unordered_map<uint32_t, uint64_t>;
-  using SmalestNodesMaskType = std::unordered_map<uint32_t, bool>;
-  SplitConditionsBufferType split_conditions;
-  SplitIndBufferType split_ind;
-  SmalestNodesMaskType smalest_nodes_mask;
-  smalest_nodes_mask[1] = true;
+  std::unordered_map<uint32_t, common::SplitNode> split_info;
+  split_info[1].smalest_nodes_mask = true;
   std::unordered_map<uint32_t, uint16_t> nodes;//(1, 0);
   std::vector<uint32_t> split_nodes(1, 0);
   auto pred = [&](auto ridx, auto bin_id, auto nid, auto split_cond) {
@@ -47,10 +41,6 @@ TEST(OptPartitionBuilder, BasicTest) {
   };
   opt_partition_builder.SetDepth(1);
   opt_partition_builder.SetSplitNodes(std::move(split_nodes));
-  common::SplitInfo<SplitConditionsBufferType,
-                    SplitIndBufferType,
-                    SmalestNodesMaskType> split_info(
-                      &split_conditions, &split_ind, &smalest_nodes_mask);
 
   opt_partition_builder.template CommonPartition<
     uint8_t, false, true, false>(gmat.Transpose(), pred, data,
@@ -73,50 +63,6 @@ TEST(OptPartitionBuilder, BasicTest) {
             right_cnt++;
           }
         }
-// =======
-// TEST(PartitionBuilder, BasicTest) {
-//   constexpr size_t kBlockSize = 16;
-//   constexpr size_t kNodes = 5;
-//   constexpr size_t kTasks = 3 + 5 + 10 + 1 + 2;
-
-//   std::vector<size_t> tasks = { 3, 5, 10, 1, 2 };
-
-//   PartitionBuilder<kBlockSize> builder;
-//   builder.Init(kTasks, kNodes, [&](size_t i) {
-//     return tasks[i];
-//   });
-
-//   std::vector<size_t> rows_for_left_node = { 2, 12, 0, 16, 8 };
-
-//   for(size_t nid = 0; nid < kNodes; ++nid) {
-//     size_t value_left = 0;
-//     size_t value_right = 0;
-
-//     size_t left_total = tasks[nid] * rows_for_left_node[nid];
-
-//     for(size_t j = 0; j < tasks[nid]; ++j) {
-//       size_t begin = kBlockSize*j;
-//       size_t end = kBlockSize*(j+1);
-//       const size_t id = builder.GetTaskIdx(nid, begin);
-//       builder.AllocateForTask(id);
-
-//       auto left  = builder.GetLeftBuffer(nid, begin, end);
-//       auto right = builder.GetRightBuffer(nid, begin, end);
-
-//       size_t n_left   = rows_for_left_node[nid];
-//       size_t n_right = kBlockSize - rows_for_left_node[nid];
-
-//       for(size_t i = 0; i < n_left; i++) {
-//         left[i] = value_left++;
-//       }
-
-//       for(size_t i = 0; i < n_right; i++) {
-//         right[i] = left_total + value_right++;
-//       }
-
-//       builder.SetNLeftElems(nid, begin, n_left);
-//       builder.SetNRightElems(nid, begin, n_right);
-// >>>>>>> 0725fd60819f9758fbed6ee54f34f3696a2fb2f8
     }
   }
   ASSERT_EQ(opt_partition_builder.summ_size, left_cnt);

@@ -29,9 +29,7 @@ namespace tree {
 class CommonRowPartitioner {
  public:
   using NodeIdListT = std::vector<uint16_t>;
-  using NodeMaskListT = std::unordered_map<uint32_t, bool>;
-  using SplitFtrListT = std::unordered_map<uint32_t, int32_t>;
-  using SplitIndListT = std::unordered_map<uint32_t, uint64_t>;
+  using SplitInfoT = std::unordered_map<uint32_t, common::SplitNode>;
 
   const uint32_t one = 1;
   const uint32_t zero = 0;
@@ -79,9 +77,7 @@ class CommonRowPartitioner {
       std::vector<xgboost::tree::CPUExpandEntry> const& nodes,
       RegTree const* p_tree,
       int depth,
-      NodeMaskListT* smalest_nodes_mask_ptr,
-      SplitFtrListT* split_conditions,
-      SplitIndListT* split_ind,
+      SplitInfoT* split_info,
       const size_t max_depth,
       NodeIdListT* child_node_ids,
       bool is_left_small = true,
@@ -92,9 +88,7 @@ class CommonRowPartitioner {
         nodes_(nodes),
         p_tree_(p_tree),
         depth_(depth),
-        smalest_nodes_mask_ptr_(smalest_nodes_mask_ptr),
-        split_conditions_(split_conditions),
-        split_ind_(split_ind),
+        split_info_(split_info),
         max_depth_(max_depth),
         child_node_ids_(child_node_ids),
         is_left_small_(is_left_small),
@@ -108,9 +102,7 @@ class CommonRowPartitioner {
         nodes_,
         p_tree_,
         depth_,
-        smalest_nodes_mask_ptr_,
-        split_conditions_,
-        split_ind_,
+        split_info_,
         max_depth_,
         child_node_ids_,
         is_left_small_,
@@ -124,9 +116,7 @@ class CommonRowPartitioner {
     std::vector<xgboost::tree::CPUExpandEntry> const& nodes_;
     RegTree const* p_tree_;
     int depth_;
-    NodeMaskListT* smalest_nodes_mask_ptr_;
-    SplitFtrListT* split_conditions_;
-    SplitIndListT* split_ind_;
+    SplitInfoT* split_info_;
     const size_t max_depth_;
     NodeIdListT* child_node_ids_;
     bool is_left_small_;
@@ -194,7 +184,7 @@ class CommonRowPartitioner {
    */
   void FindSplitConditions(const std::vector<CPUExpandEntry> &nodes,
                            const RegTree &tree, const GHistIndexMatrix &gmat,
-                           SplitFtrListT *split_conditions) {
+                           SplitInfoT* split_info) {
     for (const auto& node : nodes) {
       const int32_t nid = node.nid;
       const bst_uint fid = tree[nid].SplitIndex();
@@ -210,7 +200,7 @@ class CommonRowPartitioner {
           split_cond = static_cast<int32_t>(bound);
         }
       }
-      (*split_conditions)[nid] = split_cond;
+      (*split_info)[nid].condition = split_cond;
     }
   }
 
@@ -225,13 +215,9 @@ class CommonRowPartitioner {
       nthreads(nthreads), depth_begin(depth_begin), depth_size(depth_size) {}
 
     template<typename Predicate,
-             typename SplitConditionsBufferType,
-             typename SplitIndBufferType,
-             typename SmalestNodesMaskType>
+             typename SplitInfoType>
     void CommonPartition(Predicate&& pred,
-                         SplitConditionsBufferType* split_conditions,
-                         SplitIndBufferType* split_ind,
-                         SmalestNodesMaskType* smalest_nodes_mask) {
+                         SplitInfoType* split_info) {
       size_t tid = omp_get_thread_num();
       const BinIdxType* numa = tid < nthreads/2 ?
         reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData()) :
@@ -244,13 +230,9 @@ class CommonRowPartitioner {
       begin += depth_begin;
       end += depth_begin;
       common::RowIndicesRange range{begin, end};
-      common::SplitInfo<SplitConditionsBufferType,
-                        SplitIndBufferType,
-                        SmalestNodesMaskType> split_info(
-                          split_conditions, split_ind, smalest_nodes_mask);
       partition_builder->template CommonPartition
           <BinIdxType, is_loss_guided, all_dense, any_cat>
-          (column_matrix, std::forward<Predicate>(pred), numa, tid, range, split_info);
+          (column_matrix, std::forward<Predicate>(pred), numa, tid, range, *split_info);
     }
 
    private:
@@ -302,9 +284,8 @@ class CommonRowPartitioner {
   void UpdatePosition(GenericParameter const* ctx, GHistIndexMatrix const& gmat,
     std::vector<CPUExpandEntry> const& nodes, RegTree const* p_tree,
     int depth,
-    NodeMaskListT* smalest_nodes_mask_ptr,
-    SplitFtrListT* split_conditions,
-    SplitIndListT* split_ind, const size_t max_depth,
+    SplitInfoT* split_info,
+    const size_t max_depth,
     NodeIdListT* child_node_ids,
     bool is_left_small = true,
     bool check_is_left_small = false) {
@@ -321,7 +302,7 @@ class CommonRowPartitioner {
 
     // 1. Find split condition for each split
     const size_t n_nodes = nodes.size();
-    FindSplitConditions(nodes, *p_tree, gmat, split_conditions);
+    FindSplitConditions(nodes, *p_tree, gmat, split_info);
     // 2.1 Create a blocked space of size SUM(samples in each node)
     const uint32_t* offsets = gmat.index.Offset();
     const uint64_t rows_offset = gmat.row_ptr.size() - 1;
@@ -330,8 +311,8 @@ class CommonRowPartitioner {
         const int32_t nid = nodes[i].nid;
         split_nodes[i] = nid;
         const uint64_t fid = (*p_tree)[nid].SplitIndex();
-        (*split_ind)[nid] = fid*((gmat.IsDense() ? rows_offset : 1));
-        (*split_conditions)[nid] = (*split_conditions)[nid] - gmat.cut.Ptrs()[fid];
+        (*split_info)[nid].ind = fid*((gmat.IsDense() ? rows_offset : 1));
+        (*split_info)[nid].condition -= gmat.cut.Ptrs()[fid];
     }
     opt_partition_builder_.SetSplitNodes(std::move(split_nodes));
 
@@ -348,26 +329,20 @@ class CommonRowPartitioner {
                        depth_begin, depth_size);
 
     if (max_depth != 0) {
-      // Copy data to linear containers:
+      // Copy split_info to linear containers:
       const size_t nodes_amount = 1 << (max_depth + 2);
-      std::vector<uint64_t> split_ind_data_vec(nodes_amount, 0);
-      std::vector<int32_t> split_conditions_data_vec(nodes_amount, 0);
-      std::vector<bool> smalest_nodes_mask_vec(nodes_amount, false);
+      std::vector<common::SplitNode> split_info_vec(nodes_amount);
       for (size_t nid = 0; nid < nodes_amount; ++nid) {
-        split_conditions_data_vec[nid] = (*split_conditions)[nid];
-        split_ind_data_vec[nid] = (*split_ind)[nid];
-        smalest_nodes_mask_vec[nid] = (*smalest_nodes_mask_ptr)[nid];
+        split_info_vec[nid] = (*split_info)[nid];
       }
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.CommonPartition(pred, &split_conditions_data_vec,
-                                         &split_ind_data_vec, &smalest_nodes_mask_vec);
+        position_updater.CommonPartition(pred, &split_info_vec);
       }
     } else {
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.CommonPartition(pred, split_conditions,
-                                         split_ind, smalest_nodes_mask_ptr);
+        position_updater.CommonPartition(pred, split_info);
       }
     }
 
