@@ -14,45 +14,45 @@ namespace common {
 
 template<>
 size_t OptPartitionBuilder::DepthSize<true>(GHistIndexMatrix const& gmat,
-                  const std::vector<uint16_t>& compleate_trees_depth_wise) {
-  CHECK_GT(compleate_trees_depth_wise.size(), 0);
-  size_t max_nid = std::max(compleate_trees_depth_wise[0],
-                            compleate_trees_depth_wise[1]);
+                  const std::vector<uint16_t>& complete_trees_depth_wise) {
+  CHECK_GT(complete_trees_depth_wise.size(), 0);
+  size_t max_nid = std::max(complete_trees_depth_wise[0],
+                            complete_trees_depth_wise[1]);
   partitions.resize(max_nid + 1);
-  CHECK_LT((*p_tree)[compleate_trees_depth_wise[0]].Parent(), partitions.size());
-  return partitions[(*p_tree)[compleate_trees_depth_wise[0]].Parent()].Size();
+  CHECK_LT((*p_tree)[complete_trees_depth_wise[0]].Parent(), partitions.size());
+  return partitions[(*p_tree)[complete_trees_depth_wise[0]].Parent()].Size();
 }
 
 template<>
 size_t OptPartitionBuilder::DepthSize<false>(GHistIndexMatrix const& gmat,
-                  const std::vector<uint16_t>& compleate_trees_depth_wise) {
+                  const std::vector<uint16_t>& complete_trees_depth_wise) {
     return gmat.row_ptr.size() - 1;
 }
 
 template <>
 size_t OptPartitionBuilder::DepthBegin<true>(const std::vector<uint16_t>&
-                                                compleate_trees_depth_wise) {
-  CHECK_GT(compleate_trees_depth_wise.size(), 0);
-  size_t max_nid = std::max(compleate_trees_depth_wise[0],
-                            compleate_trees_depth_wise[1]);
+                                                complete_trees_depth_wise) {
+  CHECK_GT(complete_trees_depth_wise.size(), 0);
+  size_t max_nid = std::max(complete_trees_depth_wise[0],
+                            complete_trees_depth_wise[1]);
   partitions.resize(max_nid + 1);
-  CHECK_LT((*p_tree)[compleate_trees_depth_wise[0]].Parent(), partitions.size());
-  return partitions[(*p_tree)[compleate_trees_depth_wise[0]].Parent()].b;
+  CHECK_LT((*p_tree)[complete_trees_depth_wise[0]].Parent(), partitions.size());
+  return partitions[(*p_tree)[complete_trees_depth_wise[0]].Parent()].b;
 }
 
 template <>
 size_t OptPartitionBuilder::DepthBegin<false>(const std::vector<uint16_t>&
-                                                compleate_trees_depth_wise) {
+                                                complete_trees_depth_wise) {
   return 0;
 }
 
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<true>(
-                  const std::vector<uint16_t>& compleate_trees_depth_wise,
+                  const std::vector<uint16_t>& complete_trees_depth_wise,
                   GHistIndexMatrix const& gmat, size_t n_features) {
   PrepareToUpdateRowBuffer();
-  const int cleft = compleate_trees_depth_wise[0];
-  const int cright = compleate_trees_depth_wise[1];
+  const int cleft = complete_trees_depth_wise[0];
+  const int cright = complete_trees_depth_wise[1];
   const int parent_id = (*p_tree)[cleft].Parent();
   CHECK_LT(parent_id, partitions.size());
   const size_t parent_begin = partitions[parent_id].b;
@@ -86,7 +86,7 @@ void OptPartitionBuilder::UpdateRowBuffer<true>(
 
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<false>(
-                  const std::vector<uint16_t>& compleate_trees_depth_wise,
+                  const std::vector<uint16_t>& complete_trees_depth_wise,
                   GHistIndexMatrix const& gmat, size_t n_features) {
   PrepareToUpdateRowBuffer();
   if (NeedsBufferUpdate(gmat, n_features)) {
@@ -128,13 +128,13 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
 
 template <>
 void OptPartitionBuilder::UpdateThreadsWork<true>(
-                  const std::vector<uint16_t>& compleate_trees_depth_wise,
+                  const std::vector<uint16_t>& complete_trees_depth_wise,
                   GHistIndexMatrix const& gmat, size_t n_features,
                   bool is_left_small, bool check_is_left_small) {
   tm.ForEachThread([](auto& ti) {ti.addr.clear();});
 
-  const int cleft = compleate_trees_depth_wise[0];
-  const int cright = compleate_trees_depth_wise[1];
+  const int cleft = complete_trees_depth_wise[0];
+  const int cright = complete_trees_depth_wise[1];
   uint32_t min_node_size = std::min(summ_size, summ_size_remain);
   uint32_t min_node_id = summ_size <= summ_size_remain ? cleft : cright;
   if (check_is_left_small) {
@@ -142,7 +142,7 @@ void OptPartitionBuilder::UpdateThreadsWork<true>(
     min_node_size = is_left_small ? summ_size : summ_size_remain;
   }
   uint32_t thread_size = std::max(common::GetBlockSize(min_node_size, n_threads),
-                          std::min(min_node_size, static_cast<uint32_t>(512)));
+                                  std::min(min_node_size, thread_size_limit));
   for (size_t tid = 0; tid <  n_threads; ++tid) {
     uint32_t th_begin = thread_size * tid;
     uint32_t th_end = std::min(th_begin + thread_size, min_node_size);
@@ -162,9 +162,9 @@ void OptPartitionBuilder::UpdateThreadsWork<true>(
 
 template <>
 void OptPartitionBuilder::UpdateThreadsWork<false, true>(
-                  const std::vector<uint16_t>& compleate_trees_depth_wise) {
+                  const std::vector<uint16_t>& complete_trees_depth_wise) {
   uint32_t block_size = std::max(common::GetBlockSize(summ_size, n_threads),
-                                  std::min(summ_size, static_cast<uint32_t>(512)));
+                                 std::min(summ_size, thread_size_limit));
   uint32_t curr_thread_size = block_size;
   uint32_t curr_node_disp = 0;
   auto threads_cyclic_view = tm.GetThreadsCyclicView();
@@ -206,7 +206,7 @@ void OptPartitionBuilder::UpdateThreadsWork<false, true>(
 
 template <>
 void OptPartitionBuilder::UpdateThreadsWork<false, false>(
-                  const std::vector<uint16_t>& compleate_trees_depth_wise) {
+                  const std::vector<uint16_t>& complete_trees_depth_wise) {
   uint32_t block_size = common::GetBlockSize(summ_size, n_threads);
   auto threads_saturation_view = tm.GetThreadsSaturationView();
   auto thread_info = threads_saturation_view.GetItem();
@@ -234,7 +234,7 @@ void OptPartitionBuilder::UpdateThreadsWork<false, false>(
                                 summ_size > block_size*(i+1) ?
                                 summ_size - block_size*(i+1) : 0);
     for (const auto& borrowed_tid : borrowed_work) {
-      for (const auto& node_id : compleate_trees_depth_wise) {
+      for (const auto& node_id : complete_trees_depth_wise) {
         if (tm.GetThreadInfoPtr(borrowed_tid)->nodes_count[node_id] != 0) {
           tm.Tie(i, node_id);
         }
@@ -245,14 +245,14 @@ void OptPartitionBuilder::UpdateThreadsWork<false, false>(
 
 template <>
 void OptPartitionBuilder::UpdateThreadsWork<false>(
-                  const std::vector<uint16_t>& compleate_trees_depth_wise,
+                  const std::vector<uint16_t>& complete_trees_depth_wise,
                   GHistIndexMatrix const& gmat, size_t n_features,
                   bool is_left_small, bool check_is_left_small) {
   tm.ForEachThread([](auto& ti) {ti.addr.clear();});
   if (NeedsBufferUpdate(gmat, n_features)) {
-    this->template UpdateThreadsWork<false, true>(compleate_trees_depth_wise);
+    this->template UpdateThreadsWork<false, true>(complete_trees_depth_wise);
   } else {
-    this->template UpdateThreadsWork<false, false>(compleate_trees_depth_wise);
+    this->template UpdateThreadsWork<false, false>(complete_trees_depth_wise);
   }
   tm.ForEachThread([](auto& ti) {ti.nodes_count.clear();
                                  ti.nodes_count_range.clear();});

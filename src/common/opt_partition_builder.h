@@ -59,6 +59,7 @@ class OptPartitionBuilder {
   uint32_t max_depth = 0;
 
   static constexpr double adhoc_l2_size = 1024 * 1024 * 0.8;
+  static constexpr uint32_t thread_size_limit = 512;
 
   const std::vector<Slice> &GetSlices(const uint32_t tid) const {
     return tm.GetThreadInfoPtr(tid)->addr;
@@ -133,18 +134,18 @@ class OptPartitionBuilder {
   }
 
   template<typename BufferType>
-  BufferType GetBufferItem(const std::vector<BufferType>& buffer,
+  BufferType FindBufferItem(const std::vector<BufferType>& buffer,
                            const uint32_t item_idx) const {
     return (buffer.data())[item_idx];
   }
 
-  bool GetBufferItem(const std::vector<bool>& buffer,
+  bool FindBufferItem(const std::vector<bool>& buffer,
                      const uint32_t item_idx) const {
     return buffer[item_idx];
   }
 
   template<typename BufferType>
-  BufferType GetBufferItem(const std::unordered_map<uint32_t, BufferType>& map_buffer,
+  BufferType FindBufferItem(const std::unordered_map<uint32_t, BufferType>& map_buffer,
                            const uint32_t item_idx) {
     return map_buffer.find(item_idx) != map_buffer.end() ?
                                         map_buffer.at(item_idx) : BufferType();
@@ -186,7 +187,7 @@ class OptPartitionBuilder {
       const uint32_t first_row_id = !is_loss_guided ? row_indices.begin :
                                                       row_indices_ptr[row_indices.begin];
       for (const auto& nid : split_nodes_) {
-        const SplitNode& split_node = GetBufferItem(split_info, nid);
+        const SplitNode& split_node = FindBufferItem(split_info, nid);
         thread_info->states[nid] = column_list[split_node.ind]->GetInitialState(first_row_id);
         thread_info->default_flags[nid] = (*p_tree)[nid].DefaultLeft();
       }
@@ -198,7 +199,7 @@ class OptPartitionBuilder {
         continue;
       }
 
-      const SplitNode& split_node = GetBufferItem(split_info, nid);
+      const SplitNode& split_node = FindBufferItem(split_info, nid);
       const int32_t sc = split_node.condition;
       uint64_t si = split_node.ind;
 
@@ -224,7 +225,7 @@ class OptPartitionBuilder {
         }
       }
       const uint16_t check_node_id = node_ids_[i];
-      uint32_t inc = GetBufferItem(split_info, check_node_id).smalest_nodes_mask;
+      uint32_t inc = FindBufferItem(split_info, check_node_id).smalest_nodes_mask;
       rows[1 + rows_count] = i;
       rows_count += inc;
       if (is_loss_guided) {
