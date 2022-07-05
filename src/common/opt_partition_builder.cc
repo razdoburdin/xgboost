@@ -12,6 +12,8 @@
 namespace xgboost {
 namespace common {
 
+constexpr uint32_t OptPartitionBuilder::thread_size_limit;
+
 template<>
 size_t OptPartitionBuilder::DepthSize<true>(GHistIndexMatrix const& gmat,
                   const std::vector<uint16_t>& complete_trees_depth_wise) {
