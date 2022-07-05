@@ -57,8 +57,7 @@ class GloablApproxBuilder {
   // Cache for histogram cuts.
   common::HistogramCuts feature_values_;
   std::unordered_map<uint32_t, common::ColumnMatrix> column_matrix_;
-  std::unordered_map<uint32_t, int32_t> split_conditions_;
-  std::unordered_map<uint32_t, uint64_t> split_ind_;
+  std::unordered_map<uint32_t, common::SplitNode> split_info_;
   std::vector<uint16_t> child_node_ids_;
 
  public:
@@ -120,7 +119,6 @@ class GloablApproxBuilder {
     // Caching prediction seems redundant for approx tree method, as sketching takes up
     // majority of training time.
     CHECK_EQ(out_preds.Size(), data->Info().num_row_);
-// <<<<<<< HEAD
     CHECK(p_last_tree_);
 
     auto evaluator = evaluator_.Evaluator();
@@ -153,9 +151,6 @@ class GloablApproxBuilder {
       });
       page_disp += prt.GetNodeAssignments().size();
     }
-// =======
-//     UpdatePredictionCacheImpl(ctx_, p_last_tree_, partitioner_, evaluator_, out_preds);
-// >>>>>>> 0725fd60819f9758fbed6ee54f34f3696a2fb2f8
     monitor_->Stop(__func__);
   }
 
@@ -239,8 +234,7 @@ class GloablApproxBuilder {
     this->InitData(p_fmat, hess);
     child_node_ids_.clear();
     child_node_ids_.emplace_back(0);
-    split_conditions_.clear();
-    split_ind_.clear();
+    split_info_.clear();
 
     Driver<CPUExpandEntry> driver(param_);
     auto &tree = *p_tree;
@@ -262,7 +256,8 @@ class GloablApproxBuilder {
     while (!expand_set.empty()) {
       child_node_ids_.clear();
       std::unordered_map<uint32_t, CPUExpandEntry> applied;
-      std::unordered_map<uint32_t, bool> smalest_nodes_mask;
+      std::for_each(split_info_.begin(), split_info_.end(),
+                    [](auto& si) {si.second.smalest_nodes_mask = false;});
       depth = expand_set[0].depth + 1;
       // candidates that can be further splited.
       std::vector<CPUExpandEntry> valid_candidates;
@@ -281,7 +276,7 @@ class GloablApproxBuilder {
           valid_candidates.emplace_back(candidate);
         } else {
           if (param_.grow_policy == TrainParam::kLossGuide) {
-            smalest_nodes_mask[left_child_nidx] = true;
+            split_info_[left_child_nidx].smalest_nodes_mask = true;
           }
           child_node_ids_.push_back(left_child_nidx);
           child_node_ids_.push_back(tree[candidate.nid].RightChild());
@@ -300,16 +295,16 @@ class GloablApproxBuilder {
         auto subtract_nidx = right_nidx;
 
         if (param_.grow_policy == TrainParam::kLossGuide) {
-          smalest_nodes_mask[left_nidx] = true;
+          split_info_[left_nidx].smalest_nodes_mask = true;
           if (fewer_right) {
             is_left_small = false;
             std::swap(build_nidx, subtract_nidx);
           }
         } else if (fewer_right) {
           std::swap(build_nidx, subtract_nidx);
-          smalest_nodes_mask[right_nidx] = true;
+          split_info_[right_nidx].smalest_nodes_mask = true;
         } else {
-          smalest_nodes_mask[left_nidx] = true;
+          split_info_[left_nidx].smalest_nodes_mask = true;
         }
         child_node_ids_.push_back(left_nidx);
         child_node_ids_.push_back(right_nidx);
@@ -332,10 +327,8 @@ class GloablApproxBuilder {
             applied_vec,
             p_tree,
             depth,
-            &smalest_nodes_mask,
-            is_loss_guide,
-            &split_conditions_,
-            &split_ind_, param_.max_depth,
+            &split_info_,
+            param_.max_depth,
             &child_node_ids_, is_left_small,
             true);
           // clang-format on
