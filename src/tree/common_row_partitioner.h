@@ -332,13 +332,13 @@ class CommonRowPartitioner {
     if (max_depth != 0) {
       constexpr bool use_linear_container = true;
       // Copy split_info to linear containers:
-      const size_t nodes_amount = 1 << (max_depth + 2);
+      const int nodes_amount = 1 << (max_depth + 2);
       std::vector<common::SplitNode> split_info_vec(nodes_amount);
 
       #pragma omp parallel num_threads(nthreads)
       {
         #pragma omp for
-        for (size_t nid = 0; nid < nodes_amount; ++nid) {
+        for (int nid = 0; nid < nodes_amount; ++nid) {
           if ((*split_info).count(nid) > 0) {
             split_info_vec[nid] = (*split_info).at(nid);
           }
