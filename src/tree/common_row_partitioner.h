@@ -334,15 +334,21 @@ class CommonRowPartitioner {
       // Copy split_info to linear containers:
       const size_t nodes_amount = 1 << (max_depth + 2);
       std::vector<common::SplitNode> split_info_vec(nodes_amount);
-      for (size_t nid = 0; nid < nodes_amount; ++nid) {
-        split_info_vec[nid] = (*split_info)[nid];
-      }
+
       #pragma omp parallel num_threads(nthreads)
       {
+        #pragma omp for
+        for (size_t nid = 0; nid < nodes_amount; ++nid) {
+          if ((*split_info).count(nid) > 0) {
+            split_info_vec[nid] = (*split_info).at(nid);
+          }
+        }
+
         position_updater.template CommonPartition<use_linear_container>(pred, &split_info_vec);
       }
     } else {
       constexpr bool use_linear_container = false;
+      opt_partition_builder_.EnableUsageAssociativeContainer();
       #pragma omp parallel num_threads(nthreads)
       {
         position_updater.template CommonPartition<use_linear_container>(pred, split_info);
@@ -350,13 +356,14 @@ class CommonRowPartitioner {
     }
 
     if (depth != max_depth || is_loss_guided) {
-      opt_partition_builder_.template UpdateRowBuffer<is_loss_guided>(
-                                             *child_node_ids, gmat,
-                                             n_features);
-      opt_partition_builder_.template UpdateThreadsWork<is_loss_guided>(
-                                               *child_node_ids, gmat,
-                                               n_features, is_left_small,
-                                               check_is_left_small);
+        opt_partition_builder_.template UpdateRowBuffer<is_loss_guided>(
+                                              *child_node_ids, gmat,
+                                              n_features);
+        opt_partition_builder_.template UpdateThreadsWork<is_loss_guided>(
+                                                *child_node_ids, gmat,
+                                                n_features,
+                                                is_left_small,
+                                                check_is_left_small);
     }
   }
 

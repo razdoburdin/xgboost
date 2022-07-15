@@ -41,6 +41,7 @@ TEST(OptPartitionBuilder, BasicTest) {
   };
   opt_partition_builder.SetDepth(1);
   opt_partition_builder.SetSplitNodes(std::move(split_nodes));
+  opt_partition_builder.EnableUsageAssociativeContainer();
 
   opt_partition_builder.template CommonPartition<
     uint8_t, false, true, false, false>(gmat.Transpose(), pred, data,

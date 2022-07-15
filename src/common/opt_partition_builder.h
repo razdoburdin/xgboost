@@ -79,6 +79,10 @@ class OptPartitionBuilder {
     }
   }
 
+  void EnableUsageAssociativeContainer() {
+    tm.EnableUsageAssociativeContainer();
+  }
+
   void Init(const ColumnMatrix& column_matrix,
             GHistIndexMatrix const& gmat,
             const RegTree* p_tree_local, size_t nthreads, size_t max_depth,
@@ -243,7 +247,6 @@ class OptPartitionBuilder {
       }
     }
 
-    SaveNodesCount<use_linear_container>(thread_info);
     rows[0] = rows_count;
     if (is_loss_guided) {
       rows_left[0] = rows_left_count;
@@ -251,10 +254,10 @@ class OptPartitionBuilder {
   }
 
   template<bool use_linear_container>
-  void SaveNodesCount(ThreadsManager::ThreadInfo* thread_info);
+  void InitNodesCount(ThreadsManager::ThreadInfo* thread_info);
 
   template<bool use_linear_container>
-  void InitNodesCount(ThreadsManager::ThreadInfo* thread_info);
+  void InitState(ThreadsManager::ThreadInfo* thread_info);
 
   template<bool use_linear_container>
   void UpdateNodesCount(ThreadsManager::ThreadInfo* thread_info,
@@ -293,8 +296,8 @@ class OptPartitionBuilder {
     summ_size = tm.AccumulateVecRows(n_threads);
     summ_size_remain = 0;
 
-    tm.ForEachThread([](auto& ti) {ti.nodes_id.clear();
-                                   ti.nodes_count_range.clear();});
+    tm.ForEachThread([](auto& ti) {ti.nodes_id.clear();});
+                                  //  ti.nodes_count_range.Clear();});
     tm.ForEachNode([](auto& ni) {ni.second.threads_id.clear();});
   }
 

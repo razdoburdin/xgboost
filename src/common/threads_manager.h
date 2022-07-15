@@ -89,13 +89,71 @@ class SaturationView : public AbstractView<DataT, SaturationView<DataT>> {
   }
 };
 
+
+template <typename T>
+class UniversalContainer {
+ public:
+    std::unordered_map<uint32_t, T> associative;
+    std::vector<T> linear;
+
+    // use this for run time choise
+    T& operator[](uint32_t idx) {
+      if (use_linear_container) {
+        return linear[idx];
+      } else {
+        return associative[idx];
+      }
+    }
+
+    T& At(uint32_t idx) {
+      if (use_linear_container) {
+        return linear.at(idx);
+      } else {
+        return associative.at(idx);
+      }
+    }
+
+    std::vector<uint32_t> GetUniqueIdx() {
+      std::vector<uint32_t> unique_idx;
+      if (use_linear_container) {
+        for (size_t num = 0; num < linear.size(); ++num) {
+          if (linear[num] > 0) {
+            unique_idx.push_back(num);
+          }
+        }
+      } else {
+        unique_idx.resize(associative.size(), 0);
+        size_t i = 0;
+        for (const auto& tnc : associative) {
+          unique_idx[i++] = tnc.first;
+        }
+      }
+      return unique_idx;
+    }
+
+    void Clear() {
+      if (use_linear_container) {
+        linear.clear();
+      } else {
+        associative.clear();
+      }
+    }
+
+    void EnableUsageAssociativeContainer() {
+      use_linear_container = false;
+    }
+
+ private:
+    bool use_linear_container = true;
+};
+
 class ThreadsManager {
  public:
   struct ThreadInfo {
-    struct NodesCount {
-      std::unordered_map<uint32_t, uint32_t> associative;
-      std::vector<uint32_t> linear;
-    };
+    // struct NodesCount {
+    //   std::unordered_map<uint32_t, uint32_t> associative;
+    //   std::vector<uint32_t> linear;
+    // };
 
     struct NodesCountRange {
       uint32_t begin;
@@ -110,9 +168,8 @@ class ThreadsManager {
     std::vector<uint16_t> nodes_id;
     std::vector<uint32_t> rows_nodes_wise;
 
-    NodesCount nodes_count;
-
-    std::unordered_map<uint32_t, NodesCountRange> nodes_count_range;
+    UniversalContainer<uint32_t> nodes_count;
+    UniversalContainer<NodesCountRange> nodes_count_range;
 
     std::vector<uint32_t> vec_rows;
     std::vector<uint32_t> vec_rows_remain;
@@ -160,6 +217,13 @@ class ThreadsManager {
     threads_.resize(n_threads);
   }
 
+  void EnableUsageAssociativeContainer() {
+    for (auto& thread : threads_) {
+      thread.nodes_count.EnableUsageAssociativeContainer();
+      thread.nodes_count_range.EnableUsageAssociativeContainer();
+    }
+  }
+
   void Init(size_t n_threads, size_t chunck_size, bool is_loss_guided) {
     Init(n_threads);
     nodes_.clear();
@@ -177,7 +241,7 @@ class ThreadsManager {
         }
       }
     }
-    ForEachThread([](auto& ti) {ti.nodes_count_range.clear();});
+    // ForEachThread([](auto& ti) {ti.nodes_count_range.Clear();});
   }
 
   bool HasNodeInfo(uint32_t nid) const {
