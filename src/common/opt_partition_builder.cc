@@ -48,6 +48,44 @@ size_t OptPartitionBuilder::DepthBegin<false>(const std::vector<uint16_t>&
   return 0;
 }
 
+template<>
+void OptPartitionBuilder::InitNodesCount<true>(ThreadsManager::ThreadInfo* thread_info) {
+  const size_t nodes_amount = 1 << (depth_ + 2);
+  if (thread_info->nodes_count.linear.size() < nodes_amount) {
+    thread_info->nodes_count.linear.resize(nodes_amount, 0);
+  }
+}
+
+template<>
+void OptPartitionBuilder::InitNodesCount<false>(ThreadsManager::ThreadInfo* thread_info) {}
+
+template <>
+void OptPartitionBuilder::UpdateNodesCount<true>(ThreadsManager::ThreadInfo* thread_info,
+                            uint16_t check_node_id,
+                            uint32_t inc) {
+  thread_info->nodes_count.linear[check_node_id] += inc;
+}
+
+template <>
+void OptPartitionBuilder::UpdateNodesCount<false>(ThreadsManager::ThreadInfo* thread_info,
+                             uint16_t check_node_id,
+                             uint32_t inc) {
+  thread_info->nodes_count.associative[check_node_id] += inc;
+}
+
+template<>
+void OptPartitionBuilder::SaveNodesCount<true>(ThreadsManager::ThreadInfo* thread_info) {
+  for (size_t i = 0; i < thread_info->nodes_count.linear.size(); ++i) {
+    const uint32_t value = thread_info->nodes_count.linear[i];
+    if (value != 0) {
+      thread_info->nodes_count.associative[i] = value;
+    }
+  }
+}
+
+template<>
+void OptPartitionBuilder::SaveNodesCount<false>(ThreadsManager::ThreadInfo* thread_info) {}
+
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<true>(
                   const std::vector<uint16_t>& complete_trees_depth_wise,
@@ -100,9 +138,9 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
         thread_info->rows_nodes_wise.resize(thread_info->vec_rows.size(), 0);
       }
 
-      std::vector<uint32_t> unique_node_ids(thread_info->nodes_count.size(), 0);
+      std::vector<uint32_t> unique_node_ids(thread_info->nodes_count.associative.size(), 0);
       size_t i = 0;
-      for (const auto& tnc : thread_info->nodes_count) {
+      for (const auto& tnc : thread_info->nodes_count.associative) {
         CHECK_LT(i, unique_node_ids.size());
         unique_node_ids[i++] = tnc.first;
       }
@@ -114,8 +152,9 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
         auto nodes_count_range = &(thread_info->nodes_count_range[uni]);
         nodes_count_range->begin = cummulative_summ;
         counts[uni] = cummulative_summ;
-        nodes_count_range->end = nodes_count_range->begin + thread_info->nodes_count[uni];
-        cummulative_summ += thread_info->nodes_count[uni];
+        nodes_count_range->end = nodes_count_range->begin +
+                                 thread_info->nodes_count.associative[uni];
+        cummulative_summ += thread_info->nodes_count.associative[uni];
       }
 
       for (size_t i = 0; i < thread_info->vec_rows[0]; ++i) {
@@ -158,7 +197,8 @@ void OptPartitionBuilder::UpdateThreadsWork<true>(
       thread_info->nodes_id.push_back(min_node_id);
     }
   }
-  tm.ForEachThread([](auto& ti) {ti.nodes_count.clear();
+  tm.ForEachThread([](auto& ti) {ti.nodes_count.associative.clear();
+                                 ti.nodes_count.linear.clear();
                                  ti.nodes_count_range.clear();});
 }
 
@@ -174,7 +214,7 @@ void OptPartitionBuilder::UpdateThreadsWork<false, true>(
   for (uint32_t i = 0; i < n_threads; ++i) {
     while (curr_thread_size != 0) {
       uint32_t node_id = threads_cyclic_view.CycleIdx();
-      const uint32_t curr_thread_node_size = thread_info->nodes_count[node_id];
+      const uint32_t curr_thread_node_size = thread_info->nodes_count.associative[node_id];
       auto nodes_count_range = thread_info->GetNodesCountRangePtr(node_id);
 
       if (curr_thread_node_size == 0) {
@@ -188,12 +228,12 @@ void OptPartitionBuilder::UpdateThreadsWork<false, true>(
         tm.Tie(i, node_id);
         if (curr_thread_node_size > 0 && curr_thread_node_size <= curr_thread_size) {
           slice_end += curr_thread_node_size;
-          thread_info->nodes_count[node_id] = 0;
+          thread_info->nodes_count.associative[node_id] = 0;
           curr_thread_size -= curr_thread_node_size;
           thread_info = threads_cyclic_view.NextItem();
         } else {
           slice_end += curr_thread_size;
-          thread_info->nodes_count[node_id] -= curr_thread_size;
+          thread_info->nodes_count.associative[node_id] -= curr_thread_size;
           nodes_count_range->begin += curr_thread_size;
           curr_thread_size = 0;
         }
@@ -237,7 +277,7 @@ void OptPartitionBuilder::UpdateThreadsWork<false, false>(
                                 summ_size - block_size*(i+1) : 0);
     for (const auto& borrowed_tid : borrowed_work) {
       for (const auto& node_id : complete_trees_depth_wise) {
-        if (tm.GetThreadInfoPtr(borrowed_tid)->nodes_count[node_id] != 0) {
+        if (tm.GetThreadInfoPtr(borrowed_tid)->nodes_count.associative[node_id] != 0) {
           tm.Tie(i, node_id);
         }
       }
@@ -256,7 +296,8 @@ void OptPartitionBuilder::UpdateThreadsWork<false>(
   } else {
     this->template UpdateThreadsWork<false, false>(complete_trees_depth_wise);
   }
-  tm.ForEachThread([](auto& ti) {ti.nodes_count.clear();
+  tm.ForEachThread([](auto& ti) {ti.nodes_count.associative.clear();
+                                 ti.nodes_count.linear.clear();
                                  ti.nodes_count_range.clear();});
 }
 

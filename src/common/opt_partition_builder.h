@@ -108,25 +108,29 @@ class OptPartitionBuilder {
   }
 
   template<bool is_loss_guided, bool all_dense, bool any_cat,
+           bool use_linear_container,
            typename SplitInfoType,
            typename Predicate>
   void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, size_t tid,
                        const RowIndicesRange& row_indices, const SplitInfoType& split_info) {
     switch (column_matrix.GetTypeSize()) {
       case common::kUint8BinsTypeSize:
-        CommonPartition<BinTypeMap<kUint8BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
+        CommonPartition<BinTypeMap<kUint8BinsTypeSize>::Type, is_loss_guided, all_dense,
+                        any_cat, use_linear_container>(
                            column_matrix, std::forward<Predicate>(pred),
                            column_matrix.template GetIndexData<uint8_t>(),
                            tid, row_indices, split_info);
         break;
       case common::kUint16BinsTypeSize:
-        CommonPartition<BinTypeMap<kUint16BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
+        CommonPartition<BinTypeMap<kUint16BinsTypeSize>::Type, is_loss_guided, all_dense,
+                        any_cat, use_linear_container>(
                            column_matrix, std::forward<Predicate>(pred),
                            column_matrix.template GetIndexData<uint16_t>(),
                            tid, row_indices, split_info);
         break;
       default:
-        CommonPartition<BinTypeMap<kUint32BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
+        CommonPartition<BinTypeMap<kUint32BinsTypeSize>::Type, is_loss_guided, all_dense,
+                        any_cat, use_linear_container>(
                            column_matrix, std::forward<Predicate>(pred),
                            column_matrix.template GetIndexData<uint32_t>(),
                            tid, row_indices, split_info);
@@ -165,6 +169,7 @@ class OptPartitionBuilder {
 
   template<typename BinIdxType, bool is_loss_guided,
            bool all_dense, bool any_cat,
+           bool use_linear_container,
            typename SplitInfoType,
            typename Predicate>
     void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred,
@@ -180,6 +185,8 @@ class OptPartitionBuilder {
     uint32_t* rows_left = nullptr;
     if (is_loss_guided) {
       rows_left = thread_info->vec_rows_remain.data();
+    } else {
+      InitNodesCount<use_linear_container>(thread_info);
     }
     const BinIdxType* columnar_data = numa;
 
@@ -232,15 +239,27 @@ class OptPartitionBuilder {
         rows_left[1 + rows_left_count] = i;
         rows_left_count += !static_cast<bool>(inc);
       } else {
-        thread_info->nodes_count[check_node_id] += inc;
+        UpdateNodesCount<use_linear_container>(thread_info, check_node_id, inc);
       }
     }
 
+    SaveNodesCount<use_linear_container>(thread_info);
     rows[0] = rows_count;
     if (is_loss_guided) {
       rows_left[0] = rows_left_count;
     }
   }
+
+  template<bool use_linear_container>
+  void SaveNodesCount(ThreadsManager::ThreadInfo* thread_info);
+
+  template<bool use_linear_container>
+  void InitNodesCount(ThreadsManager::ThreadInfo* thread_info);
+
+  template<bool use_linear_container>
+  void UpdateNodesCount(ThreadsManager::ThreadInfo* thread_info,
+                        uint16_t check_node_id,
+                        uint32_t inc);
 
   template<bool is_loss_guided>
   size_t DepthSize(GHistIndexMatrix const& gmat,

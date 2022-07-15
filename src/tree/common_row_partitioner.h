@@ -214,7 +214,8 @@ class CommonRowPartitioner {
       column_matrix(column_matrix), partition_builder(partition_builder),
       nthreads(nthreads), depth_begin(depth_begin), depth_size(depth_size) {}
 
-    template<typename Predicate,
+    template<bool use_linear_container,
+             typename Predicate,
              typename SplitInfoType>
     void CommonPartition(Predicate&& pred,
                          SplitInfoType* split_info) {
@@ -231,7 +232,7 @@ class CommonRowPartitioner {
       end += depth_begin;
       common::RowIndicesRange range{begin, end};
       partition_builder->template CommonPartition
-          <BinIdxType, is_loss_guided, all_dense, any_cat>
+          <BinIdxType, is_loss_guided, all_dense, any_cat, use_linear_container>
           (column_matrix, std::forward<Predicate>(pred), numa, tid, range, *split_info);
     }
 
@@ -329,6 +330,7 @@ class CommonRowPartitioner {
                        depth_begin, depth_size);
 
     if (max_depth != 0) {
+      constexpr bool use_linear_container = true;
       // Copy split_info to linear containers:
       const size_t nodes_amount = 1 << (max_depth + 2);
       std::vector<common::SplitNode> split_info_vec(nodes_amount);
@@ -337,12 +339,13 @@ class CommonRowPartitioner {
       }
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.CommonPartition(pred, &split_info_vec);
+        position_updater.template CommonPartition<use_linear_container>(pred, &split_info_vec);
       }
     } else {
+      constexpr bool use_linear_container = false;
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.CommonPartition(pred, split_info);
+        position_updater.template CommonPartition<use_linear_container>(pred, split_info);
       }
     }
 

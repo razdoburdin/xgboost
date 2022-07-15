@@ -92,6 +92,11 @@ class SaturationView : public AbstractView<DataT, SaturationView<DataT>> {
 class ThreadsManager {
  public:
   struct ThreadInfo {
+    struct NodesCount {
+      std::unordered_map<uint32_t, uint32_t> associative;
+      std::vector<uint32_t> linear;
+    };
+
     struct NodesCountRange {
       uint32_t begin;
       uint32_t end;
@@ -103,8 +108,9 @@ class ThreadsManager {
 
     std::vector<Slice> addr;
     std::vector<uint16_t> nodes_id;
-    std::unordered_map<uint32_t, uint32_t> nodes_count;
     std::vector<uint32_t> rows_nodes_wise;
+
+    NodesCount nodes_count;
 
     std::unordered_map<uint32_t, NodesCountRange> nodes_count_range;
 

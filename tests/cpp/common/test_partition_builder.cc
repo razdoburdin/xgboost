@@ -43,7 +43,7 @@ TEST(OptPartitionBuilder, BasicTest) {
   opt_partition_builder.SetSplitNodes(std::move(split_nodes));
 
   opt_partition_builder.template CommonPartition<
-    uint8_t, false, true, false>(gmat.Transpose(), pred, data,
+    uint8_t, false, true, false, false>(gmat.Transpose(), pred, data,
                           0, {0, kNRows}, split_info);
   opt_partition_builder.template UpdateRowBuffer <false> (
                                         node_ids, gmat,

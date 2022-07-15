@@ -85,7 +85,7 @@ using DMatrixP = std::shared_ptr<DMatrix>;
     const size_t row_ind_begin = 0;
     opt_partition_builder.SetDepth(kDepth);
     opt_partition_builder.SetSplitNodes(std::move(split_nodes));
-    opt_partition_builder.template CommonPartition<kIsLossGuide, kAllDense, kHasCat>(
+    opt_partition_builder.template CommonPartition<kIsLossGuide, kAllDense, kHasCat, false>(
                 gmat.Transpose(), pred, thread_id, {row_ind_begin, row_count_}, split_info);
 
     opt_partition_builder.template UpdateRowBuffer <false>(
