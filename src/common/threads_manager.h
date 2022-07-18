@@ -90,71 +90,84 @@ class SaturationView : public AbstractView<DataT, SaturationView<DataT>> {
 };
 
 
+enum class ContainerType : std::uint8_t {  // NOLINT
+  kLinear = 0,
+  kAssociative = 1
+};
+// Standartize interface for acces vector and unorderd_map
 template <typename T>
 class UniversalContainer {
  public:
-    std::unordered_map<uint32_t, T> associative;
-    std::vector<T> linear;
+  // If container type is known in compile time. Is is better to work directly with the underlying container
+  auto& GetAssociativeContainer() {
+    return associative_;
+  }
 
-    // use this for run time choise
-    T& operator[](uint32_t idx) {
-      if (use_linear_container) {
-        return linear[idx];
-      } else {
-        return associative[idx];
-      }
+  auto& GetLinearContainer() {
+    return linear_;
+  }
+
+  // use this for run time choise
+  T& operator[](uint32_t idx) {
+    if (type_ == ContainerType::kLinear) {
+      // return linear_[idx];
+      return linear_.at(idx);
+    } else {
+      return associative_[idx];
     }
+  }
 
-    T& At(uint32_t idx) {
-      if (use_linear_container) {
-        return linear.at(idx);
-      } else {
-        return associative.at(idx);
-      }
+  T& At(uint32_t idx) {
+    if (type_ == ContainerType::kLinear) {
+      return linear_.at(idx);
+    } else {
+      return associative_.at(idx);
     }
+  }
 
-    std::vector<uint32_t> GetUniqueIdx() {
-      std::vector<uint32_t> unique_idx;
-      if (use_linear_container) {
-        for (size_t num = 0; num < linear.size(); ++num) {
-          if (linear[num] > 0) {
-            unique_idx.push_back(num);
-          }
+  std::vector<uint32_t> GetUniqueIdx() {
+    std::vector<uint32_t> unique_idx;
+    if (type_ == ContainerType::kLinear) {
+      for (size_t num = 0; num < linear_.size(); ++num) {
+        if (linear_[num] > 0) {
+          unique_idx.push_back(num);
         }
-      } else {
-        unique_idx.resize(associative.size(), 0);
-        size_t i = 0;
-        for (const auto& tnc : associative) {
-          unique_idx[i++] = tnc.first;
-        }
       }
-      return unique_idx;
-    }
-
-    void Clear() {
-      if (use_linear_container) {
-        linear.clear();
-      } else {
-        associative.clear();
+    } else {
+      unique_idx.resize(associative_.size(), 0);
+      size_t i = 0;
+      for (const auto& tnc : associative_) {
+        unique_idx[i++] = tnc.first;
       }
     }
+    return unique_idx;
+  }
 
-    void EnableUsageAssociativeContainer() {
-      use_linear_container = false;
+  void Clear() {
+    if (type_ == ContainerType::kLinear) {
+      linear_.clear();
+    } else {
+      associative_.clear();
     }
+  }
+
+  ContainerType GetContainerType() const {
+    return type_;
+  }
+
+  void SetContainerType(ContainerType type) {
+    type_ = type;
+  }
 
  private:
-    bool use_linear_container = true;
+  std::unordered_map<uint32_t, T> associative_;
+  std::vector<T> linear_;
+  ContainerType type_ = ContainerType::kLinear;
 };
 
 class ThreadsManager {
  public:
   struct ThreadInfo {
-    // struct NodesCount {
-    //   std::unordered_map<uint32_t, uint32_t> associative;
-    //   std::vector<uint32_t> linear;
-    // };
-
     struct NodesCountRange {
       uint32_t begin;
       uint32_t end;
@@ -162,6 +175,11 @@ class ThreadsManager {
 
     NodesCountRange* GetNodesCountRangePtr(size_t nid) {
       return &(nodes_count_range[nid]);
+    }
+
+    void SetContainersType(ContainerType type) {
+      nodes_count.SetContainerType(type);
+      nodes_count_range.SetContainerType(type);
     }
 
     std::vector<Slice> addr;
@@ -215,13 +233,6 @@ class ThreadsManager {
 
   void Init(size_t n_threads) {
     threads_.resize(n_threads);
-  }
-
-  void EnableUsageAssociativeContainer() {
-    for (auto& thread : threads_) {
-      thread.nodes_count.EnableUsageAssociativeContainer();
-      thread.nodes_count_range.EnableUsageAssociativeContainer();
-    }
   }
 
   void Init(size_t n_threads, size_t chunck_size, bool is_loss_guided) {

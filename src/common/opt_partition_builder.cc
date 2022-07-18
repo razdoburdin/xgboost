@@ -49,32 +49,22 @@ size_t OptPartitionBuilder::DepthBegin<false>(const std::vector<uint16_t>&
 }
 
 template<>
-void OptPartitionBuilder::InitNodesCount<true>(ThreadsManager::ThreadInfo* thread_info) {
+void OptPartitionBuilder::InitNodesCount<ContainerType::kLinear>
+                                        (ThreadsManager::ThreadInfo* thread_info) {
   const size_t nodes_amount = 1 << (depth_ + 2);
-  if (thread_info->nodes_count.linear.size() < nodes_amount) {
-    thread_info->nodes_count.linear.resize(nodes_amount, 0);
+  auto& nodes_count_container = thread_info->nodes_count.GetLinearContainer();
+  if (nodes_count_container.size() < nodes_amount) {
+    nodes_count_container.resize(nodes_amount, 0);
   }
-  if (thread_info->nodes_count_range.linear.size() < nodes_amount) {
-    thread_info->nodes_count_range.linear.resize(nodes_amount);
+  auto& nodes_count_range_container = thread_info->nodes_count_range.GetLinearContainer();
+  if (nodes_count_range_container.size() < nodes_amount) {
+    nodes_count_range_container.resize(nodes_amount);
   }
 }
 
 template<>
-void OptPartitionBuilder::InitNodesCount<false>(ThreadsManager::ThreadInfo* thread_info) {}
-
-template <>
-void OptPartitionBuilder::UpdateNodesCount<true>(ThreadsManager::ThreadInfo* thread_info,
-                            uint16_t check_node_id,
-                            uint32_t inc) {
-  thread_info->nodes_count.linear[check_node_id] += inc;
-}
-
-template <>
-void OptPartitionBuilder::UpdateNodesCount<false>(ThreadsManager::ThreadInfo* thread_info,
-                             uint16_t check_node_id,
-                             uint32_t inc) {
-  thread_info->nodes_count.associative[check_node_id] += inc;
-}
+void OptPartitionBuilder::InitNodesCount<ContainerType::kAssociative>
+                                        (ThreadsManager::ThreadInfo* thread_info) {}
 
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<true>(
@@ -135,7 +125,9 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
       std::unordered_map<uint32_t, uint32_t> counts;
       for (const auto& uni : unique_node_ids) {
         auto nodes_amount = thread_info->nodes_count[uni];
-        auto nodes_count_range = &(thread_info->nodes_count_range[uni]);
+        // auto nodes_count_range = &(thread_info->nodes_count_range[uni]);
+        auto nodes_count_range = thread_info->GetNodesCountRangePtr(uni);
+
         nodes_count_range->begin = cummulative_summ;
         counts[uni] = cummulative_summ;
         nodes_count_range->end = nodes_count_range->begin +

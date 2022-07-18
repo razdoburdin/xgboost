@@ -35,6 +35,7 @@ class CommonRowPartitioner {
   const uint32_t zero = 0;
 
  private:
+  std::unique_ptr<common::Monitor> monitor;
   common::OptPartitionBuilder opt_partition_builder_;
   NodeIdListT node_ids_;
 
@@ -214,7 +215,7 @@ class CommonRowPartitioner {
       column_matrix(column_matrix), partition_builder(partition_builder),
       nthreads(nthreads), depth_begin(depth_begin), depth_size(depth_size) {}
 
-    template<bool use_linear_container,
+    template<common::ContainerType container_type,
              typename Predicate,
              typename SplitInfoType>
     void CommonPartition(Predicate&& pred,
@@ -232,7 +233,7 @@ class CommonRowPartitioner {
       end += depth_begin;
       common::RowIndicesRange range{begin, end};
       partition_builder->template CommonPartition
-          <BinIdxType, is_loss_guided, all_dense, any_cat, use_linear_container>
+          <BinIdxType, is_loss_guided, all_dense, any_cat, container_type>
           (column_matrix, std::forward<Predicate>(pred), numa, tid, range, *split_info);
     }
 
@@ -329,8 +330,8 @@ class CommonRowPartitioner {
       position_updater(column_matrix, &opt_partition_builder_, nthreads,
                        depth_begin, depth_size);
 
+    monitor->Start("CommonPartition");
     if (max_depth != 0) {
-      constexpr bool use_linear_container = true;
       // Copy split_info to linear containers:
       const int nodes_amount = 1 << (max_depth + 2);
       std::vector<common::SplitNode> split_info_vec(nodes_amount);
@@ -344,26 +345,31 @@ class CommonRowPartitioner {
           }
         }
 
-        position_updater.template CommonPartition<use_linear_container>(pred, &split_info_vec);
+        position_updater.template CommonPartition<common::ContainerType::kLinear>
+                                                 (pred, &split_info_vec);
       }
     } else {
-      constexpr bool use_linear_container = false;
-      opt_partition_builder_.EnableUsageAssociativeContainer();
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.template CommonPartition<use_linear_container>(pred, split_info);
+        position_updater.template CommonPartition<common::ContainerType::kAssociative>
+                                                 (pred, split_info);
       }
     }
+    monitor->Stop("CommonPartition");
 
     if (depth != max_depth || is_loss_guided) {
+        monitor->Start("UpdateRowBuffer");
         opt_partition_builder_.template UpdateRowBuffer<is_loss_guided>(
                                               *child_node_ids, gmat,
                                               n_features);
+        monitor->Stop("UpdateRowBuffer");
+        monitor->Start("UpdateThreadsWork");
         opt_partition_builder_.template UpdateThreadsWork<is_loss_guided>(
                                                 *child_node_ids, gmat,
                                                 n_features,
                                                 is_left_small,
                                                 check_is_left_small);
+        monitor->Stop("UpdateThreadsWork");
     }
   }
 
@@ -387,12 +393,18 @@ class CommonRowPartitioner {
     return opt_partition_builder_;
   }
 
-  CommonRowPartitioner() = default;
+  // CommonRowPartitioner() = default;
+  CommonRowPartitioner() {
+    monitor = std::make_unique<common::Monitor>();
+    monitor->Init("CommonRowPartitioner");
+  }
   explicit CommonRowPartitioner(GenericParameter const *ctx,
                                 GHistIndexMatrix const &gmat,
                                 const RegTree* p_tree_local,
                                 size_t max_depth,
                                 bool is_loss_guide) {
+    monitor = std::make_unique<common::Monitor>();
+    monitor->Init("CommonRowPartitioner");
     is_loss_guided = is_loss_guide;
     const size_t block_size = common::GetBlockSize(gmat.row_ptr.size() - 1, ctx->Threads());
 
