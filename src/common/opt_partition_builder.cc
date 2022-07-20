@@ -48,24 +48,6 @@ size_t OptPartitionBuilder::DepthBegin<false>(const std::vector<uint16_t>&
   return 0;
 }
 
-template<>
-void OptPartitionBuilder::InitNodesCount<ContainerType::kLinear>
-                                        (ThreadsManager::ThreadInfo* thread_info) {
-  const size_t nodes_amount = 1 << (depth_ + 2);
-  auto& nodes_count_container = thread_info->nodes_count.GetLinearContainer();
-  if (nodes_count_container.size() < nodes_amount) {
-    nodes_count_container.resize(nodes_amount, 0);
-  }
-  auto& nodes_count_range_container = thread_info->nodes_count_range.GetLinearContainer();
-  if (nodes_count_range_container.size() < nodes_amount) {
-    nodes_count_range_container.resize(nodes_amount);
-  }
-}
-
-template<>
-void OptPartitionBuilder::InitNodesCount<ContainerType::kAssociative>
-                                        (ThreadsManager::ThreadInfo* thread_info) {}
-
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<true>(
                   const std::vector<uint16_t>& complete_trees_depth_wise,
@@ -78,7 +60,6 @@ void OptPartitionBuilder::UpdateRowBuffer<true>(
   const size_t parent_begin = partitions[parent_id].b;
   const size_t parent_size = partitions[parent_id].Size();
   summ_size_remain += tm.AccumulateVecRowsRemain(n_threads);
-
 
   CHECK_EQ(summ_size + summ_size_remain, parent_size);
   SetSlice(cleft, partitions[parent_id].b, summ_size);
@@ -125,7 +106,6 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
       std::unordered_map<uint32_t, uint32_t> counts;
       for (const auto& uni : unique_node_ids) {
         auto nodes_amount = thread_info->nodes_count[uni];
-        // auto nodes_count_range = &(thread_info->nodes_count_range[uni]);
         auto nodes_count_range = thread_info->GetNodesCountRangePtr(uni);
 
         nodes_count_range->begin = cummulative_summ;

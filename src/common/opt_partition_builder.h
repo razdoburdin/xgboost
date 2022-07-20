@@ -97,7 +97,7 @@ class OptPartitionBuilder {
     data_hash = reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData());
     this->max_depth = max_depth;
     if (is_loss_guided) {
-      partitions.resize(1 << (max_depth + 2));
+      partitions.resize(1 << (max_depth + 1));
     }
 
     n_threads = nthreads;
@@ -138,21 +138,26 @@ class OptPartitionBuilder {
   }
 
   template<typename BufferType>
-  BufferType FindBufferItem(const std::vector<BufferType>& buffer,
-                           const uint32_t item_idx) const {
+  static inline const BufferType& FindBufferItem(const std::vector<BufferType>& buffer,
+                            const uint32_t item_idx) {
     return (buffer.data())[item_idx];
   }
 
-  bool FindBufferItem(const std::vector<bool>& buffer,
-                     const uint32_t item_idx) const {
+  static inline bool FindBufferItem(const std::vector<bool>& buffer,
+                      const uint32_t item_idx) {
     return buffer[item_idx];
   }
 
   template<typename BufferType>
-  BufferType FindBufferItem(const std::unordered_map<uint32_t, BufferType>& map_buffer,
-                           const uint32_t item_idx) {
-    return map_buffer.find(item_idx) != map_buffer.end() ?
-                                        map_buffer.at(item_idx) : BufferType();
+  static inline const BufferType& FindBufferItem(
+                            const std::unordered_map<uint32_t, BufferType>& map_buffer,
+                            const uint32_t item_idx) {
+    if (map_buffer.count(item_idx) > 0) {
+      return map_buffer.at(item_idx);
+    } else {
+      static BufferType empty_item;
+      return empty_item;
+    }
   }
 
   void SetDepth(size_t depth) {
@@ -188,7 +193,9 @@ class OptPartitionBuilder {
     if (is_loss_guided) {
       rows_left = thread_info->vec_rows_remain.data();
     } else {
-      InitNodesCount<container_type>(thread_info);
+      const size_t nodes_amount = 1 << (depth_ + 1);
+      thread_info->nodes_count.ResizeIfSmaller(nodes_amount);
+      thread_info->nodes_count_range.ResizeIfSmaller(nodes_amount);
     }
     const BinIdxType* columnar_data = numa;
 
@@ -242,6 +249,9 @@ class OptPartitionBuilder {
         rows_left[1 + rows_left_count] = i;
         rows_left_count += !static_cast<bool>(inc);
       } else {
+        /* This block of code is equivalent to
+         * thread_info->nodes_count[check_node_id] += inc;
+         * However the unclear structure bellow lead to a faster binary. */
         if (container_type == ContainerType::kLinear) {
           auto& nodes_count_container = thread_info->nodes_count.GetLinearContainer();
           nodes_count_container[check_node_id] += inc;
@@ -256,9 +266,6 @@ class OptPartitionBuilder {
       rows_left[0] = rows_left_count;
     }
   }
-
-  template<ContainerType container_type>
-  void InitNodesCount(ThreadsManager::ThreadInfo* thread_info);
 
   template<bool is_loss_guided>
   size_t DepthSize(GHistIndexMatrix const& gmat,
@@ -293,7 +300,6 @@ class OptPartitionBuilder {
     summ_size_remain = 0;
 
     tm.ForEachThread([](auto& ti) {ti.nodes_id.clear();});
-                                  //  ti.nodes_count_range.Clear();});
     tm.ForEachNode([](auto& ni) {ni.second.threads_id.clear();});
   }
 

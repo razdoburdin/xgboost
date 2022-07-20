@@ -98,7 +98,6 @@ enum class ContainerType : std::uint8_t {  // NOLINT
 template <typename T>
 class UniversalContainer {
  public:
-  // If container type is known in compile time. Is is better to work directly with the underlying container
   auto& GetAssociativeContainer() {
     return associative_;
   }
@@ -107,17 +106,23 @@ class UniversalContainer {
     return linear_;
   }
 
-  // use this for run time choise
-  T& operator[](uint32_t idx) {
+  void ResizeIfSmaller(size_t size) {
     if (type_ == ContainerType::kLinear) {
-      // return linear_[idx];
-      return linear_.at(idx);
+      if (linear_.size() < size) {
+        linear_.resize(size);
+      }
+    }
+  }
+
+  T& operator[](size_t idx) {
+    if (type_ == ContainerType::kLinear) {
+      return linear_[idx];
     } else {
       return associative_[idx];
     }
   }
 
-  T& At(uint32_t idx) {
+  T& At(size_t idx) const {
     if (type_ == ContainerType::kLinear) {
       return linear_.at(idx);
     } else {

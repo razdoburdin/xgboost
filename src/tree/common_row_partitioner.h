@@ -11,6 +11,7 @@
 #include <vector>
 #include <algorithm>
 #include <unordered_map>
+#include <memory>
 
 #include "../common/opt_partition_builder.h"
 #include "../common/column_matrix.h"
@@ -333,7 +334,8 @@ class CommonRowPartitioner {
     monitor->Start("CommonPartition");
     if (max_depth != 0) {
       // Copy split_info to linear containers:
-      const int nodes_amount = 1 << (max_depth + 2);
+      // nodes_amount = 2^(max_depth + 1)
+      const int nodes_amount = 1 << (max_depth + 1);
       std::vector<common::SplitNode> split_info_vec(nodes_amount);
 
       #pragma omp parallel num_threads(nthreads)
