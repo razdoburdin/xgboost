@@ -91,57 +91,57 @@ class SaturationView : public AbstractView<DataT, SaturationView<DataT>> {
 
 
 enum class ContainerType : std::uint8_t {  // NOLINT
-  kLinear = 0,
-  kAssociative = 1
+  kVector = 0,
+  kUnorderedMap = 1
 };
 // Standartize interface for acces vector and unorderd_map
 template <typename T>
-class UniversalContainer {
+class FlexibleContainer {
  public:
-  auto& GetAssociativeContainer() {
-    return associative_;
+  auto& GetUnorderedMapContainer() {
+    return unordered_map_;
   }
 
-  auto& GetLinearContainer() {
-    return linear_;
+  auto& GetVectorContainer() {
+    return vector_;
   }
 
   void ResizeIfSmaller(size_t size) {
-    if (type_ == ContainerType::kLinear) {
-      if (linear_.size() < size) {
-        linear_.resize(size);
+    if (type_ == ContainerType::kVector) {
+      if (vector_.size() < size) {
+        vector_.resize(size);
       }
     }
   }
 
   T& operator[](size_t idx) {
-    if (type_ == ContainerType::kLinear) {
-      return linear_[idx];
+    if (type_ == ContainerType::kVector) {
+      return vector_[idx];
     } else {
-      return associative_[idx];
+      return unordered_map_[idx];
     }
   }
 
   T& At(size_t idx) const {
-    if (type_ == ContainerType::kLinear) {
-      return linear_.at(idx);
+    if (type_ == ContainerType::kVector) {
+      return vector_.at(idx);
     } else {
-      return associative_.at(idx);
+      return unordered_map_.at(idx);
     }
   }
 
   std::vector<uint32_t> GetUniqueIdx() {
     std::vector<uint32_t> unique_idx;
-    if (type_ == ContainerType::kLinear) {
-      for (size_t num = 0; num < linear_.size(); ++num) {
-        if (linear_[num] > 0) {
+    if (type_ == ContainerType::kVector) {
+      for (size_t num = 0; num < vector_.size(); ++num) {
+        if (vector_[num] > 0) {
           unique_idx.push_back(num);
         }
       }
     } else {
-      unique_idx.resize(associative_.size(), 0);
+      unique_idx.resize(unordered_map_.size(), 0);
       size_t i = 0;
-      for (const auto& tnc : associative_) {
+      for (const auto& tnc : unordered_map_) {
         unique_idx[i++] = tnc.first;
       }
     }
@@ -149,10 +149,10 @@ class UniversalContainer {
   }
 
   void Clear() {
-    if (type_ == ContainerType::kLinear) {
-      linear_.clear();
+    if (type_ == ContainerType::kVector) {
+      vector_.clear();
     } else {
-      associative_.clear();
+      unordered_map_.clear();
     }
   }
 
@@ -165,9 +165,9 @@ class UniversalContainer {
   }
 
  private:
-  std::unordered_map<uint32_t, T> associative_;
-  std::vector<T> linear_;
-  ContainerType type_ = ContainerType::kLinear;
+  std::unordered_map<uint32_t, T> unordered_map_;
+  std::vector<T> vector_;
+  ContainerType type_ = ContainerType::kVector;
 };
 
 class ThreadsManager {
@@ -191,8 +191,8 @@ class ThreadsManager {
     std::vector<uint16_t> nodes_id;
     std::vector<uint32_t> rows_nodes_wise;
 
-    UniversalContainer<uint32_t> nodes_count;
-    UniversalContainer<NodesCountRange> nodes_count_range;
+    FlexibleContainer<uint32_t> nodes_count;
+    FlexibleContainer<NodesCountRange> nodes_count_range;
 
     std::vector<uint32_t> vec_rows;
     std::vector<uint32_t> vec_rows_remain;

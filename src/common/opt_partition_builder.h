@@ -252,11 +252,11 @@ class OptPartitionBuilder {
         /* This block of code is equivalent to
          * thread_info->nodes_count[check_node_id] += inc;
          * However the unclear structure bellow lead to a faster binary. */
-        if (container_type == ContainerType::kLinear) {
-          auto& nodes_count_container = thread_info->nodes_count.GetLinearContainer();
+        if (container_type == ContainerType::kVector) {
+          auto& nodes_count_container = thread_info->nodes_count.GetVectorContainer();
           nodes_count_container[check_node_id] += inc;
         } else {
-          auto& nodes_count_container = thread_info->nodes_count.GetAssociativeContainer();
+          auto& nodes_count_container = thread_info->nodes_count.GetUnorderedMapContainer();
           nodes_count_container[check_node_id] += inc;
         }
       }

@@ -332,7 +332,8 @@ class CommonRowPartitioner {
                        depth_begin, depth_size);
 
     monitor->Start("CommonPartition");
-    if (max_depth != 0) {
+    const bool use_linear_containers = max_depth != 0;
+    if (use_linear_containers) {
       // Copy split_info to linear containers:
       // nodes_amount = 2^(max_depth + 1)
       const int nodes_amount = 1 << (max_depth + 1);
@@ -347,13 +348,13 @@ class CommonRowPartitioner {
           }
         }
 
-        position_updater.template CommonPartition<common::ContainerType::kLinear>
+        position_updater.template CommonPartition<common::ContainerType::kVector>
                                                  (pred, &split_info_vec);
       }
     } else {
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.template CommonPartition<common::ContainerType::kAssociative>
+        position_updater.template CommonPartition<common::ContainerType::kUnorderedMap>
                                                  (pred, split_info);
       }
     }
@@ -372,8 +373,8 @@ class CommonRowPartitioner {
                                                 is_left_small,
                                                 check_is_left_small);
         monitor->Stop("UpdateThreadsWork");
-    }
   }
+}
 
   NodeIdListT &GetNodeAssignments() { return node_ids_; }
 
@@ -382,7 +383,8 @@ class CommonRowPartitioner {
     auto& h_pos = *p_out_position;
     const uint16_t* node_ids_data_ptr = node_ids_.data();
     h_pos.resize(node_ids_.size(), std::numeric_limits<bst_node_t>::max());
-    xgboost::common::ParallelFor(node_ids_.size(), ctx->Threads(), [&](size_t i) {
+    int nthreads = 1;
+    xgboost::common::ParallelFor(node_ids_.size(), nthreads, [&](size_t i) {
       h_pos[i] = node_ids_data_ptr[i];
     });
   }
@@ -408,8 +410,8 @@ class CommonRowPartitioner {
     monitor = std::make_unique<common::Monitor>();
     monitor->Init("CommonRowPartitioner");
     is_loss_guided = is_loss_guide;
-    const size_t block_size = common::GetBlockSize(gmat.row_ptr.size() - 1, ctx->Threads());
 
+    const size_t block_size = common::GetBlockSize(gmat.row_ptr.size() - 1, ctx->Threads());
     if (is_loss_guided) {
       opt_partition_builder_.ResizeRowsBuffer(gmat.row_ptr.size() - 1);
       uint32_t* row_set_collection_vec_p = opt_partition_builder_.GetRowsBuffer();
