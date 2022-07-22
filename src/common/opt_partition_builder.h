@@ -39,6 +39,9 @@ class OptPartitionBuilder {
   uint16_t* node_ids_;
   std::vector<uint32_t> split_nodes_;
 
+  template <typename SplitInfoType>
+  ContainerType container_type(const SplitInfoType& split_info);
+
  public:
   std::vector<uint16_t> empty;
 
@@ -108,29 +111,24 @@ class OptPartitionBuilder {
   }
 
   template<bool is_loss_guided, bool all_dense, bool any_cat,
-           ContainerType container_type,
-           typename SplitInfoType,
-           typename Predicate>
+           typename SplitInfoType, typename Predicate>
   void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, size_t tid,
                        const RowIndicesRange& row_indices, const SplitInfoType& split_info) {
     switch (column_matrix.GetTypeSize()) {
       case common::kUint8BinsTypeSize:
-        CommonPartition<BinTypeMap<kUint8BinsTypeSize>::Type, is_loss_guided, all_dense,
-                        any_cat, container_type>(
+        CommonPartition<BinTypeMap<kUint8BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
                            column_matrix, std::forward<Predicate>(pred),
                            column_matrix.template GetIndexData<uint8_t>(),
                            tid, row_indices, split_info);
         break;
       case common::kUint16BinsTypeSize:
-        CommonPartition<BinTypeMap<kUint16BinsTypeSize>::Type, is_loss_guided, all_dense,
-                        any_cat, container_type>(
+        CommonPartition<BinTypeMap<kUint16BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
                            column_matrix, std::forward<Predicate>(pred),
                            column_matrix.template GetIndexData<uint16_t>(),
                            tid, row_indices, split_info);
         break;
       default:
-        CommonPartition<BinTypeMap<kUint32BinsTypeSize>::Type, is_loss_guided, all_dense,
-                        any_cat, container_type>(
+        CommonPartition<BinTypeMap<kUint32BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
                            column_matrix, std::forward<Predicate>(pred),
                            column_matrix.template GetIndexData<uint32_t>(),
                            tid, row_indices, split_info);
@@ -174,7 +172,6 @@ class OptPartitionBuilder {
 
   template<typename BinIdxType, bool is_loss_guided,
            bool all_dense, bool any_cat,
-           ContainerType container_type,
            typename SplitInfoType,
            typename Predicate>
     void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred,
@@ -186,7 +183,7 @@ class OptPartitionBuilder {
     uint32_t rows_count = 0;
     uint32_t rows_left_count = 0;
     auto thread_info = tm.GetThreadInfoPtr(tid);
-    thread_info->SetContainersType(container_type);
+    thread_info->SetContainersType(container_type(split_info));
 
     uint32_t* rows = thread_info->vec_rows.data();
     uint32_t* rows_left = nullptr;
@@ -252,7 +249,7 @@ class OptPartitionBuilder {
         /* This block of code is equivalent to
          * thread_info->nodes_count[check_node_id] += inc;
          * However the unclear structure bellow lead to a faster binary. */
-        if (container_type == ContainerType::kVector) {
+        if (container_type(split_info) == ContainerType::kVector) {
           auto& nodes_count_container = thread_info->nodes_count.GetVectorContainer();
           nodes_count_container[check_node_id] += inc;
         } else {

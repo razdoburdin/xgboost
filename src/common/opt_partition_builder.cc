@@ -15,6 +15,18 @@ namespace common {
 constexpr uint32_t OptPartitionBuilder::thread_size_limit;
 
 template<>
+ContainerType OptPartitionBuilder::container_type(
+    const std::vector<SplitNode>& split_info) {
+  return ContainerType::kVector;
+}
+
+template<>
+ContainerType OptPartitionBuilder::container_type(
+    const std::unordered_map<uint32_t, SplitNode>& split_info) {
+  return ContainerType::kUnorderedMap;
+}
+
+template<>
 size_t OptPartitionBuilder::DepthSize<true>(GHistIndexMatrix const& gmat,
                   const std::vector<uint16_t>& complete_trees_depth_wise) {
   CHECK_GT(complete_trees_depth_wise.size(), 0);

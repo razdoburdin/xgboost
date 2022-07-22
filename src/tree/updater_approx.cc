@@ -322,12 +322,12 @@ class GloablApproxBuilder {
           partitioner_.at(i).UpdatePositionDispatched({column_matrix.AnyMissing(),
             column_matrix.GetTypeSize(),
             is_loss_guide, page.cut.HasCategorical()},
+            &split_info_,
             ctx_,
             page,
             applied_vec,
             p_tree,
             depth,
-            &split_info_,
             param_.max_depth,
             &child_node_ids_, is_left_small,
             true);

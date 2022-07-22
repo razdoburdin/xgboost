@@ -270,21 +270,50 @@ void QuantileHistMaker::Builder::ExpandTree(
     if (nodes_for_apply_split.size() != 0) {
       monitor_->Start("ApplySplit");
       size_t page_id{0};
-      for (auto const &page : p_fmat->GetBatches<GHistIndexMatrix>(HistBatch(param_))) {
-        CommonRowPartitioner &partitioner = this->partitioner_.at(page_id);
-        partitioner.UpdatePositionDispatched({any_missing,
-          static_cast<common::BinTypeSize>(sizeof(BinIdxType)),
-          is_loss_guide, page.cut.HasCategorical()},
-          this->ctx_,
-          page,
-          nodes_for_apply_split,
-          p_tree,
-          depth,
-          &split_info_,
-          param_.max_depth,
-          &child_node_ids_, is_left_small,
-          true);
-        ++page_id;
+      bool use_linear_containers = param_.max_depth > 0;
+      if (use_linear_containers) {
+        // Copy split_info to linear containers:
+        // nodes_amount = 2^(max_depth + 1)
+        const int nodes_amount = 1 << (param_.max_depth + 1);
+        std::vector<common::SplitNode> split_info_vec(nodes_amount);
+        for (int nid = 0; nid < nodes_amount; ++nid) {
+          if (split_info_.count(nid) > 0) {
+            split_info_vec[nid] = split_info_.at(nid);
+          }
+        }
+        for (auto const &page : p_fmat->GetBatches<GHistIndexMatrix>(HistBatch(param_))) {
+          CommonRowPartitioner &partitioner = this->partitioner_.at(page_id);
+          partitioner.UpdatePositionDispatched({any_missing,
+            static_cast<common::BinTypeSize>(sizeof(BinIdxType)),
+            is_loss_guide, page.cut.HasCategorical()},
+            &split_info_vec,
+            this->ctx_,
+            page,
+            nodes_for_apply_split,
+            p_tree,
+            depth,
+            param_.max_depth,
+            &child_node_ids_, is_left_small,
+            true);
+          ++page_id;
+        }
+      } else {
+        for (auto const &page : p_fmat->GetBatches<GHistIndexMatrix>(HistBatch(param_))) {
+          CommonRowPartitioner &partitioner = this->partitioner_.at(page_id);
+          partitioner.UpdatePositionDispatched({any_missing,
+            static_cast<common::BinTypeSize>(sizeof(BinIdxType)),
+            is_loss_guide, page.cut.HasCategorical()},
+            &split_info_,
+            this->ctx_,
+            page,
+            nodes_for_apply_split,
+            p_tree,
+            depth,
+            param_.max_depth,
+            &child_node_ids_, is_left_small,
+            true);
+          ++page_id;
+        }
       }
 
       monitor_->Stop("ApplySplit");

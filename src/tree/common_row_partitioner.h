@@ -39,8 +39,6 @@ class CommonRowPartitioner {
   std::unique_ptr<common::Monitor> monitor;
   common::OptPartitionBuilder opt_partition_builder_;
   NodeIdListT node_ids_;
-  // We use this container to impove performance
-  std::vector<common::SplitNode> split_info_vec;
 
  public:
   bst_row_t base_rowid = 0;
@@ -74,25 +72,26 @@ class CommonRowPartitioner {
    * \brief Class for storing UpdatePosition call params' values
    *   for simplification of dispatching by template parameters
    */
+  template <typename SplitInfoType>
   class UpdatePositionHelper final {
    public:
     UpdatePositionHelper(xgboost::tree::CommonRowPartitioner* row_partitioner,
+      SplitInfoType* split_info,
       GenericParameter const* ctx, GHistIndexMatrix const& gmat,
       std::vector<xgboost::tree::CPUExpandEntry> const& nodes,
       RegTree const* p_tree,
       int depth,
-      SplitInfoT* split_info,
       const size_t max_depth,
       NodeIdListT* child_node_ids,
       bool is_left_small = true,
       bool check_is_left_small = false) :
         row_partitioner_(*row_partitioner),
+        split_info_(split_info),
         ctx_(ctx),
         gmat_(gmat),
         nodes_(nodes),
         p_tree_(p_tree),
         depth_(depth),
-        split_info_(split_info),
         max_depth_(max_depth),
         child_node_ids_(child_node_ids),
         is_left_small_(is_left_small),
@@ -120,7 +119,7 @@ class CommonRowPartitioner {
     std::vector<xgboost::tree::CPUExpandEntry> const& nodes_;
     RegTree const* p_tree_;
     int depth_;
-    SplitInfoT* split_info_;
+    SplitInfoType* split_info_;
     const size_t max_depth_;
     NodeIdListT* child_node_ids_;
     bool is_left_small_;
@@ -132,41 +131,42 @@ class CommonRowPartitioner {
   template <typename Type>
   void InitilizerCall(Type) {}
 
-  template <bool ... switch_values_set>
-  void DispatchFromHasMissing(UpdatePositionHelper&& pos_updater,
+  template <typename SplitInfoType, bool ... switch_values_set>
+  void DispatchFromHasMissing(UpdatePositionHelper<SplitInfoType>&& pos_updater,
     const DispatchParameterSet&& dispatch_values,
     std::integer_sequence<bool, switch_values_set...>) {
     InitilizerCall<std::initializer_list<uint32_t>>({(dispatch_values.GetHasMissing()
       == switch_values_set ?
-      DispatchFromBinType<switch_values_set>(std::move(pos_updater), std::move(dispatch_values),
+      DispatchFromBinType<SplitInfoType, switch_values_set>(std::move(pos_updater), std::move(dispatch_values),
       std::move(common::BinTypeSizeSequence{})), one : zero)...});
   }
 
-  template <bool missing, uint32_t ... switch_values_set>
-  void DispatchFromBinType(UpdatePositionHelper&& pos_updater,
+  template <typename SplitInfoType, bool missing, uint32_t ... switch_values_set>
+  void DispatchFromBinType(UpdatePositionHelper<SplitInfoType>&& pos_updater,
     const DispatchParameterSet&& dispatch_values,
                            std::integer_sequence<uint32_t, switch_values_set...>) {
       InitilizerCall<std::initializer_list<uint32_t>>({(dispatch_values.GetBinTypeSize() ==
         switch_values_set ?
-        DispatchFromLossGuide<missing,
+        DispatchFromLossGuide<SplitInfoType, missing,
         typename common::BinTypeMap<switch_values_set>::Type>(std::move(pos_updater),
         std::move(dispatch_values), std::move(common::BoolSequence{})), one : zero)...});
   }
 
-  template <bool missing, typename BinType, bool ... switch_values_set>
-  void DispatchFromLossGuide(UpdatePositionHelper&& pos_updater,
+  template <typename SplitInfoType, bool missing, typename BinType, bool ... switch_values_set>
+  void DispatchFromLossGuide(UpdatePositionHelper<SplitInfoType>&& pos_updater,
                              const DispatchParameterSet&& dispatch_values,
                              std::integer_sequence<bool, switch_values_set...>) {
     InitilizerCall<std::initializer_list<uint32_t>>({
       (dispatch_values.GetLossGuide() == switch_values_set ?
-      DispatchFromHasCategorical<missing, BinType,
+      DispatchFromHasCategorical<SplitInfoType, missing, BinType,
       switch_values_set>(std::move(pos_updater),
       std::move(dispatch_values),
       std::move(common::BoolSequence{})), one : zero)...});
   }
 
-  template <bool missing, typename BinType, bool is_loss_guide, bool ... switch_values_set>
-  void DispatchFromHasCategorical(UpdatePositionHelper&& pos_updater,
+  template <typename SplitInfoType, bool missing, typename BinType, bool is_loss_guide,
+            bool ... switch_values_set>
+  void DispatchFromHasCategorical(UpdatePositionHelper<SplitInfoType>&& pos_updater,
                                     const DispatchParameterSet&& dispatch_values,
                                     std::integer_sequence<bool, switch_values_set...>) {
     InitilizerCall<std::initializer_list<uint32_t>>({
@@ -175,9 +175,10 @@ class CommonRowPartitioner {
       : zero)...});
   }
 
-  template <typename ... Args>
-  void UpdatePositionDispatched(DispatchParameterSet&& dispatch_params, Args&& ... args) {
-      UpdatePositionHelper helper(this, std::forward<Args>(args)...);
+  template <typename SplitInfoType, typename ... Args>
+  void UpdatePositionDispatched(DispatchParameterSet&& dispatch_params,
+                                SplitInfoType* split_info, Args&& ... args) {
+      UpdatePositionHelper<SplitInfoType> helper(this, split_info, std::forward<Args>(args)...);
       DispatchFromHasMissing(std::move(helper), std::move(dispatch_params),
       std::move(common::BoolSequence{}));
   }
@@ -186,9 +187,10 @@ class CommonRowPartitioner {
   /**
    * \brief Turn split values into discrete bin indices.
    */
+  template <typename SplitInfoType>
   void FindSplitConditions(const std::vector<CPUExpandEntry> &nodes,
                            const RegTree &tree, const GHistIndexMatrix &gmat,
-                           SplitInfoT* split_info) {
+                           SplitInfoType* split_info) {
     for (const auto& node : nodes) {
       const int32_t nid = node.nid;
       const bst_uint fid = tree[nid].SplitIndex();
@@ -218,8 +220,7 @@ class CommonRowPartitioner {
       column_matrix(column_matrix), partition_builder(partition_builder),
       nthreads(nthreads), depth_begin(depth_begin), depth_size(depth_size) {}
 
-    template<common::ContainerType container_type,
-             typename Predicate,
+    template<typename Predicate,
              typename SplitInfoType>
     void CommonPartition(Predicate&& pred,
                          SplitInfoType* split_info) {
@@ -236,7 +237,7 @@ class CommonRowPartitioner {
       end += depth_begin;
       common::RowIndicesRange range{begin, end};
       partition_builder->template CommonPartition
-          <BinIdxType, is_loss_guided, all_dense, any_cat, container_type>
+          <BinIdxType, is_loss_guided, all_dense, any_cat>
           (column_matrix, std::forward<Predicate>(pred), numa, tid, range, *split_info);
     }
 
@@ -285,11 +286,12 @@ class CommonRowPartitioner {
   }
 
   template <bool any_missing, typename BinIdxType,
-            bool is_loss_guided, bool any_cat>
+            bool is_loss_guided, bool any_cat,
+            typename SplitInfoType>
   void UpdatePosition(GenericParameter const* ctx, GHistIndexMatrix const& gmat,
     std::vector<CPUExpandEntry> const& nodes, RegTree const* p_tree,
     int depth,
-    SplitInfoT* split_info,
+    SplitInfoType* split_info,
     const size_t max_depth,
     NodeIdListT* child_node_ids,
     bool is_left_small = true,
@@ -333,30 +335,10 @@ class CommonRowPartitioner {
       position_updater(column_matrix, &opt_partition_builder_, nthreads,
                        depth_begin, depth_size);
 
+    const bool use_linear_containers = max_depth != 0;
     #pragma omp parallel num_threads(nthreads)
     {
-      const bool use_linear_containers = max_depth != 0;
-      if (use_linear_containers) {
-        // Copy split_info to linear containers:
-        // nodes_amount = 2^(max_depth + 1)
-        const int nodes_amount = 1 << (max_depth + 1);
-        #pragma omp single
-        if (split_info_vec.size() < nodes_amount) {
-          split_info_vec.resize(nodes_amount);
-        }
-        #pragma omp for
-        for (int nid = 0; nid < nodes_amount; ++nid) {
-          if ((*split_info).count(nid) > 0) {
-            split_info_vec[nid] = (*split_info).at(nid);
-          }
-        }
-
-        position_updater.template CommonPartition<common::ContainerType::kVector>
-                                                 (pred, &split_info_vec);
-      } else {
-      position_updater.template CommonPartition<common::ContainerType::kUnorderedMap>
-                                                (pred, split_info);
-      }
+      position_updater.template CommonPartition(pred, split_info);
     }
 
     if (depth != max_depth || is_loss_guided) {
