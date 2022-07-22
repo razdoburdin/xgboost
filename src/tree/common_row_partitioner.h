@@ -39,6 +39,8 @@ class CommonRowPartitioner {
   std::unique_ptr<common::Monitor> monitor;
   common::OptPartitionBuilder opt_partition_builder_;
   NodeIdListT node_ids_;
+  // We use this container to impove performance
+  std::vector<common::SplitNode> split_info_vec;
 
  public:
   bst_row_t base_rowid = 0;
@@ -331,16 +333,17 @@ class CommonRowPartitioner {
       position_updater(column_matrix, &opt_partition_builder_, nthreads,
                        depth_begin, depth_size);
 
-    monitor->Start("CommonPartition");
-    const bool use_linear_containers = max_depth != 0;
-    if (use_linear_containers) {
-      // Copy split_info to linear containers:
-      // nodes_amount = 2^(max_depth + 1)
-      const int nodes_amount = 1 << (max_depth + 1);
-      std::vector<common::SplitNode> split_info_vec(nodes_amount);
-
-      #pragma omp parallel num_threads(nthreads)
-      {
+    #pragma omp parallel num_threads(nthreads)
+    {
+      const bool use_linear_containers = max_depth != 0;
+      if (use_linear_containers) {
+        // Copy split_info to linear containers:
+        // nodes_amount = 2^(max_depth + 1)
+        const int nodes_amount = 1 << (max_depth + 1);
+        #pragma omp single
+        if (split_info_vec.size() < nodes_amount) {
+          split_info_vec.resize(nodes_amount);
+        }
         #pragma omp for
         for (int nid = 0; nid < nodes_amount; ++nid) {
           if ((*split_info).count(nid) > 0) {
@@ -350,29 +353,21 @@ class CommonRowPartitioner {
 
         position_updater.template CommonPartition<common::ContainerType::kVector>
                                                  (pred, &split_info_vec);
-      }
-    } else {
-      #pragma omp parallel num_threads(nthreads)
-      {
-        position_updater.template CommonPartition<common::ContainerType::kUnorderedMap>
-                                                 (pred, split_info);
+      } else {
+      position_updater.template CommonPartition<common::ContainerType::kUnorderedMap>
+                                                (pred, split_info);
       }
     }
-    monitor->Stop("CommonPartition");
 
     if (depth != max_depth || is_loss_guided) {
-        monitor->Start("UpdateRowBuffer");
         opt_partition_builder_.template UpdateRowBuffer<is_loss_guided>(
                                               *child_node_ids, gmat,
                                               n_features);
-        monitor->Stop("UpdateRowBuffer");
-        monitor->Start("UpdateThreadsWork");
         opt_partition_builder_.template UpdateThreadsWork<is_loss_guided>(
                                                 *child_node_ids, gmat,
                                                 n_features,
                                                 is_left_small,
                                                 check_is_left_small);
-        monitor->Stop("UpdateThreadsWork");
   }
 }
 
