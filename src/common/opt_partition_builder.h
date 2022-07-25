@@ -186,7 +186,8 @@ class OptPartitionBuilder {
 
   static size_t nodes_ammount(size_t depth) {
     // 2^(depth + 1)
-    return 1 << (depth + 1);
+    constexpr size_t one = 1;
+    return one << (depth + 1);
   }
 
   template<typename BinIdxType, bool is_loss_guided,
