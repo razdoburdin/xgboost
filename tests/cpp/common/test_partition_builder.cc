@@ -35,16 +35,14 @@ TEST(OptPartitionBuilder, BasicTest) {
   std::unordered_map<uint32_t, common::SplitNode> split_info;
   split_info[1].smalest_nodes_mask = true;
   std::unordered_map<uint32_t, uint16_t> nodes;//(1, 0);
-  std::vector<uint32_t> split_nodes(1, 0);
+  opt_partition_builder.ResizeSplitNodeIfSmaller(1);
   auto pred = [&](auto ridx, auto bin_id, auto nid, auto split_cond) {
     return false;
   };
   opt_partition_builder.SetDepth(1);
-  opt_partition_builder.SetSplitNodes(std::move(split_nodes));
 
   opt_partition_builder.template CommonPartition<
-    uint8_t, false, true, false, ContainerType::kUnorderedMap>(gmat.Transpose(), pred, data,
-                          0, {0, kNRows}, split_info);
+    uint8_t, false, true, false>(gmat.Transpose(), pred, data, 0, {0, kNRows}, split_info);
 
   opt_partition_builder.template UpdateRowBuffer <false> (
                                         node_ids, gmat,

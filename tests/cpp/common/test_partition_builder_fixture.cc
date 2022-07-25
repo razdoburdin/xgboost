@@ -76,7 +76,7 @@ using DMatrixP = std::shared_ptr<DMatrix>;
     std::unordered_map<uint32_t, common::SplitNode> split_info;
     split_info[1].smalest_nodes_mask = true;
     std::unordered_map<uint32_t, uint16_t> nodes;  // (1, 0);
-    std::vector<uint32_t> split_nodes(1, 0);
+    opt_partition_builder.ResizeSplitNodeIfSmaller(1);
     auto pred = [&](auto ridx, auto bin_id, auto nid, auto split_cond) {
       return false;
     };
@@ -84,9 +84,8 @@ using DMatrixP = std::shared_ptr<DMatrix>;
     const size_t thread_id = 0;
     const size_t row_ind_begin = 0;
     opt_partition_builder.SetDepth(kDepth);
-    opt_partition_builder.SetSplitNodes(std::move(split_nodes));
 
-    opt_partition_builder.template CommonPartition<kIsLossGuide, kAllDense, kHasCat, ContainerType::kUnorderedMap>(
+    opt_partition_builder.template CommonPartition<kIsLossGuide, kAllDense, kHasCat>(
                 gmat.Transpose(), pred, thread_id, {row_ind_begin, row_count_}, split_info);
 
     opt_partition_builder.template UpdateRowBuffer <false>(

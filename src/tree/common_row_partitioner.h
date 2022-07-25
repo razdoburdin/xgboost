@@ -216,8 +216,7 @@ class CommonRowPartitioner {
       column_matrix(column_matrix), partition_builder(partition_builder),
       nthreads(nthreads), depth_begin(depth_begin), depth_size(depth_size) {}
 
-    template<common::ContainerType container_type,
-             typename Predicate,
+    template<typename Predicate,
              typename SplitInfoType>
     void CommonPartition(Predicate&& pred,
                          SplitInfoType* split_info) {
@@ -234,7 +233,7 @@ class CommonRowPartitioner {
       end += depth_begin;
       common::RowIndicesRange range{begin, end};
       partition_builder->template CommonPartition
-          <BinIdxType, is_loss_guided, all_dense, any_cat, container_type>
+          <BinIdxType, is_loss_guided, all_dense, any_cat>
           (column_matrix, std::forward<Predicate>(pred), numa, tid, range, *split_info);
     }
 
@@ -309,7 +308,8 @@ class CommonRowPartitioner {
     // 2.1 Create a blocked space of size SUM(samples in each node)
     const uint32_t* offsets = gmat.index.Offset();
     const uint64_t rows_offset = gmat.row_ptr.size() - 1;
-    std::vector<uint32_t> split_nodes(n_nodes, 0);
+    opt_partition_builder_.ResizeSplitNodeIfSmaller(n_nodes);
+    uint32_t* split_nodes = opt_partition_builder_.GetSplitNodesPtr();
     for (size_t i = 0; i < n_nodes; ++i) {
         const int32_t nid = nodes[i].nid;
         split_nodes[i] = nid;
@@ -317,7 +317,6 @@ class CommonRowPartitioner {
         (*split_info)[nid].ind = fid*((gmat.IsDense() ? rows_offset : 1));
         (*split_info)[nid].condition -= gmat.cut.Ptrs()[fid];
     }
-    opt_partition_builder_.SetSplitNodes(std::move(split_nodes));
 
     auto pred = GetPredicate<any_cat>(*p_tree, gmat);
 
@@ -336,7 +335,7 @@ class CommonRowPartitioner {
     if (use_linear_containers) {
       // Copy split_info to linear containers:
       // nodes_amount = 2^(max_depth + 1)
-      const int nodes_amount = 1 << (max_depth + 1);
+      const int nodes_amount = opt_partition_builder_.nodes_ammount(max_depth);
       std::vector<common::SplitNode> split_info_vec(nodes_amount);
 
       #pragma omp parallel num_threads(nthreads)
@@ -348,14 +347,12 @@ class CommonRowPartitioner {
           }
         }
 
-        position_updater.template CommonPartition<common::ContainerType::kVector>
-                                                 (pred, &split_info_vec);
+        position_updater.template CommonPartition(pred, &split_info_vec);
       }
     } else {
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.template CommonPartition<common::ContainerType::kUnorderedMap>
-                                                 (pred, split_info);
+        position_updater.template CommonPartition(pred, split_info);
       }
     }
     monitor->Stop("CommonPartition");
