@@ -347,12 +347,12 @@ class CommonRowPartitioner {
           }
         }
 
-        position_updater.template CommonPartition(pred, &split_info_vec);
+        position_updater.CommonPartition(pred, &split_info_vec);
       }
     } else {
       #pragma omp parallel num_threads(nthreads)
       {
-        position_updater.template CommonPartition(pred, split_info);
+        position_updater.CommonPartition(pred, split_info);
       }
     }
     monitor->Stop("CommonPartition");

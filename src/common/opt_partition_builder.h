@@ -43,7 +43,7 @@ class OptPartitionBuilder {
       const std::vector<SplitNode>& split_info) {
     return ContainerType::kVector;
   }
-  
+
   constexpr ContainerType container_type(
       const std::unordered_map<uint32_t, SplitNode>& split_info) {
     return ContainerType::kUnorderedMap;
