@@ -105,7 +105,7 @@ class FlexibleContainer {
   }
 
   template <ContainerType container_type>
-  void Increment(size_t idx, size_t val) {
+  void Increment(size_t idx, T val) {
     if (container_type == ContainerType::kVector) {
       vector_[idx] += val;
     } else {

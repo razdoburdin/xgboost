@@ -276,7 +276,8 @@ class OptPartitionBuilder {
          * However such a structure prevent a compiler of generating the fastest binary
          * This a special method should be implemented.
          */
-        thread_info->nodes_count.Increment(check_node_id, inc);
+        thread_info->nodes_count.template
+          Increment<container_type<SplitInfoType>::value>(check_node_id, inc);
       }
     }
     rows[0] = rows_count;
