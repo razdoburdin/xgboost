@@ -32,7 +32,8 @@ TEST(OptPartitionBuilder, BasicTest) {
 
   const size_t fid = 0;
   const size_t split = 0;
-  std::unordered_map<uint32_t, common::SplitNode> split_info;
+  common::FlexibleContainer<common::SplitNode> split_info;
+  split_info.SetContainerType(common::ContainerType::kUnorderedMap);
   split_info[1].smalest_nodes_mask = true;
   std::unordered_map<uint32_t, uint16_t> nodes;//(1, 0);
   opt_partition_builder.ResizeSplitNodeIfSmaller(1);

@@ -45,7 +45,8 @@ TEST(Approx, Partitioner) {
       candidates_vec[0].split.split_value = min_value;
       candidates_vec[0].split.sindex = 0;
       candidates_vec[0].split.sindex |= (1U << 31);
-      std::unordered_map<uint32_t, common::SplitNode> split_info;
+      common::FlexibleContainer<common::SplitNode> split_info;
+      split_info.SetContainerType(common::ContainerType::kUnorderedMap);
       partitioner.UpdatePosition<false, uint8_t, false, false>(&ctx, page,
         candidates_vec,
         &tree, 0, &split_info, 2, &cnodes,
@@ -81,7 +82,8 @@ TEST(Approx, Partitioner) {
       candidates_vec[0].split.split_value = split_value;
       candidates_vec[0].split.sindex = 0;
       candidates_vec[0].split.sindex |= (1U << 31);
-      std::unordered_map<uint32_t, common::SplitNode> split_info;
+      common::FlexibleContainer<common::SplitNode> split_info;
+      split_info.SetContainerType(common::ContainerType::kUnorderedMap);
       partitioner.UpdatePosition<false, uint8_t, false, false>(&ctx, page,
         candidates_vec,
         &tree, 0, &split_info, 2, &cnodes,

@@ -38,7 +38,8 @@ TEST(QuantileHist, Partitioner) {
       CommonRowPartitioner partitioner{&ctx, gmat, &tree, 8, false};
       GetSplit(&tree, min_value, &candidates);
 
-      std::unordered_map<uint32_t, common::SplitNode> split_info;
+      common::FlexibleContainer<common::SplitNode> split_info;
+      split_info.SetContainerType(common::ContainerType::kUnorderedMap);
       split_info[2].smalest_nodes_mask = true;
       const bool loss_guide = false;
       split_info[0].ind = split_ind;
@@ -73,7 +74,8 @@ TEST(QuantileHist, Partitioner) {
       CommonRowPartitioner partitioner{&ctx, gmat, &tree, 8, false};
       GetSplit(&tree, split_value, &candidates);
 
-      std::unordered_map<uint32_t, common::SplitNode> split_info;
+      common::FlexibleContainer<common::SplitNode> split_info;
+      split_info.SetContainerType(common::ContainerType::kUnorderedMap);
       split_info[2].smalest_nodes_mask = 2;
       const bool loss_guide = false;
       split_info[0].ind = split_ind;

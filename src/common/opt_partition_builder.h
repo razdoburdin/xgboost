@@ -16,6 +16,7 @@
 #include "xgboost/tree_model.h"
 #include "column_matrix.h"
 #include "threads_manager.h"
+#include "flexible_container.h"
 #include "../tree/hist/expand_entry.h"
 
 namespace xgboost {
@@ -38,12 +39,6 @@ class OptPartitionBuilder {
   size_t depth_;
   uint16_t* node_ids_;
   std::vector<uint32_t> split_nodes_;
-
-  template <typename N>
-  struct container_type { static const ContainerType value = ContainerType::kVector; };
-
-  template <typename N>
-  struct container_type<std::unordered_map<uint32_t, N>> { static const ContainerType value = ContainerType::kUnorderedMap; };
 
  public:
   std::vector<uint16_t> empty;
@@ -134,11 +129,9 @@ class OptPartitionBuilder {
     UpdateRootThreadWork();
   }
 
-  template<bool is_loss_guided, bool all_dense, bool any_cat,
-           typename SplitInfoType,
-           typename Predicate>
+  template<bool is_loss_guided, bool all_dense, bool any_cat, typename Predicate>
   void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, size_t tid,
-                       const RowIndicesRange& row_indices, const SplitInfoType& split_info) {
+                       const RowIndicesRange& row_indices, const FlexibleContainer<SplitNode>& split_info) {
     switch (column_matrix.GetTypeSize()) {
       case common::kUint8BinsTypeSize:
         CommonPartition<BinTypeMap<kUint8BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
@@ -160,29 +153,6 @@ class OptPartitionBuilder {
     }
   }
 
-  template<typename BufferType>
-  static inline const BufferType& FindBufferItem(const std::vector<BufferType>& buffer,
-                            const uint32_t item_idx) {
-    return (buffer.data())[item_idx];
-  }
-
-  static inline bool FindBufferItem(const std::vector<bool>& buffer,
-                      const uint32_t item_idx) {
-    return buffer[item_idx];
-  }
-
-  template<typename BufferType>
-  static inline const BufferType& FindBufferItem(
-                            const std::unordered_map<uint32_t, BufferType>& map_buffer,
-                            const uint32_t item_idx) {
-    if (map_buffer.count(item_idx) > 0) {
-      return map_buffer.at(item_idx);
-    } else {
-      static BufferType empty_item;
-      return empty_item;
-    }
-  }
-
   void SetDepth(size_t depth) {
     depth_ = depth;
   }
@@ -199,12 +169,11 @@ class OptPartitionBuilder {
 
   template<typename BinIdxType, bool is_loss_guided,
            bool all_dense, bool any_cat,
-           typename SplitInfoType,
            typename Predicate>
     void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred,
                          const BinIdxType* numa, size_t tid,
                          const RowIndicesRange& row_indices,
-                         const SplitInfoType& split_info) {
+                         const FlexibleContainer<SplitNode>& split_info) {
     CHECK_EQ(data_hash, reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData()));
     const auto& column_list = column_matrix.GetColumnViewList();
     uint32_t rows_count = 0;
@@ -225,7 +194,7 @@ class OptPartitionBuilder {
       const uint32_t first_row_id = !is_loss_guided ? row_indices.begin :
                                                       row_indices_ptr[row_indices.begin];
       for (const auto& nid : split_nodes_) {
-        const SplitNode& split_node = FindBufferItem(split_info, nid);
+        const SplitNode& split_node = split_info[nid];
         thread_info->states[nid] = column_list[split_node.ind]->GetInitialState(first_row_id);
         thread_info->default_flags[nid] = (*p_tree)[nid].DefaultLeft();
       }
@@ -238,7 +207,7 @@ class OptPartitionBuilder {
         continue;
       }
 
-      const SplitNode& split_node = FindBufferItem(split_info, nid);
+      const SplitNode& split_node = split_info[nid];
       const int32_t sc = split_node.condition;
       uint64_t si = split_node.ind;
 
@@ -264,7 +233,7 @@ class OptPartitionBuilder {
         }
       }
       const uint16_t check_node_id = node_ids_[i];
-      uint32_t inc = FindBufferItem(split_info, check_node_id).smalest_nodes_mask;
+      uint32_t inc = split_info[check_node_id].smalest_nodes_mask;
       rows[1 + rows_count] = i;
       rows_count += inc;
       if (is_loss_guided) {

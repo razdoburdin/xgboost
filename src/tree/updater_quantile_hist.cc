@@ -160,7 +160,6 @@ void QuantileHistMaker::Builder::AddSplitsToTree(
           RegTree *p_tree,
           int *num_leaves,
           std::vector<CPUExpandEntry>* nodes_for_apply_split,
-          std::unordered_map<uint32_t, common::SplitNode>* split_info,
           size_t depth, bool * is_left_small) {
   const bool is_loss_guided = static_cast<TrainParam::TreeGrowPolicy>(param_.grow_policy)
                               != TrainParam::kDepthWise;
@@ -172,11 +171,11 @@ void QuantileHistMaker::Builder::AddSplitsToTree(
       complete_node_ids.push_back((*p_tree)[entry.nid].RightChild());
       *is_left_small = entry.split.left_sum.GetHess() <= entry.split.right_sum.GetHess();
       if (entry.split.left_sum.GetHess() <= entry.split.right_sum.GetHess() || is_loss_guided) {
-        (*split_info)[(*p_tree)[entry.nid].LeftChild()].smalest_nodes_mask = true;
-        (*split_info)[(*p_tree)[entry.nid].RightChild()].smalest_nodes_mask = false;
+        split_info_[(*p_tree)[entry.nid].LeftChild()].smalest_nodes_mask = true;
+        split_info_[(*p_tree)[entry.nid].RightChild()].smalest_nodes_mask = false;
       } else {
-        (*split_info)[(*p_tree)[entry.nid].RightChild()].smalest_nodes_mask = true;
-        (*split_info)[(*p_tree)[entry.nid].LeftChild()].smalest_nodes_mask = false;
+        split_info_[(*p_tree)[entry.nid].RightChild()].smalest_nodes_mask = true;
+        split_info_[(*p_tree)[entry.nid].LeftChild()].smalest_nodes_mask = false;
       }
   }
   child_node_ids_ = complete_node_ids;
@@ -232,7 +231,14 @@ void QuantileHistMaker::Builder::ExpandTree(
     HostDeviceVector<bst_node_t> *p_out_position) {
   monitor_->Start("ExpandTree");
   int num_leaves = 0;
-  split_info_.clear();
+  if (common::OptPartitionBuilder::use_linear_containers(param_.max_depth)) {
+    split_info_.SetContainerType(common::ContainerType::kVector);
+  } else {
+    split_info_.SetContainerType(common::ContainerType::kUnorderedMap);
+  }
+  split_info_.Clear();
+  split_info_.ResizeIfSmaller(common::OptPartitionBuilder::nodes_amount(param_.max_depth));
+
   Driver<CPUExpandEntry> driver(param_);
   std::vector<CPUExpandEntry> expand;
   size_t page_id{0};
@@ -255,7 +261,7 @@ void QuantileHistMaker::Builder::ExpandTree(
   int32_t depth = 0;
   while (!driver.IsEmpty()) {
     std::for_each(split_info_.begin(), split_info_.end(),
-                  [](auto& si) {si.second.smalest_nodes_mask = false;});
+                  [](auto& si) {si.smalest_nodes_mask = false;});
     expand = driver.Pop();
     if (expand.size()) {
       depth = expand[0].depth + 1;
@@ -266,7 +272,7 @@ void QuantileHistMaker::Builder::ExpandTree(
     nodes_for_subtraction_trick_.clear();
     bool is_left_small = false;
     AddSplitsToTree(expand, &driver, p_tree, &num_leaves, &nodes_for_apply_split,
-                    &split_info_, depth, &is_left_small);
+                    depth, &is_left_small);
     if (nodes_for_apply_split.size() != 0) {
       monitor_->Start("ApplySplit");
       size_t page_id{0};

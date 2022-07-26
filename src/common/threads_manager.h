@@ -10,6 +10,8 @@
 #include <vector>
 #include <unordered_map>
 
+#include "flexible_container.h"
+
 namespace xgboost {
 namespace common {
 
@@ -87,86 +89,6 @@ class SaturationView : public AbstractView<DataT, SaturationView<DataT>> {
            ? this->counter_
            : this->storage_ptr_->size() - 1;
   }
-};
-
-
-enum class ContainerType : std::uint8_t {  // NOLINT
-  kVector = 0,
-  kUnorderedMap = 1
-};
-// Standartize interface for acces vector and unorderd_map
-template <typename T>
-class FlexibleContainer {
- public:
-  void ResizeIfSmaller(size_t size) {
-    if (type_ == ContainerType::kVector) {
-      vector_.resize(vector_.size() < size ? size : vector_.size());
-    }
-  }
-
-  template <ContainerType container_type>
-  void Increment(size_t idx, size_t val) {
-    if (container_type == ContainerType::kVector) {
-      vector_[idx] += val;
-    } else {
-      unordered_map_[idx] += val;
-    }
-  }
-
-  T& operator[](size_t idx) {
-    if (type_ == ContainerType::kVector) {
-      return vector_[idx];
-    } else {
-      return unordered_map_[idx];
-    }
-  }
-
-  T& At(size_t idx) const {
-    if (type_ == ContainerType::kVector) {
-      return vector_.at(idx);
-    } else {
-      return unordered_map_.at(idx);
-    }
-  }
-
-  std::vector<uint32_t> GetUniqueIdx() {
-    std::vector<uint32_t> unique_idx;
-    if (type_ == ContainerType::kVector) {
-      for (size_t num = 0; num < vector_.size(); ++num) {
-        if (vector_[num] > 0) {
-          unique_idx.push_back(num);
-        }
-      }
-    } else {
-      unique_idx.resize(unordered_map_.size(), 0);
-      size_t i = 0;
-      for (const auto& tnc : unordered_map_) {
-        unique_idx[i++] = tnc.first;
-      }
-    }
-    return unique_idx;
-  }
-
-  void Clear() {
-    if (type_ == ContainerType::kVector) {
-      vector_.clear();
-    } else {
-      unordered_map_.clear();
-    }
-  }
-
-  ContainerType GetContainerType() const {
-    return type_;
-  }
-
-  void SetContainerType(ContainerType type) {
-    type_ = type;
-  }
-
- private:
-  std::unordered_map<uint32_t, T> unordered_map_;
-  std::vector<T> vector_;
-  ContainerType type_ = ContainerType::kVector;
 };
 
 class ThreadsManager {

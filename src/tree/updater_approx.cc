@@ -57,7 +57,7 @@ class GloablApproxBuilder {
   // Cache for histogram cuts.
   common::HistogramCuts feature_values_;
   std::unordered_map<uint32_t, common::ColumnMatrix> column_matrix_;
-  std::unordered_map<uint32_t, common::SplitNode> split_info_;
+  common::FlexibleContainer<common::SplitNode> split_info_;
   std::vector<uint16_t> child_node_ids_;
 
  public:
@@ -234,7 +234,13 @@ class GloablApproxBuilder {
     this->InitData(p_fmat, hess);
     child_node_ids_.clear();
     child_node_ids_.emplace_back(0);
-    split_info_.clear();
+    if (common::OptPartitionBuilder::use_linear_containers(param_.max_depth)) {
+      split_info_.SetContainerType(common::ContainerType::kVector);
+    } else {
+      split_info_.SetContainerType(common::ContainerType::kUnorderedMap);
+    }
+    split_info_.Clear();
+    split_info_.ResizeIfSmaller(common::OptPartitionBuilder::nodes_amount(param_.max_depth));
 
     Driver<CPUExpandEntry> driver(param_);
     auto &tree = *p_tree;
@@ -257,7 +263,7 @@ class GloablApproxBuilder {
       child_node_ids_.clear();
       std::unordered_map<uint32_t, CPUExpandEntry> applied;
       std::for_each(split_info_.begin(), split_info_.end(),
-                    [](auto& si) {si.second.smalest_nodes_mask = false;});
+                    [](auto& si) {si.smalest_nodes_mask = false;});
       depth = expand_set[0].depth + 1;
       // candidates that can be further splited.
       std::vector<CPUExpandEntry> valid_candidates;

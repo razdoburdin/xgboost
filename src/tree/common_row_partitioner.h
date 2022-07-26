@@ -30,7 +30,6 @@ namespace tree {
 class CommonRowPartitioner {
  public:
   using NodeIdListT = std::vector<uint16_t>;
-  using SplitInfoT = std::unordered_map<uint32_t, common::SplitNode>;
 
   const uint32_t one = 1;
   const uint32_t zero = 0;
@@ -79,7 +78,7 @@ class CommonRowPartitioner {
       std::vector<xgboost::tree::CPUExpandEntry> const& nodes,
       RegTree const* p_tree,
       int depth,
-      SplitInfoT* split_info,
+      common::FlexibleContainer<common::SplitNode>* split_info,
       const size_t max_depth,
       NodeIdListT* child_node_ids,
       bool is_left_small = true,
@@ -118,7 +117,7 @@ class CommonRowPartitioner {
     std::vector<xgboost::tree::CPUExpandEntry> const& nodes_;
     RegTree const* p_tree_;
     int depth_;
-    SplitInfoT* split_info_;
+    common::FlexibleContainer<common::SplitNode>* split_info_;
     const size_t max_depth_;
     NodeIdListT* child_node_ids_;
     bool is_left_small_;
@@ -165,8 +164,8 @@ class CommonRowPartitioner {
 
   template <bool missing, typename BinType, bool is_loss_guide, bool ... switch_values_set>
   void DispatchFromHasCategorical(UpdatePositionHelper&& pos_updater,
-                                    const DispatchParameterSet&& dispatch_values,
-                                    std::integer_sequence<bool, switch_values_set...>) {
+                                  const DispatchParameterSet&& dispatch_values,
+                                  std::integer_sequence<bool, switch_values_set...>) {
     InitilizerCall<std::initializer_list<uint32_t>>({
       (dispatch_values.GetHasCategorical() == switch_values_set ?
       pos_updater.template Call<missing, BinType, is_loss_guide, switch_values_set>(), one
@@ -186,7 +185,7 @@ class CommonRowPartitioner {
    */
   void FindSplitConditions(const std::vector<CPUExpandEntry> &nodes,
                            const RegTree &tree, const GHistIndexMatrix &gmat,
-                           SplitInfoT* split_info) {
+                           common::FlexibleContainer<common::SplitNode>* split_info) {
     for (const auto& node : nodes) {
       const int32_t nid = node.nid;
       const bst_uint fid = tree[nid].SplitIndex();
@@ -205,45 +204,6 @@ class CommonRowPartitioner {
       (*split_info)[nid].condition = split_cond;
     }
   }
-
-  template <typename BinIdxType, bool is_loss_guided,
-            bool all_dense, bool any_cat>
-  class PositionUpdater {
-   public:
-    PositionUpdater(common::ColumnMatrix const& column_matrix,
-                    common::OptPartitionBuilder* partition_builder,
-                    int nthreads, size_t depth_begin, size_t depth_size) :
-      column_matrix(column_matrix), partition_builder(partition_builder),
-      nthreads(nthreads), depth_begin(depth_begin), depth_size(depth_size) {}
-
-    template<typename Predicate,
-             typename SplitInfoType>
-    void CommonPartition(Predicate&& pred,
-                         SplitInfoType* split_info) {
-      size_t tid = omp_get_thread_num();
-      const BinIdxType* numa = tid < nthreads/2 ?
-        reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData()) :
-        reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData());
-
-      size_t chunck_size = common::GetBlockSize(depth_size, nthreads);
-      size_t thread_size = chunck_size;
-      size_t begin = thread_size * tid;
-      size_t end = std::min(begin + thread_size, depth_size);
-      begin += depth_begin;
-      end += depth_begin;
-      common::RowIndicesRange range{begin, end};
-      partition_builder->template CommonPartition
-          <BinIdxType, is_loss_guided, all_dense, any_cat>
-          (column_matrix, std::forward<Predicate>(pred), numa, tid, range, *split_info);
-    }
-
-   private:
-    common::ColumnMatrix const& column_matrix;
-    common::OptPartitionBuilder* partition_builder;
-    const int nthreads;
-    const size_t depth_begin;
-    const size_t depth_size;
-  };
 
   template <bool any_cat>
   auto GetPredicate(const RegTree& tree, const GHistIndexMatrix& gmat) {
@@ -286,7 +246,7 @@ class CommonRowPartitioner {
   void UpdatePosition(GenericParameter const* ctx, GHistIndexMatrix const& gmat,
     std::vector<CPUExpandEntry> const& nodes, RegTree const* p_tree,
     int depth,
-    SplitInfoT* split_info,
+    common::FlexibleContainer<common::SplitNode>* split_info,
     const size_t max_depth,
     NodeIdListT* child_node_ids,
     bool is_left_small = true,
@@ -326,32 +286,25 @@ class CommonRowPartitioner {
                                                                            *child_node_ids);
     const size_t depth_size = opt_partition_builder_.template DepthSize<is_loss_guided>(
                                                                    gmat, *child_node_ids);
-    PositionUpdater<BinIdxType, is_loss_guided, !any_missing, any_cat>
-      position_updater(column_matrix, &opt_partition_builder_, nthreads,
-                       depth_begin, depth_size);
 
     monitor->Start("CommonPartition");
-    if (opt_partition_builder_.use_linear_containers(max_depth)) {
-      // Copy split_info to linear containers:
-      // nodes_amount = 2^(max_depth + 1)
-      const int nodes_amount = opt_partition_builder_.nodes_amount(max_depth);
-      std::vector<common::SplitNode> split_info_vec(nodes_amount);
+    size_t chunck_size = common::GetBlockSize(depth_size, nthreads);
+    size_t thread_size = chunck_size;
+    #pragma omp parallel num_threads(nthreads)
+    {
+      size_t tid = omp_get_thread_num();
+      const BinIdxType* numa = tid < nthreads/2 ?
+      reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData()) :
+      reinterpret_cast<const BinIdxType*>(column_matrix.GetIndexData());
 
-      #pragma omp parallel num_threads(nthreads)
-      {
-        #pragma omp for
-        for (int nid = 0; nid < nodes_amount; ++nid) {
-          if ((*split_info).count(nid) > 0) {
-            split_info_vec[nid] = (*split_info).at(nid);
-          }
-        }
-        position_updater.CommonPartition(pred, &split_info_vec);
-      }
-    } else {
-      #pragma omp parallel num_threads(nthreads)
-      {
-        position_updater.CommonPartition(pred, split_info);
-      }
+      size_t begin = thread_size * tid;
+      size_t end = std::min(begin + thread_size, depth_size);
+      begin += depth_begin;
+      end += depth_begin;
+      common::RowIndicesRange range{begin, end};
+      opt_partition_builder_.template CommonPartition
+          <BinIdxType, is_loss_guided, !any_missing, any_cat>
+          (column_matrix, pred, numa, tid, range, *split_info);
     }
     monitor->Stop("CommonPartition");
 
