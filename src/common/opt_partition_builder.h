@@ -39,15 +39,11 @@ class OptPartitionBuilder {
   uint16_t* node_ids_;
   std::vector<uint32_t> split_nodes_;
 
-  constexpr ContainerType container_type(
-      const std::vector<SplitNode>& split_info) {
-    return ContainerType::kVector;
-  }
+  template <typename N>
+  struct container_type { static const ContainerType value = ContainerType::kVector; };
 
-  constexpr ContainerType container_type(
-      const std::unordered_map<uint32_t, SplitNode>& split_info) {
-    return ContainerType::kUnorderedMap;
-  }
+  template <typename N>
+  struct container_type<std::unordered_map<uint32_t, N>> { static const ContainerType value = ContainerType::kUnorderedMap; };
 
  public:
   std::vector<uint16_t> empty;
@@ -76,6 +72,14 @@ class OptPartitionBuilder {
       split_nodes_.resize(n_nodes);
     }
   }
+
+  static bool use_linear_containers(size_t max_depth) {
+  /* We use vector insteard of unordered_map to improve performance.
+    * Unfortunately vector can't be used in case of larger depth due to memory limitations.
+    * Maximal depth = 16 is an adhock parameter.
+    */
+  return (max_depth > 0) && (max_depth <= 16);
+}
 
   uint32_t* GetSplitNodesPtr() {
     return split_nodes_.data();
@@ -117,12 +121,15 @@ class OptPartitionBuilder {
     data_hash = reinterpret_cast<const uint8_t*>(column_matrix.GetIndexData());
     this->max_depth = max_depth;
     if (is_loss_guided) {
-      partitions.resize(nodes_ammount(max_depth));
+      partitions.resize(nodes_amount(max_depth));
     }
 
     n_threads = nthreads;
     size_t chunck_size = common::GetBlockSize(gmat_n_rows, nthreads);
     tm.Init(n_threads, chunck_size, is_loss_guided);
+    tm.ForEachThread([max_depth](auto& ti) {
+      ti.SetContainersType(use_linear_containers(max_depth) ? ContainerType::kVector : ContainerType::kUnorderedMap);
+    });  
 
     UpdateRootThreadWork();
   }
@@ -184,7 +191,7 @@ class OptPartitionBuilder {
     node_ids_ = node_ids;
   }
 
-  static size_t nodes_ammount(size_t depth) {
+  static size_t nodes_amount(size_t depth) {
     // 2^(depth + 1)
     constexpr size_t one = 1;
     return one << (depth + 1);
@@ -203,16 +210,14 @@ class OptPartitionBuilder {
     uint32_t rows_count = 0;
     uint32_t rows_left_count = 0;
     auto thread_info = tm.GetThreadInfoPtr(tid);
-    thread_info->SetContainersType(container_type(split_info));
 
     uint32_t* rows = thread_info->vec_rows.data();
     uint32_t* rows_left = nullptr;
     if (is_loss_guided) {
       rows_left = thread_info->vec_rows_remain.data();
     } else {
-      const size_t nodes_amount = nodes_ammount(depth_);
-      thread_info->nodes_count.ResizeIfSmaller(nodes_amount);
-      thread_info->nodes_count_range.ResizeIfSmaller(nodes_amount);
+      thread_info->nodes_count.ResizeIfSmaller(nodes_amount(depth_));
+      thread_info->nodes_count_range.ResizeIfSmaller(nodes_amount(depth_));
     }
     const BinIdxType* columnar_data = numa;
 
@@ -266,16 +271,12 @@ class OptPartitionBuilder {
         rows_left[1 + rows_left_count] = i;
         rows_left_count += !static_cast<bool>(inc);
       } else {
-        /* This block of code is equivalent to
+        /* This method call is equivalent to
          * thread_info->nodes_count[check_node_id] += inc;
-         * However the unclear structure bellow lead to a faster binary. */
-        if (container_type(split_info) == ContainerType::kVector) {
-          auto& nodes_count_container = thread_info->nodes_count.GetVectorContainer();
-          nodes_count_container[check_node_id] += inc;
-        } else {
-          auto& nodes_count_container = thread_info->nodes_count.GetUnorderedMapContainer();
-          nodes_count_container[check_node_id] += inc;
-        }
+         * However such a structure prevent a compiler of generating the fastest binary
+         * This a special method should be implemented.
+         */
+        thread_info->nodes_count.Increment(check_node_id, inc);
       }
     }
     rows[0] = rows_count;
@@ -325,7 +326,7 @@ class OptPartitionBuilder {
     const size_t n_bins = gmat.cut.Ptrs().back();
 
     bool ans = n_features*summ_size / n_threads <
-                nodes_ammount(depth_)*n_bins ||
+                nodes_amount(depth_)*n_bins ||
                 (depth_ >= 1 && !hist_fit_to_l2);
     return ans;
   }

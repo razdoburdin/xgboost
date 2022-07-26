@@ -98,19 +98,18 @@ enum class ContainerType : std::uint8_t {  // NOLINT
 template <typename T>
 class FlexibleContainer {
  public:
-  auto& GetUnorderedMapContainer() {
-    return unordered_map_;
-  }
-
-  auto& GetVectorContainer() {
-    return vector_;
-  }
-
   void ResizeIfSmaller(size_t size) {
     if (type_ == ContainerType::kVector) {
-      if (vector_.size() < size) {
-        vector_.resize(size);
-      }
+      vector_.resize(vector_.size() < size ? size : vector_.size());
+    }
+  }
+
+  template <ContainerType container_type>
+  void Increment(size_t idx, size_t val) {
+    if (container_type == ContainerType::kVector) {
+      vector_[idx] += val;
+    } else {
+      unordered_map_[idx] += val;
     }
   }
 

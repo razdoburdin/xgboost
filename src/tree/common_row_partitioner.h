@@ -331,11 +331,10 @@ class CommonRowPartitioner {
                        depth_begin, depth_size);
 
     monitor->Start("CommonPartition");
-    const bool use_linear_containers = max_depth != 0;
-    if (use_linear_containers) {
+    if (opt_partition_builder_.use_linear_containers(max_depth)) {
       // Copy split_info to linear containers:
       // nodes_amount = 2^(max_depth + 1)
-      const int nodes_amount = opt_partition_builder_.nodes_ammount(max_depth);
+      const int nodes_amount = opt_partition_builder_.nodes_amount(max_depth);
       std::vector<common::SplitNode> split_info_vec(nodes_amount);
 
       #pragma omp parallel num_threads(nthreads)
@@ -346,7 +345,6 @@ class CommonRowPartitioner {
             split_info_vec[nid] = (*split_info).at(nid);
           }
         }
-
         position_updater.CommonPartition(pred, &split_info_vec);
       }
     } else {
@@ -399,6 +397,7 @@ class CommonRowPartitioner {
     monitor = std::make_unique<common::Monitor>();
     monitor->Init("CommonRowPartitioner");
   }
+
   explicit CommonRowPartitioner(GenericParameter const *ctx,
                                 GHistIndexMatrix const &gmat,
                                 const RegTree* p_tree_local,
