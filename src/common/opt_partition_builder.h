@@ -41,8 +41,6 @@ class OptPartitionBuilder {
   std::vector<uint32_t> split_nodes_;
 
  public:
-  std::vector<uint16_t> empty;
-
   ThreadsManager tm;
   std::vector<Slice> partitions;
   const RegTree* p_tree;
@@ -89,13 +87,9 @@ class OptPartitionBuilder {
   }
 
   const std::vector<uint16_t> &GetThreadIdsForNode(const uint32_t nid) const {
-    if (!tm.HasNodeInfo(nid)) {
-      return empty;
-    } else {
-      auto node_info = tm.GetNodeInfoPtr(nid);
-      const std::vector<uint16_t> & res = node_info->threads_id;
-      return res;
-    }
+    auto node_info = tm.GetNodeInfoPtr(nid);
+    const std::vector<uint16_t> & res = node_info->threads_id;
+    return res;
   }
 
   void Init(const ColumnMatrix& column_matrix,
@@ -121,17 +115,15 @@ class OptPartitionBuilder {
 
     n_threads = nthreads;
     size_t chunck_size = common::GetBlockSize(gmat_n_rows, nthreads);
-    tm.Init(n_threads, chunck_size, is_loss_guided);
-    tm.ForEachThread([max_depth](auto& ti) {
-      ti.SetContainersType(use_linear_containers(max_depth) ? ContainerType::kVector : ContainerType::kUnorderedMap);
-    });  
-
+    tm.Init(n_threads, chunck_size, is_loss_guided,
+            use_linear_containers(max_depth), nodes_amount(max_depth));
     UpdateRootThreadWork();
   }
 
   template<bool is_loss_guided, bool all_dense, bool any_cat, typename Predicate>
   void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred, size_t tid,
-                       const RowIndicesRange& row_indices, const FlexibleContainer<SplitNode>& split_info) {
+                       const RowIndicesRange& row_indices,
+                       const FlexibleContainer<SplitNode>& split_info) {
     switch (column_matrix.GetTypeSize()) {
       case common::kUint8BinsTypeSize:
         CommonPartition<BinTypeMap<kUint8BinsTypeSize>::Type, is_loss_guided, all_dense, any_cat>(
@@ -287,7 +279,7 @@ class OptPartitionBuilder {
     summ_size_remain = 0;
 
     tm.ForEachThread([](auto& ti) {ti.nodes_id.clear();});
-    tm.ForEachNode([](auto& ni) {ni.second.threads_id.clear();});
+    tm.ForEachNode([](auto& ni) {ni.threads_id.clear();});
   }
 
   bool NeedsBufferUpdate(GHistIndexMatrix const& gmat, size_t n_features) {

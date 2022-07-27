@@ -22,40 +22,42 @@ template <typename T>
 class FlexibleContainer {
  public:
   class Iterator {
-      typename std::vector<T>::iterator vector_it_;
-      typename std::unordered_map<uint32_t, T>::iterator unordered_map_it_;
-      ContainerType type_ = ContainerType::kVector;
+    typename std::vector<T>::iterator vector_it_;
+    typename std::unordered_map<uint32_t, T>::iterator unordered_map_it_;
+    ContainerType type_ = ContainerType::kVector;
 
-     public:
-      explicit Iterator(typename std::vector<T>::iterator it) {
-        vector_it_ = it;
-        type_ = ContainerType::kVector;
-      }
+   public:
+    explicit Iterator(typename std::vector<T>::iterator it) {
+      vector_it_ = it;
+      type_ = ContainerType::kVector;
+    }
 
-      explicit Iterator(typename std::unordered_map<uint32_t, T>::iterator it) {
-        unordered_map_it_ = it;
-        type_ = ContainerType::kUnorderedMap;
-      }
+    explicit Iterator(typename std::unordered_map<uint32_t, T>::iterator it) {
+      unordered_map_it_ = it;
+      type_ = ContainerType::kUnorderedMap;
+    }
 
-      T& operator*() { return type_ == ContainerType::kVector ? *vector_it_ : unordered_map_it_->second;}
+    T& operator*() { return type_ == ContainerType::kVector ?
+                                     *vector_it_ :
+                                     unordered_map_it_->second;}
 
-      bool operator != (const Iterator& rhs) {
-        if (type_ != rhs.type_) {
-          return true;
-        }
-        if (type_ == ContainerType::kVector) {
-          return vector_it_ != rhs.vector_it_;
-        } else {
-          return unordered_map_it_ != rhs.unordered_map_it_;
-        }
+    bool operator != (const Iterator& rhs) {
+      if (type_ != rhs.type_) {
+        return true;
       }
-      void operator ++() {
-        if (type_ == ContainerType::kVector) {
-           ++vector_it_;
-        } else {
-          ++unordered_map_it_;
-        }
+      if (type_ == ContainerType::kVector) {
+        return vector_it_ != rhs.vector_it_;
+      } else {
+        return unordered_map_it_ != rhs.unordered_map_it_;
       }
+    }
+    void operator ++() {
+      if (type_ == ContainerType::kVector) {
+          ++vector_it_;
+      } else {
+        ++unordered_map_it_;
+      }
+    }
   };
 
   auto begin() {

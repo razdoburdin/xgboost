@@ -157,19 +157,23 @@ class ThreadsManager {
     }
   }
 
-  void Init(size_t n_threads) {
-    threads_.resize(n_threads);
-  }
+  void Init(size_t n_threads, size_t chunck_size, bool is_loss_guided,
+            bool use_linear_container, size_t nodes_amount) {
+    ContainerType container_type = use_linear_container ?
+                                   ContainerType::kVector :
+                                   ContainerType::kUnorderedMap;
 
-  void Init(size_t n_threads, size_t chunck_size, bool is_loss_guided) {
-    Init(n_threads);
-    nodes_.clear();
+    threads_.resize(n_threads);
+    nodes_.SetContainerType(container_type);
+    nodes_.Clear();
+    nodes_.ResizeIfSmaller(nodes_amount);
 
     if (GetThreadInfoPtr(0)->vec_rows.size() == 0) {
     #pragma omp parallel num_threads(n_threads)
       {
         size_t tid = omp_get_thread_num();
         auto thread_info = GetThreadInfoPtr(tid);
+        thread_info->SetContainersType(container_type);
         if (thread_info->vec_rows.size() == 0) {
           thread_info->vec_rows.resize(chunck_size + 2, 0);
           if (is_loss_guided) {
@@ -178,19 +182,14 @@ class ThreadsManager {
         }
       }
     }
-    // ForEachThread([](auto& ti) {ti.nodes_count_range.Clear();});
-  }
-
-  bool HasNodeInfo(uint32_t nid) const {
-    return nodes_.find(nid) != nodes_.end();
   }
 
   const NodeInfo* GetNodeInfoPtr(uint32_t nid) const {
-    return &(nodes_.at(nid));
+    return &(nodes_[nid]);
   }
 
   NodeInfo* GetNodeInfoPtr(uint32_t nid) {
-    return &(nodes_[nid]);
+    return const_cast<NodeInfo*>(const_cast<const ThreadsManager*>(this)->GetNodeInfoPtr(nid));
   }
 
   const ThreadInfo* GetThreadInfoPtr(size_t tid) const {
@@ -235,7 +234,7 @@ class ThreadsManager {
 
  private:
   std::vector<ThreadInfo> threads_;
-  std::unordered_map<uint32_t, NodeInfo> nodes_;
+  FlexibleContainer<NodeInfo> nodes_;
 
   CyclicView<ThreadInfo> threads_cyclic_view_;
   SaturationView<ThreadInfo> threads_saturation_view_;
