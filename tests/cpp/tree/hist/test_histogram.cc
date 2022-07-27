@@ -133,8 +133,7 @@ void TestSyncHist(bool is_distributed) {
                                           1, 3, false);
   // initiat work
   auto& tm = opt_partition_builder.tm;
-  tm.Init(1);
-  tm.ForEachNode([] (auto& ni) {ni.second.threads_id.resize(1, 0);});
+  tm.ForEachNode([] (auto& ni) {ni.threads_id.resize(1, 0);});
   tm.ForEachThread([&histogram] (auto& ti) {
     ti.nodes_id.resize(2);
     ti.nodes_id[0] = 3;
