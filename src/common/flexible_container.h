@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 #include <unordered_map>
+#include <type_traits>
 
 namespace xgboost {
 namespace common {
@@ -17,6 +18,10 @@ enum class ContainerType : std::uint8_t {  // NOLINT
   kVector = 0,
   kUnorderedMap = 1
 };
+
+typedef std::integral_constant<ContainerType, ContainerType::kVector> vector_t;
+typedef std::integral_constant<ContainerType, ContainerType::kUnorderedMap> unordered_map_t;
+
 // Standartize interface for acces vector and unorderd_map
 template <typename T>
 class FlexibleContainer {
@@ -90,32 +95,43 @@ class FlexibleContainer {
     }
   }
 
+  /* For performance reasons we add the methods to unsafe access to the data.
+   * In this case we don't make a runtime checking of the container type.
+   */
+  const T& get_element_unsafe(vector_t type, size_t idx) const {
+    return vector_[idx];
+  }
+
+  T& get_element_unsafe(vector_t type, size_t idx) {
+    return vector_[idx];
+  }
+
+  const T& get_element_unsafe(unordered_map_t type, size_t idx) const {
+    if (unordered_map_.count(idx) > 0) {
+      return unordered_map_.at(idx);
+    } else {
+      static T empty_item;
+      return empty_item;
+    }
+  }
+
+  T& get_element_unsafe(unordered_map_t type, size_t idx) {
+    return unordered_map_[idx];
+  }
+
   T& operator[](size_t idx) {
     if (type_ == ContainerType::kVector) {
-      return vector_[idx];
+      return get_element_unsafe(vector_t(), idx);
     } else {
-      return unordered_map_[idx];
+      return get_element_unsafe(unordered_map_t(), idx);
     }
   }
 
   const T& operator[](size_t idx) const {
     if (type_ == ContainerType::kVector) {
-      return vector_[idx];
+      return get_element_unsafe(vector_t(), idx);
     } else {
-      if (unordered_map_.count(idx) > 0) {
-        return unordered_map_.at(idx);
-      } else {
-        static T empty_item;
-        return empty_item;
-      }
-    }
-  }
-
-  const T& At(size_t idx) const {
-    if (type_ == ContainerType::kVector) {
-      return vector_.at(idx);
-    } else {
-      return unordered_map_.at(idx);
+      return get_element_unsafe(unordered_map_t(), idx);
     }
   }
 

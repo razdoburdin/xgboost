@@ -159,8 +159,26 @@ class OptPartitionBuilder {
     return one << (depth + 1);
   }
 
+
   template<typename BinIdxType, bool is_loss_guided,
-           bool all_dense, bool any_cat,
+           bool all_dense, bool any_cat, typename Predicate>
+    void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred,
+                          const BinIdxType* numa, size_t tid,
+                          const RowIndicesRange& row_indices,
+                          const FlexibleContainer<SplitNode>& split_info) {
+      if (split_info.GetContainerType() == ContainerType::kVector) {
+        CommonPartition<BinIdxType, is_loss_guided, all_dense, any_cat, vector_t>(
+                           column_matrix, std::forward<Predicate>(pred),
+                           numa, tid, row_indices, split_info);
+      } else {
+        CommonPartition<BinIdxType, is_loss_guided, all_dense, any_cat, unordered_map_t>(
+                    column_matrix, std::forward<Predicate>(pred),
+                    numa, tid, row_indices, split_info);
+      }
+    }
+
+  template<typename BinIdxType, bool is_loss_guided,
+           bool all_dense, bool any_cat, typename Container,
            typename Predicate>
     void CommonPartition(const ColumnMatrix& column_matrix, Predicate&& pred,
                          const BinIdxType* numa, size_t tid,
@@ -186,7 +204,7 @@ class OptPartitionBuilder {
       const uint32_t first_row_id = !is_loss_guided ? row_indices.begin :
                                                       row_indices_ptr[row_indices.begin];
       for (const auto& nid : split_nodes_) {
-        const SplitNode& split_node = split_info[nid];
+        const SplitNode& split_node = split_info.get_element_unsafe(Container(), nid);
         thread_info->states[nid] = column_list[split_node.ind]->GetInitialState(first_row_id);
         thread_info->default_flags[nid] = (*p_tree)[nid].DefaultLeft();
       }
@@ -199,7 +217,7 @@ class OptPartitionBuilder {
         continue;
       }
 
-      const SplitNode& split_node = split_info[nid];
+      const SplitNode& split_node = split_info.get_element_unsafe(Container(), nid);
       const int32_t sc = split_node.condition;
       uint64_t si = split_node.ind;
 
@@ -225,7 +243,7 @@ class OptPartitionBuilder {
         }
       }
       const uint16_t check_node_id = node_ids_[i];
-      uint32_t inc = split_info[check_node_id].smalest_nodes_mask;
+      uint32_t inc = split_info.get_element_unsafe(Container(), check_node_id).smalest_nodes_mask;
       rows[1 + rows_count] = i;
       rows_count += inc;
       if (is_loss_guided) {
