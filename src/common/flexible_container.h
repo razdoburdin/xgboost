@@ -81,6 +81,12 @@ class FlexibleContainer {
     }
   }
 
+  void Fill(T val) {
+    if (type_ == ContainerType::kVector) {
+      std::fill(vector_.begin(), vector_.end(), val);
+    }    
+  }
+
   void ResizeIfSmaller(size_t size) {
     if (type_ == ContainerType::kVector) {
       vector_.resize(vector_.size() < size ? size : vector_.size());
@@ -141,6 +147,7 @@ class FlexibleContainer {
       for (const auto& tnc : unordered_map_) {
         unique_idx[i++] = tnc.first;
       }
+      std::sort(unique_idx.begin(), unique_idx.end());
     }
     return unique_idx;
   }

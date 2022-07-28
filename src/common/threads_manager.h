@@ -108,6 +108,7 @@ class ThreadsManager {
       nodes_count_range.SetContainerType(type);
       states.SetContainerType(type);
       default_flags.SetContainerType(type);
+      counts.SetContainerType(type);
     }
 
     std::vector<Slice> addr;
@@ -122,6 +123,8 @@ class ThreadsManager {
 
     FlexibleContainer<size_t> states;
     FlexibleContainer<uint8_t> default_flags;
+
+    FlexibleContainer<uint32_t> counts;
   };
 
   struct NodeInfo {

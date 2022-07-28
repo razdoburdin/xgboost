@@ -102,12 +102,13 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
       }
 
       std::vector<uint32_t> unique_node_ids = thread_info->nodes_count.GetUniqueIdx();
-      std::sort(unique_node_ids.begin(), unique_node_ids.end());
 
       size_t cummulative_summ = 0;
-      std::unordered_map<uint32_t, uint32_t> counts;
+      thread_info->counts.ResizeIfSmaller(nodes_amount(max_depth));
+      thread_info->counts.Fill(0);
+
       for (const auto& uni : unique_node_ids) {
-        auto nodes_amount = thread_info->nodes_count[uni];
+        uint32_t nodes_amount = thread_info->nodes_count[uni]
         auto nodes_count_range = thread_info->GetNodesCountRangePtr(uni);
 
         nodes_count_range->begin = cummulative_summ;
@@ -119,8 +120,7 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
 
       for (size_t i = 0; i < thread_info->vec_rows[0]; ++i) {
         const uint32_t row_id = thread_info->vec_rows[i + 1];
-        const uint16_t check_node_id = node_ids_[row_id];
-        const uint32_t nod_id = check_node_id;
+        const uint32_t nod_id = node_ids_[row_id];
         thread_info->rows_nodes_wise[counts[nod_id]++] = row_id;
       }
     }

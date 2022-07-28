@@ -210,7 +210,7 @@ class OptPartitionBuilder {
         const SplitNode& split_node = split_info.get_element_unsafe(Container(), nid);
         thread_info->states.get_element_unsafe(Container(), nid) =
           column_list[split_node.ind]->GetInitialState(first_row_id);
-          
+
         thread_info->default_flags.get_element_unsafe(Container(), nid) =
           (*p_tree)[nid].DefaultLeft();
       }
