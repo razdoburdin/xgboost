@@ -198,6 +198,9 @@ class OptPartitionBuilder {
       thread_info->nodes_count.ResizeIfSmaller(nodes_amount(depth_));
       thread_info->nodes_count_range.ResizeIfSmaller(nodes_amount(depth_));
     }
+    thread_info->states.ResizeIfSmaller(nodes_amount(depth_));
+    thread_info->default_flags.ResizeIfSmaller(nodes_amount(depth_));
+
     const BinIdxType* columnar_data = numa;
 
     if (!all_dense && row_indices.begin < row_indices.end) {
@@ -205,8 +208,11 @@ class OptPartitionBuilder {
                                                       row_indices_ptr[row_indices.begin];
       for (const auto& nid : split_nodes_) {
         const SplitNode& split_node = split_info.get_element_unsafe(Container(), nid);
-        thread_info->states[nid] = column_list[split_node.ind]->GetInitialState(first_row_id);
-        thread_info->default_flags[nid] = (*p_tree)[nid].DefaultLeft();
+        thread_info->states.get_element_unsafe(Container(), nid) =
+          column_list[split_node.ind]->GetInitialState(first_row_id);
+          
+        thread_info->default_flags.get_element_unsafe(Container(), nid) =
+          (*p_tree)[nid].DefaultLeft();
       }
     }
     for (size_t ii = row_indices.begin; ii < row_indices.end; ++ii) {
@@ -231,10 +237,10 @@ class OptPartitionBuilder {
                                        : node.RightChild();
       } else {
         int32_t cmp_value = column_list[si]->template GetBinIdx<BinIdxType, int32_t>
-                                                               (i, &(thread_info->states[nid]));
+                            (i, &(thread_info->states.get_element_unsafe(Container(), nid)));
 
         if (cmp_value == Column::kMissingId) {
-          node_ids_[i] = thread_info->default_flags[nid]
+          node_ids_[i] = thread_info->default_flags.get_element_unsafe(Container(), nid)
                          ? node.LeftChild()
                          : node.RightChild();
         } else {
@@ -250,12 +256,7 @@ class OptPartitionBuilder {
         rows_left[1 + rows_left_count] = i;
         rows_left_count += !static_cast<bool>(inc);
       } else {
-        /* This method call is equivalent to
-         * thread_info->nodes_count[check_node_id] += inc;
-         * However such a structure prevent a compiler of generating the fastest binary
-         * This a special method should be implemented.
-         */
-        thread_info->nodes_count.Increment(check_node_id, inc);
+        thread_info->nodes_count.get_element_unsafe(Container(), check_node_id) += inc;
       }
     }
     rows[0] = rows_count;

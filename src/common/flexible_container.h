@@ -87,26 +87,18 @@ class FlexibleContainer {
     }
   }
 
-  void Increment(size_t idx, T val) {
-    if (type_ == ContainerType::kVector) {
-      vector_[idx] += val;
-    } else {
-      unordered_map_[idx] += val;
-    }
-  }
-
   /* For performance reasons we add the methods to unsafe access to the data.
    * In this case we don't make a runtime checking of the container type.
    */
-  const T& get_element_unsafe(vector_t type, size_t idx) const {
+  const T& get_element_unsafe(const vector_t& type, size_t idx) const {
     return vector_[idx];
   }
 
-  T& get_element_unsafe(vector_t type, size_t idx) {
+  T& get_element_unsafe(const vector_t& type, size_t idx) {
     return vector_[idx];
   }
 
-  const T& get_element_unsafe(unordered_map_t type, size_t idx) const {
+  const T& get_element_unsafe(const unordered_map_t& type, size_t idx) const {
     if (unordered_map_.count(idx) > 0) {
       return unordered_map_.at(idx);
     } else {
@@ -115,7 +107,7 @@ class FlexibleContainer {
     }
   }
 
-  T& get_element_unsafe(unordered_map_t type, size_t idx) {
+  T& get_element_unsafe(const unordered_map_t& type, size_t idx) {
     return unordered_map_[idx];
   }
 

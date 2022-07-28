@@ -48,6 +48,7 @@ size_t OptPartitionBuilder::DepthBegin<false>(const std::vector<uint16_t>&
   return 0;
 }
 
+// is_loss_guided = true
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<true>(
                   const std::vector<uint16_t>& complete_trees_depth_wise,
@@ -85,6 +86,7 @@ void OptPartitionBuilder::UpdateRowBuffer<true>(
   }
 }
 
+// is_loss_guided = false
 template <>
 void OptPartitionBuilder::UpdateRowBuffer<false>(
                   const std::vector<uint16_t>& complete_trees_depth_wise,
@@ -125,6 +127,7 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
   }
 }
 
+// is_loss_guided = true
 template <>
 void OptPartitionBuilder::UpdateThreadsWork<true>(
                   const std::vector<uint16_t>& complete_trees_depth_wise,
@@ -244,6 +247,7 @@ void OptPartitionBuilder::UpdateThreadsWork<false, false>(
   }
 }
 
+// is_loss_guided = false
 template <>
 void OptPartitionBuilder::UpdateThreadsWork<false>(
                   const std::vector<uint16_t>& complete_trees_depth_wise,

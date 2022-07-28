@@ -106,6 +106,8 @@ class ThreadsManager {
     void SetContainersType(ContainerType type) {
       nodes_count.SetContainerType(type);
       nodes_count_range.SetContainerType(type);
+      states.SetContainerType(type);
+      default_flags.SetContainerType(type);
     }
 
     std::vector<Slice> addr;
@@ -118,8 +120,8 @@ class ThreadsManager {
     std::vector<uint32_t> vec_rows;
     std::vector<uint32_t> vec_rows_remain;
 
-    std::unordered_map<uint32_t, size_t> states;
-    std::unordered_map<uint32_t, bool> default_flags;
+    FlexibleContainer<size_t> states;
+    FlexibleContainer<uint8_t> default_flags;
   };
 
   struct NodeInfo {
@@ -162,24 +164,16 @@ class ThreadsManager {
     ContainerType container_type = use_linear_container ?
                                    ContainerType::kVector :
                                    ContainerType::kUnorderedMap;
-
-    threads_.resize(n_threads);
     nodes_.SetContainerType(container_type);
     nodes_.Clear();
     nodes_.ResizeIfSmaller(nodes_amount);
 
-    if (GetThreadInfoPtr(0)->vec_rows.size() == 0) {
-    #pragma omp parallel num_threads(n_threads)
-      {
-        size_t tid = omp_get_thread_num();
-        auto thread_info = GetThreadInfoPtr(tid);
-        thread_info->SetContainersType(container_type);
-        if (thread_info->vec_rows.size() == 0) {
-          thread_info->vec_rows.resize(chunck_size + 2, 0);
-          if (is_loss_guided) {
-            thread_info->vec_rows_remain.resize(chunck_size + 2, 0);
-          }
-        }
+    threads_.resize(n_threads);
+    for (auto& ti : threads_) {
+      ti.SetContainersType(container_type);
+      ti.vec_rows.resize(chunck_size + 2, 0);
+      if (is_loss_guided) {
+        ti.vec_rows_remain.resize(chunck_size + 2, 0);
       }
     }
   }
