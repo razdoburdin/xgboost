@@ -10,6 +10,7 @@
 #include <vector>
 #include <unordered_map>
 #include <type_traits>
+#include <algorithm>
 
 namespace xgboost {
 namespace common {
@@ -84,7 +85,7 @@ class FlexibleContainer {
   void Fill(T val) {
     if (type_ == ContainerType::kVector) {
       std::fill(vector_.begin(), vector_.end(), val);
-    }    
+    }
   }
 
   void ResizeIfSmaller(size_t size) {
@@ -141,6 +142,7 @@ class FlexibleContainer {
           unique_idx.push_back(num);
         }
       }
+      // In this case unique_idx is already sorted
     } else {
       unique_idx.resize(unordered_map_.size(), 0);
       size_t i = 0;

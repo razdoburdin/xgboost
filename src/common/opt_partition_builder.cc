@@ -108,11 +108,11 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
       thread_info->counts.Fill(0);
 
       for (const auto& uni : unique_node_ids) {
-        uint32_t nodes_amount = thread_info->nodes_count[uni]
+        uint32_t nodes_amount = thread_info->nodes_count[uni];
         auto nodes_count_range = thread_info->GetNodesCountRangePtr(uni);
 
         nodes_count_range->begin = cummulative_summ;
-        counts[uni] = cummulative_summ;
+        thread_info->counts[uni] = cummulative_summ;
         nodes_count_range->end = nodes_count_range->begin +
                                  nodes_amount;
         cummulative_summ += nodes_amount;
@@ -121,7 +121,7 @@ void OptPartitionBuilder::UpdateRowBuffer<false>(
       for (size_t i = 0; i < thread_info->vec_rows[0]; ++i) {
         const uint32_t row_id = thread_info->vec_rows[i + 1];
         const uint32_t nod_id = node_ids_[row_id];
-        thread_info->rows_nodes_wise[counts[nod_id]++] = row_id;
+        thread_info->rows_nodes_wise[thread_info->counts[nod_id]++] = row_id;
       }
     }
   }
