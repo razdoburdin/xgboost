@@ -42,13 +42,14 @@ class HistogramBuilder {
    *                         of using global rabit variable.
    */
 
-  void Reset(uint32_t total_bins, int32_t max_bin_per_feat, int32_t n_threads, size_t n_batches,
+  void Reset(uint32_t total_bins, BatchParam p, int32_t n_threads, size_t n_batches,
              int32_t max_depth,
              bool is_distributed = rabit::IsDistributed()) {
     CHECK_GE(n_threads, 1);
     n_threads_ = n_threads;
     n_batches_ = n_batches;
     hist_.Init(total_bins);
+    param_ = p;
     hist_local_worker_.Init(total_bins);
     buffer_.Init(total_bins);
     buffer_.AllocateHistBufer(max_depth, n_threads);
