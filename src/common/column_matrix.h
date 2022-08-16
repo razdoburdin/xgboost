@@ -129,7 +129,7 @@ class SparseColumn: public Column {
 
   Column::BinCmpType GetGlobalBinIdx(size_t idx) const {
     return this->Column::GetGlobalBinIdx(idx);
-  } 
+  }
 
   size_t GetInitialState(const size_t first_row_id) const {
     const size_t* row_data = GetRowData();
