@@ -56,7 +56,7 @@ void QuantileHistMaker::Update(HostDeviceVector<GradientPair> *gpair, DMatrix *d
     this->pimpl_->UpdateTree(gpair, dmat, p_tree, &t_row_position);
     ++t_idx;
   }
-  
+
   param_.learning_rate = lr;
 }
 
