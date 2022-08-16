@@ -56,7 +56,7 @@ void QuantileHistMaker::Update(HostDeviceVector<GradientPair> *gpair, DMatrix *d
     this->pimpl_->UpdateTree(gpair, dmat, p_tree, &t_row_position);
     ++t_idx;
   }
-
+  
   param_.learning_rate = lr;
 }
 
@@ -370,6 +370,7 @@ void QuantileHistMaker::Builder::UpdateTree(HostDeviceVector<GradientPair> *gpai
     default:
       CHECK(false);  // no default behavior
   }
+
   monitor_->Stop(__func__);
 }
 
@@ -502,9 +503,8 @@ void QuantileHistMaker::Builder::InitData(const GHistIndexMatrix& gmat,
       ++page_id;
     }
     partition_is_initiated_ = true;
-    this->histogram_builder_->Reset(n_total_bins, param_.max_bin, this->ctx_->Threads(), page_id,
+    this->histogram_builder_->Reset(n_total_bins, HistBatch(param_), this->ctx_->Threads(), page_id,
                                     param_.max_depth, rabit::IsDistributed());
-    const size_t block_size = common::GetBlockSize(info.num_row_, this->ctx_->Threads());
   }
   p_last_tree_ = &tree;
   evaluator_.reset(

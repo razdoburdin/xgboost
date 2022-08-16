@@ -745,16 +745,13 @@ def _from_cudf_df(
 
 
 def _is_cudf_ser(data: DataType) -> bool:
-    try:
-        import cudf
-    except ImportError:
-        return False
-    return isinstance(data, cudf.Series)
+    return lazy_isinstance(data, "cudf.core.series", "Series")
 
 
 def _is_cupy_array(data: DataType) -> bool:
-    return lazy_isinstance(data, "cupy.core.core", "ndarray") or lazy_isinstance(
-        data, "cupy._core.core", "ndarray"
+    return any(
+        lazy_isinstance(data, n, "ndarray")
+        for n in ("cupy.core.core", "cupy", "cupy._core.core")
     )
 
 
