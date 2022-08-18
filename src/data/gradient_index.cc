@@ -162,7 +162,8 @@ float GHistIndexMatrix::GetFvalue(size_t ridx, size_t fidx, bool is_cat) const {
 
   auto lower = static_cast<bst_bin_t>(cut.Ptrs()[fidx]);
   auto column_view = columns_->GetColumnViewList()[fidx];
-  auto bin_idx = (*column_view)[ridx];
+  size_t state = column_view->GetInitialState(0);
+  auto bin_idx = column_view->Get(ridx, &state);
 
   if (bin_idx == common::DenseColumn::kMissingId) {
     return std::numeric_limits<float>::quiet_NaN();

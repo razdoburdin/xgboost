@@ -112,16 +112,16 @@ class SparseColumn: public Column {
     }
   }
 
-  Column::BinCmpType operator[](size_t rid) const {
+  Column::BinCmpType Get(size_t rid, size_t* state) const {
     const size_t column_size = this->Size();
-    if (!(state_ < column_size)) {
+    if (!(*state < column_size)) {
       return static_cast<Column::BinCmpType>(this->kMissingId);
     }
-    while (state_ < column_size && GetRowIdx(state_) < rid) {
-      ++state_;
+    while (*state < column_size && GetRowIdx(*state) < rid) {
+      ++(*state);
     }
-    if ((state_ < column_size) && GetRowIdx(state_) == rid) {
-      return static_cast<Column::BinCmpType>(this->Column::GetGlobalBinIdx(state_));
+    if ((*state < column_size) && GetRowIdx(*state) == rid) {
+      return static_cast<Column::BinCmpType>(this->Column::GetGlobalBinIdx(*state));
     } else {
       return static_cast<Column::BinCmpType>(this->kMissingId);
     }
@@ -145,7 +145,6 @@ class SparseColumn: public Column {
   }
 
  private:
-  mutable size_t state_ = 0;
   /* indexes of rows */
   common::Span<const size_t> row_ind_;
 };
@@ -172,7 +171,7 @@ class DenseColumn: public Column {
               : this->GetFeatureBinIdx<BinIdxType>(idx));
   }
 
-  Column::BinCmpType operator[](size_t rid) const {
+  Column::BinCmpType Get(size_t rid) const {
       return static_cast<Column::BinCmpType>(
               (any_missing_ && IsMissing(rid))
               ? this->kMissingId
@@ -207,9 +206,9 @@ class ColumnView final {
                             : dense_clmn_ptr_->GetGlobalBinIdx(idx);
   }
 
-  uint32_t operator[] (size_t rid) const {
-    return sparse_clmn_ptr_ ? (*sparse_clmn_ptr_)[rid]
-                            : (*dense_clmn_ptr_)[rid];
+  uint32_t Get(size_t rid, size_t* state) const {
+    return sparse_clmn_ptr_ ? sparse_clmn_ptr_->Get(rid, state)
+                            : dense_clmn_ptr_->Get(rid);
   }
 
   template <typename BinIdxType>
