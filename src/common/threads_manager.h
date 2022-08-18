@@ -167,7 +167,8 @@ class ThreadsManager {
     ContainerType container_type = use_linear_container ?
                                    ContainerType::kVector :
                                    ContainerType::kUnorderedMap;
-    nodes_.SetContainerType(container_type);
+    // nodes_.SetContainerType(container_type);
+    nodes_.SetContainerType(ContainerType::kUnorderedMap);
     nodes_.Clear();
     nodes_.ResizeIfSmaller(nodes_amount);
 
