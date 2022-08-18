@@ -123,15 +123,15 @@ void ReduceHist(double* dest_hist,
                 const size_t node_id,
                 const std::vector<uint16_t>& threads_id_for_node,
                 size_t begin, size_t end) {
-  const size_t first_thread_id = threads_id_for_node[0];
-  CHECK_LT(node_id, local_threads_mapping[first_thread_id].size());
-  const size_t mapped_nod_id = local_threads_mapping[first_thread_id][node_id];
-  CHECK_LT(mapped_nod_id, (*histograms)[first_thread_id].size());
-  double* hist0 =  (*histograms)[first_thread_id][mapped_nod_id].data();
-
-  for (size_t bin_id = begin; bin_id < end; ++bin_id) {
-    dest_hist[bin_id] = hist0[bin_id];
-    hist0[bin_id] = 0;
+  if (threads_id_for_node.size() > 0) {
+    size_t tid = 0;
+    const size_t thread_id = threads_id_for_node[tid];
+    const size_t mapped_nod_id = local_threads_mapping[thread_id][node_id];
+    double* hist =  (*histograms)[thread_id][mapped_nod_id].data();
+    for (size_t bin_id = begin; bin_id < end; ++bin_id) {
+      dest_hist[bin_id] = hist[bin_id];
+      hist[bin_id] = 0;
+    }
   }
   for (size_t tid = 1; tid < threads_id_for_node.size(); ++tid) {
     const size_t thread_id = threads_id_for_node[tid];
