@@ -293,6 +293,7 @@ class ColumnMatrix {
                  size_t base_rowid) {
     // pre-fill index_ for dense columns
     auto n_features = gmat.Features();
+
     if (all_dense_column_) {
       missing_flags_.resize(feature_offsets_[n_features], false);
       // row index is compressed, we need to dispatch it.
@@ -307,7 +308,7 @@ class ColumnMatrix {
       missing_flags_.resize(feature_offsets_[n_features], true);
       DispatchBinType(bin_type_size_, [&](auto t) {
         using ColumnBinT = decltype(t);
-        SetIndex<ColumnBinT>(batch, gmat);
+        SetIndex<ColumnBinT>(base_rowid, batch, gmat);
       });
     }
     FillColumnViewList(n_features);
@@ -360,35 +361,32 @@ class ColumnMatrix {
   }
 
   template <typename T, typename BinFn, typename Batch>
-  void SetIndexSparse(Batch const& batch, T* index, const GHistIndexMatrix& gmat,
+  void SetIndexSparse(size_t base_row_id, Batch const& batch, T* index,
+                      const GHistIndexMatrix& gmat,
                       const size_t n_feature, BinFn&& assign_bin) {
-    auto rbegin = 0;
-    size_t const batch_size = batch.Size();
-
-    for (size_t rid = 0; rid < batch_size; ++rid) {
+    size_t k = 0;
+    for (size_t rid = 0; rid < batch.Size(); ++rid) {
       auto line = batch.GetLine(rid);
-      const size_t ibegin = gmat.row_ptr[rbegin + rid];
-      const size_t iend = gmat.row_ptr[rbegin + rid + 1];
+      const size_t ibegin = gmat.row_ptr[base_row_id + rid];
+      const size_t iend = gmat.row_ptr[base_row_id + rid + 1];
       for (size_t i = 0; i < line.Size(); ++i) {
         if (i + ibegin < iend) {
           auto coo = line.GetElement(i);
           auto fid = coo.column_idx;
-          const uint32_t bin_id = index[i + ibegin];
-          assign_bin(bin_id, rid, fid);
+          const uint32_t bin_id = index[k++];
+          assign_bin(bin_id, rid + base_row_id, fid);
         }
       }
     }
   }
 
   template <typename ColumnBinT, typename Batch>
-  inline void SetIndex(Batch const& batch, const GHistIndexMatrix& gmat) {
-    const uint32_t* index = gmat.index.data<uint32_t>();
+  inline void SetIndex(size_t base_row_id, Batch const& batch, const GHistIndexMatrix& gmat) {
+    const uint32_t* index = gmat.index.data<uint32_t>() + gmat.row_ptr[base_row_id];
     ColumnBinT* local_index = reinterpret_cast<ColumnBinT*>(&index_[0]);
 
     const size_t n_features = gmat.Features();
-    std::vector<size_t> num_nonzeros;
-    num_nonzeros.resize(n_features);
-    std::fill(num_nonzeros.begin(), num_nonzeros.end(), 0);
+    num_nonzeros_.resize(n_features, 0);
 
     auto get_bin_idx = [&](auto bin_id, auto rid, bst_feature_t fid) {
       if (type_[fid] == kDenseColumn) {
@@ -397,12 +395,12 @@ class ColumnMatrix {
         missing_flags_[feature_offsets_[fid] + rid] = false;
       } else {
         ColumnBinT* begin = &local_index[feature_offsets_[fid]];
-        begin[num_nonzeros[fid]] = bin_id - index_base_[fid];
-        row_ind_[feature_offsets_[fid] + num_nonzeros[fid]] = rid;
-        ++num_nonzeros[fid];
+        begin[num_nonzeros_[fid]] = bin_id - index_base_[fid];
+        row_ind_[feature_offsets_[fid] + num_nonzeros_[fid]] = rid;
+        ++num_nonzeros_[fid];
       }
     };
-    this->SetIndexSparse(batch, index, gmat, n_features, get_bin_idx);
+    this->SetIndexSparse(base_row_id, batch, index, gmat, n_features, get_bin_idx);
   }
 
   BinTypeSize GetTypeSize() const {
