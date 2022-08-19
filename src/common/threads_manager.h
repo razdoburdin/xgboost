@@ -151,13 +151,15 @@ class ThreadsManager {
   /* Tie thread_id with node_id */
   void Tie(size_t tid, uint32_t nid) {
     CHECK_LT(tid, threads_.size());
-    if (nodes_[nid].threads_id.empty()) {
-      nodes_[nid].threads_id.push_back(tid);
-      threads_[tid].nodes_id.push_back(nid);
+    auto node_info = GetNodeInfoPtr(nid);
+    auto thread_info = GetThreadInfoPtr(tid);
+    if (node_info->threads_id.empty()) {
+      node_info->threads_id.push_back(tid);
+      thread_info->nodes_id.push_back(nid);
     } else {
-      if (nodes_[nid].threads_id.back() != tid) {
-        nodes_[nid].threads_id.push_back(tid);
-        threads_[tid].nodes_id.push_back(nid);
+      if (node_info->threads_id.back() != tid) {
+        node_info->threads_id.push_back(tid);
+        thread_info->nodes_id.push_back(nid);
       }
     }
   }
@@ -167,8 +169,7 @@ class ThreadsManager {
     ContainerType container_type = use_linear_container ?
                                    ContainerType::kVector :
                                    ContainerType::kUnorderedMap;
-    // nodes_.SetContainerType(container_type);
-    nodes_.SetContainerType(ContainerType::kUnorderedMap);
+    nodes_.SetContainerType(container_type);
     nodes_.Clear();
     nodes_.ResizeIfSmaller(nodes_amount);
 
@@ -187,7 +188,7 @@ class ThreadsManager {
   }
 
   NodeInfo* GetNodeInfoPtr(uint32_t nid) {
-    return const_cast<NodeInfo*>(const_cast<const ThreadsManager*>(this)->GetNodeInfoPtr(nid));
+    return &(nodes_[nid]);
   }
 
   const ThreadInfo* GetThreadInfoPtr(size_t tid) const {
@@ -195,7 +196,7 @@ class ThreadsManager {
   }
 
   ThreadInfo* GetThreadInfoPtr(size_t tid) {
-    return const_cast<ThreadInfo*>(const_cast<const ThreadsManager*>(this)->GetThreadInfoPtr(tid));
+    return &(threads_[tid]);
   }
 
   CyclicView<ThreadInfo> GetThreadsCyclicView() {
