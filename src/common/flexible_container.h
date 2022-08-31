@@ -85,6 +85,10 @@ class FlexibleContainer {
   void Fill(T val) {
     if (type_ == ContainerType::kVector) {
       std::fill(vector_.begin(), vector_.end(), val);
+    } else {
+      for (auto& elem : unordered_map_) {
+        elem.second = val;
+      }
     }
   }
 

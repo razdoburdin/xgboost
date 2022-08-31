@@ -107,7 +107,6 @@ class ThreadsManager {
       nodes_count.SetContainerType(type);
       nodes_count_range.SetContainerType(type);
       states.SetContainerType(type);
-      default_flags.SetContainerType(type);
       counts.SetContainerType(type);
     }
 
@@ -122,7 +121,6 @@ class ThreadsManager {
     std::vector<uint32_t> vec_rows_remain;
 
     FlexibleContainer<size_t> states;
-    FlexibleContainer<uint8_t> default_flags;
 
     FlexibleContainer<uint32_t> counts;
   };

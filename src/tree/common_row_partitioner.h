@@ -268,11 +268,8 @@ class CommonRowPartitioner {
     // 2.1 Create a blocked space of size SUM(samples in each node)
     const uint32_t* offsets = gmat.index.Offset();
     const uint64_t rows_offset = gmat.row_ptr.size() - 1;
-    opt_partition_builder_.ResizeSplitNodeIfSmaller(n_nodes);
-    uint32_t* split_nodes = opt_partition_builder_.GetSplitNodesPtr();
     for (size_t i = 0; i < n_nodes; ++i) {
         const int32_t nid = nodes[i].nid;
-        split_nodes[i] = nid;
         const uint64_t fid = (*p_tree)[nid].SplitIndex();
         (*split_info)[nid].ind = fid*((gmat.IsDense() ? rows_offset : 1));
         (*split_info)[nid].condition -= gmat.cut.Ptrs()[fid];
@@ -309,20 +306,20 @@ class CommonRowPartitioner {
     monitor->Stop("CommonPartition");
 
     if (depth != max_depth || is_loss_guided) {
-        monitor->Start("UpdateRowBuffer");
-        opt_partition_builder_.template UpdateRowBuffer<is_loss_guided>(
+      monitor->Start("UpdateRowBuffer");
+      opt_partition_builder_.template UpdateRowBuffer<is_loss_guided>(
+                                            *child_node_ids, gmat,
+                                            n_features);
+      monitor->Stop("UpdateRowBuffer");
+      monitor->Start("UpdateThreadsWork");
+      opt_partition_builder_.template UpdateThreadsWork<is_loss_guided>(
                                               *child_node_ids, gmat,
-                                              n_features);
-        monitor->Stop("UpdateRowBuffer");
-        monitor->Start("UpdateThreadsWork");
-        opt_partition_builder_.template UpdateThreadsWork<is_loss_guided>(
-                                                *child_node_ids, gmat,
-                                                n_features,
-                                                is_left_small,
-                                                check_is_left_small);
-        monitor->Stop("UpdateThreadsWork");
+                                              n_features,
+                                              is_left_small,
+                                              check_is_left_small);
+      monitor->Stop("UpdateThreadsWork");
+    }
   }
-}
 
   NodeIdListT &GetNodeAssignments() { return node_ids_; }
 

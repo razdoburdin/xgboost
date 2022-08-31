@@ -38,7 +38,6 @@ struct SplitNode {
 class OptPartitionBuilder {
   size_t depth_;
   uint16_t* node_ids_;
-  std::vector<uint32_t> split_nodes_;
 
  public:
   ThreadsManager tm;
@@ -60,22 +59,12 @@ class OptPartitionBuilder {
   static constexpr double adhoc_l2_size = 1024 * 1024 * 0.8;
   static constexpr uint32_t thread_size_limit = 512;
 
-  void ResizeSplitNodeIfSmaller(size_t n_nodes) {
-    if (split_nodes_.size() < n_nodes) {
-      split_nodes_.resize(n_nodes);
-    }
-  }
-
   static bool use_linear_containers(size_t max_depth) {
   /* We use vector insteard of unordered_map to improve performance.
-    * Unfortunately vector can't be used in case of larger depth due to memory limitations.
-    * Maximal depth = 16 is an adhock parameter.
-    */
-  return (max_depth > 0) && (max_depth <= 16);
-}
-
-  uint32_t* GetSplitNodesPtr() {
-    return split_nodes_.data();
+   * Unfortunately vector can't be used in case of larger depth due to memory limitations.
+   * Maximal depth = 16 is an adhock parameter.
+   */
+    return (max_depth > 0) && (max_depth <= 16);
   }
 
   const std::vector<Slice> &GetSlices(const uint32_t tid) const {
@@ -199,22 +188,12 @@ class OptPartitionBuilder {
       thread_info->nodes_count_range.ResizeIfSmaller(nodes_amount(depth_));
     }
     thread_info->states.ResizeIfSmaller(nodes_amount(depth_));
-    thread_info->default_flags.ResizeIfSmaller(nodes_amount(depth_));
+    thread_info->states.Fill(0);
 
     const BinIdxType* columnar_data = numa;
 
-    if (!all_dense && row_indices.begin < row_indices.end) {
-      const uint32_t first_row_id = !is_loss_guided ? row_indices.begin :
-                                                      row_indices_ptr[row_indices.begin];
-      for (const auto& nid : split_nodes_) {
-        const SplitNode& split_node = split_info.get_element_unsafe(Container(), nid);
-        thread_info->states.get_element_unsafe(Container(), nid) =
-          column_list[split_node.ind]->GetInitialState(first_row_id);
-
-        thread_info->default_flags.get_element_unsafe(Container(), nid) =
-          (*p_tree)[nid].DefaultLeft();
-      }
-    }
+    const uint32_t first_row_id = !is_loss_guided ? row_indices.begin :
+                                                    row_indices_ptr[row_indices.begin];
     for (size_t ii = row_indices.begin; ii < row_indices.end; ++ii) {
       const uint32_t i = !is_loss_guided ? ii : row_indices_ptr[ii];
       const uint32_t nid = node_ids_[i];
@@ -225,7 +204,7 @@ class OptPartitionBuilder {
 
       const SplitNode& split_node = split_info.get_element_unsafe(Container(), nid);
       const int32_t sc = split_node.condition;
-      uint64_t si = split_node.ind;
+      const uint64_t si = split_node.ind;
 
       if (any_cat) {
         const int32_t cmp_value = static_cast<int32_t>(columnar_data[si + i]);
@@ -236,11 +215,14 @@ class OptPartitionBuilder {
         node_ids_[i] = cmp_value <= sc ? node.LeftChild()
                                        : node.RightChild();
       } else {
-        int32_t cmp_value = column_list[si]->template GetBinIdx<BinIdxType, int32_t>
-                            (i, &(thread_info->states.get_element_unsafe(Container(), nid)));
+        size_t* state = &(thread_info->states.get_element_unsafe(Container(), nid));
+        if (*state == 0) {
+          *state = column_list[si]->GetInitialState(first_row_id);
+        }
+        int32_t cmp_value = column_list[si]->template GetBinIdx<BinIdxType, int32_t>(i, state);
 
         if (cmp_value == Column::kMissingId) {
-          node_ids_[i] = thread_info->default_flags.get_element_unsafe(Container(), nid)
+          node_ids_[i] =   node.DefaultLeft()
                          ? node.LeftChild()
                          : node.RightChild();
         } else {
@@ -259,6 +241,7 @@ class OptPartitionBuilder {
         thread_info->nodes_count.get_element_unsafe(Container(), check_node_id) += inc;
       }
     }
+
     rows[0] = rows_count;
     if (is_loss_guided) {
       rows_left[0] = rows_left_count;

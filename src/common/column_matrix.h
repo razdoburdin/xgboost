@@ -105,6 +105,7 @@ class SparseColumn: public Column {
     while ((*state) < column_size && GetRowIdx(*state) < rid) {
       ++(*state);
     }
+
     if (((*state) < column_size) && GetRowIdx(*state) == rid) {
       return static_cast<CastType>(this->GetFeatureBinIdx<BinIdxType>(*state));
     } else {

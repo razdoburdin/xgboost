@@ -41,7 +41,6 @@ TEST(OptPartitionBuilder, BasicTestWithHighDepth) {
   split_info.SetContainerType(common::ContainerType::kUnorderedMap);
   split_info[1].smalest_nodes_mask = true;
   std::unordered_map<uint32_t, uint16_t> nodes;//(1, 0);
-  opt_partition_builder.ResizeSplitNodeIfSmaller(1);
   auto pred = [&](auto ridx, auto bin_id, auto nid, auto split_cond) {
     return false;
   };
