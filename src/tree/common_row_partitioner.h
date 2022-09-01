@@ -335,7 +335,7 @@ class CommonRowPartitioner {
   }
 
   auto const &GetThreadTasks(const size_t tid) const {
-    return opt_partition_builder_.GetSlices(tid);
+    return opt_partition_builder_.tm.GetThreadInfoPtr(tid)->addr;
   }
 
   auto const &GetOptPartition() const {

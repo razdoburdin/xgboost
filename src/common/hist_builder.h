@@ -90,11 +90,14 @@ void BuildHistKernel(const std::vector<GradientPair>& gpair,
     const BinIdxType* gr_index_local = gradient_index + icol_start;
     FPType* hist_data = hists[nid].data();
 
+    // The trick with pgh_t helps the compiler to use more effective processor instructions.
+    const FPType pgh_t[] = {pgh[idx_gh], pgh[idx_gh + 1]};
     for (size_t j = 0; j < row_size; ++j) {
       const uint32_t idx_bin = two * (static_cast<uint32_t>(gr_index_local[j]) + (
                                       any_missing ? 0 : offsets[j]));
-      hist_data[idx_bin]   += pgh[idx_gh];
-      hist_data[idx_bin+1] += pgh[idx_gh+1];
+      FPType* hist_local = hist_data + idx_bin;
+      *(hist_local)     += pgh_t[0];
+      *(hist_local + 1) += pgh_t[1];
     }
   }
 }

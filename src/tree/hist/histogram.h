@@ -75,11 +75,10 @@ class HistogramBuilder {
     #pragma omp parallel num_threads(nthreads)
     {
       size_t tid = omp_get_thread_num();
+      auto thread_info = opt_partition_builder.tm.GetThreadInfoPtr(tid);
       const BinIdxType* numa = gidx.index.data<BinIdxType>();
-      const std::vector<common::Slice>& local_slices =
-        opt_partition_builder.GetSlices(tid);
-      buffer_.AllocateHistForLocalThread(
-        opt_partition_builder.GetNodes(tid), tid);
+      const std::vector<common::Slice>& local_slices = thread_info->addr;
+      buffer_.AllocateHistForLocalThread(thread_info->nodes_id, tid);
       for (const common::Slice& slice : local_slices) {
         const uint32_t* rows = slice.addr;
         // CHECK(rows != nullptr);

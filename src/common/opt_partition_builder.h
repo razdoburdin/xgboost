@@ -67,14 +67,6 @@ class OptPartitionBuilder {
     return (max_depth > 0) && (max_depth <= 16);
   }
 
-  const std::vector<Slice> &GetSlices(const uint32_t tid) const {
-    return tm.GetThreadInfoPtr(tid)->addr;
-  }
-
-  const std::vector<uint16_t> &GetNodes(const uint32_t tid) const {
-    return tm.GetThreadInfoPtr(tid)->nodes_id;
-  }
-
   const std::vector<uint16_t> &GetThreadIdsForNode(const uint32_t nid) const {
     auto node_info = tm.GetNodeInfoPtr(nid);
     const std::vector<uint16_t> & res = node_info->threads_id;
