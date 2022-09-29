@@ -269,7 +269,7 @@ void RowsWiseBuildHistKernel(const std::vector<GradientPair> &gpair,
 template <class BuildingManager>
 void ColsWiseBuildHistKernel(const std::vector<GradientPair> &gpair,
                             const RowSetCollection::Elem row_indices, const GHistIndexMatrix &gmat,
-                            GHistRow hist) {
+                            GHistRow hist, const std::vector<int>& fids) {
   constexpr bool kAnyMissing = BuildingManager::kAnyMissing;
   constexpr bool kFirstPage = BuildingManager::kFirstPage;
   using BinIdxType = typename BuildingManager::BinIdxType;
@@ -289,13 +289,12 @@ void ColsWiseBuildHistKernel(const std::vector<GradientPair> &gpair,
   };
 
   const size_t n_features = gmat.cut.Ptrs().size() - 1;
-  const size_t n_columns = n_features;
   auto hist_data = reinterpret_cast<double *>(hist.data());
   const uint32_t two{2};  // Each element from 'gpair' and 'hist' contains
                           // 2 FP values: gradient and hessian.
                           // So we need to multiply each row-index/bin-index by 2
                           // to work with gradient pairs as a singe row FP array
-  for (size_t cid = 0; cid < n_columns; ++cid) {
+  for (size_t cid : fids) {
     const uint32_t offset = kAnyMissing ? 0 : offsets[cid];
     for (size_t i = 0; i < size; ++i) {
       const size_t row_id = rid[i];
@@ -322,9 +321,9 @@ void ColsWiseBuildHistKernel(const std::vector<GradientPair> &gpair,
 template <class BuildingManager>
 void BuildHistDispatch(const std::vector<GradientPair> &gpair,
                        const RowSetCollection::Elem row_indices, const GHistIndexMatrix &gmat,
-                       GHistRow hist) {
+                       GHistRow hist, const std::vector<int>& fids) {
   if (BuildingManager::kReadByColumn) {
-    ColsWiseBuildHistKernel<BuildingManager>(gpair, row_indices, gmat, hist);
+    ColsWiseBuildHistKernel<BuildingManager>(gpair, row_indices, gmat, hist, fids);
   } else {
     const size_t nrows = row_indices.Size();
     const size_t no_prefetch_size = Prefetch::NoPrefetchSize(nrows);
@@ -351,8 +350,8 @@ void BuildHistDispatch(const std::vector<GradientPair> &gpair,
 template <bool any_missing>
 void GHistBuilder::BuildHist(const std::vector<GradientPair> &gpair,
                              const RowSetCollection::Elem row_indices,
-                             const GHistIndexMatrix &gmat,
-                             GHistRow hist, bool force_read_by_column) const {
+                             const GHistIndexMatrix &gmat, GHistRow hist,
+                             const std::vector<int>& fids, bool force_read_by_column) const {
   /* force_read_by_column is used for testing the columnwise building of histograms.
    * default force_read_by_column = false
    */
@@ -366,18 +365,21 @@ void GHistBuilder::BuildHist(const std::vector<GradientPair> &gpair,
     {first_page, read_by_column || force_read_by_column, bin_type_size},
     [&](auto t) {
       using BuildingManager = decltype(t);
-      BuildHistDispatch<BuildingManager>(gpair, row_indices, gmat, hist);
+      BuildHistDispatch<BuildingManager>(gpair, row_indices, gmat, hist, fids);
     });
 }
 
 template void GHistBuilder::BuildHist<true>(const std::vector<GradientPair> &gpair,
                                             const RowSetCollection::Elem row_indices,
                                             const GHistIndexMatrix &gmat, GHistRow hist,
+                                            const std::vector<int>& fids,
                                             bool force_read_by_column) const;
 
 template void GHistBuilder::BuildHist<false>(const std::vector<GradientPair> &gpair,
                                              const RowSetCollection::Elem row_indices,
                                              const GHistIndexMatrix &gmat, GHistRow hist,
+                                             const std::vector<int>& fids,
                                              bool force_read_by_column) const;
+
 }  // namespace common
 }  // namespace xgboost

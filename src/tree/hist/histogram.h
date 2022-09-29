@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <limits>
 #include <vector>
+#include <memory>
 
+#include "../../common/random.h"
 #include "../../common/hist_util.h"
 #include "../../data/gradient_index.h"
 #include "expand_entry.h"
@@ -26,6 +28,8 @@ class HistogramBuilder {
   common::ParallelGHistBuilder buffer_;
   BatchParam param_;
   int32_t n_threads_{-1};
+  std::shared_ptr<common::ColumnSampler> column_sampler_;
+  std::vector<int> fids_;
   size_t n_batches_{0};
   // Whether XGBoost is running in distributed environment.
   bool is_distributed_{false};
@@ -39,10 +43,11 @@ class HistogramBuilder {
    * \param is_distributed   Mostly used for testing to allow injecting parameters instead
    *                         of using global rabit variable.
    */
-  void Reset(uint32_t total_bins, BatchParam p, int32_t n_threads, size_t n_batches,
+  void Reset(uint32_t total_bins, BatchParam p, std::shared_ptr<common::ColumnSampler> column_sampler, int32_t n_threads, size_t n_batches,
              bool is_distributed) {
     CHECK_GE(n_threads, 1);
     n_threads_ = n_threads;
+    column_sampler_ = column_sampler;
     n_batches_ = n_batches;
     param_ = p;
     hist_.Init(total_bins);
@@ -59,7 +64,7 @@ class HistogramBuilder {
                             GHistIndexMatrix const &gidx,
                             std::vector<ExpandEntry> const &nodes_for_explicit_hist_build,
                             common::RowSetCollection const &row_set_collection,
-                            const std::vector<GradientPair> &gpair_h,
+                            const std::vector<GradientPair> &gpair_h, int depth,
                             bool force_read_by_column) {
     const size_t n_nodes = nodes_for_explicit_hist_build.size();
     CHECK_GT(n_nodes, 0);
@@ -76,6 +81,18 @@ class HistogramBuilder {
       buffer_.Reset(this->n_threads_, n_nodes, space, target_hists);
     }
 
+    if (column_sampler_) {
+      const size_t n_sampled_features = column_sampler_->GetFeatureSet(depth)->Size();
+      fids_.resize(n_sampled_features);
+      for (size_t i = 0; i < n_sampled_features; ++i) {
+        fids_[i] = column_sampler_->GetFeatureSet(depth)->ConstHostVector()[i];
+      }
+    } else {
+      const size_t n_features = gidx.cut.Ptrs().size() - 1;
+      fids_.resize(n_features);
+      std::iota(fids_.begin(), fids_.end(), 0);
+    }
+
     // Parallel processing by nodes and data in each node
     common::ParallelFor2d(space, this->n_threads_, [&](size_t nid_in_set, common::Range1d r) {
       const auto tid = static_cast<unsigned>(omp_get_thread_num());
@@ -87,7 +104,7 @@ class HistogramBuilder {
                                                     elem.begin + end_of_row_set, nid);
       auto hist = buffer_.GetInitializedHist(tid, nid_in_set);
       if (rid_set.Size() != 0) {
-        builder_.template BuildHist<any_missing>(gpair_h, rid_set, gidx, hist,
+        builder_.template BuildHist<any_missing>(gpair_h, rid_set, gidx, hist, fids_,
                                                  force_read_by_column);
       }
     });
@@ -114,7 +131,7 @@ class HistogramBuilder {
                  RegTree *p_tree, common::RowSetCollection const &row_set_collection,
                  std::vector<ExpandEntry> const &nodes_for_explicit_hist_build,
                  std::vector<ExpandEntry> const &nodes_for_subtraction_trick,
-                 std::vector<GradientPair> const &gpair,
+                 std::vector<GradientPair> const &gpair, int depth,
                  bool force_read_by_column = false) {
     int starting_index = std::numeric_limits<int>::max();
     int sync_count = 0;
@@ -126,12 +143,12 @@ class HistogramBuilder {
     if (gidx.IsDense()) {
       this->BuildLocalHistograms<false>(page_id, space, gidx,
                                         nodes_for_explicit_hist_build,
-                                        row_set_collection, gpair,
+                                        row_set_collection, gpair, depth,
                                         force_read_by_column);
     } else {
       this->BuildLocalHistograms<true>(page_id, space, gidx,
                                        nodes_for_explicit_hist_build,
-                                       row_set_collection, gpair,
+                                       row_set_collection, gpair, depth,
                                        force_read_by_column);
     }
 
@@ -153,7 +170,7 @@ class HistogramBuilder {
                  common::RowSetCollection const &row_set_collection,
                  std::vector<ExpandEntry> const &nodes_for_explicit_hist_build,
                  std::vector<ExpandEntry> const &nodes_for_subtraction_trick,
-                 std::vector<GradientPair> const &gpair,
+                 std::vector<GradientPair> const &gpair, int depth,
                  bool force_read_by_column = false) {
     const size_t n_nodes = nodes_for_explicit_hist_build.size();
     // create space of size (# rows in each node)
@@ -166,7 +183,7 @@ class HistogramBuilder {
         256);
     this->BuildHist(page_id, space, gidx, p_tree, row_set_collection,
                     nodes_for_explicit_hist_build, nodes_for_subtraction_trick,
-                    gpair, force_read_by_column);
+                    gpair, depth, force_read_by_column);
   }
 
   void SyncHistogramDistributed(
