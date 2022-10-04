@@ -142,37 +142,50 @@ constexpr size_t Prefetch::kNoPrefetchSize;
 struct RuntimeFlags {
   const bool first_page;
   const bool read_by_column;
+  const bool column_sampling;
   const BinTypeSize bin_type_size;
 };
 
 template <bool _any_missing,
           bool _first_page = false,
           bool _read_by_column = false,
+          bool _column_sampling = false,
           typename _BinIdxType = uint8_t>
 class GHistBuildingManager {
  public:
   constexpr static bool kAnyMissing = _any_missing;
   constexpr static bool kFirstPage = _first_page;
   constexpr static bool kReadByColumn = _read_by_column;
+  constexpr static bool kColumnSampling = _column_sampling;
   using BinIdxType = _BinIdxType;
 
  private:
   template<bool new_first_page>
   struct set_first_page {
-    using type = GHistBuildingManager<kAnyMissing, new_first_page, kReadByColumn, BinIdxType>;
+    using type = GHistBuildingManager<kAnyMissing, new_first_page, kReadByColumn,
+                                      kColumnSampling, BinIdxType>;
   };
 
   template<bool new_read_by_column>
   struct set_read_by_column {
-    using type = GHistBuildingManager<kAnyMissing, kFirstPage, new_read_by_column, BinIdxType>;
+    using type = GHistBuildingManager<kAnyMissing, kFirstPage, new_read_by_column,
+                                      kColumnSampling, BinIdxType>;
+  };
+
+  template<bool new_column_sampling>
+  struct set_column_sampling {
+    using type = GHistBuildingManager<kAnyMissing, kFirstPage, kReadByColumn,
+                                      new_column_sampling, BinIdxType>;
   };
 
   template<typename new_bin_idx_type>
   struct set_bin_idx_type {
-    using type = GHistBuildingManager<kAnyMissing, kFirstPage, kReadByColumn, new_bin_idx_type>;
+    using type = GHistBuildingManager<kAnyMissing, kFirstPage, kReadByColumn,
+                                      kColumnSampling, new_bin_idx_type>;
   };
 
-  using type = GHistBuildingManager<kAnyMissing, kFirstPage, kReadByColumn, BinIdxType>;
+  using type = GHistBuildingManager<kAnyMissing, kFirstPage, kReadByColumn,
+                                    kColumnSampling, BinIdxType>;
 
  public:
   /* Entry point to dispatcher
@@ -186,6 +199,8 @@ class GHistBuildingManager {
       set_first_page<true>::type::DispatchAndExecute(flags, std::forward<Fn>(fn));
     } else if (flags.read_by_column != kReadByColumn) {
       set_read_by_column<true>::type::DispatchAndExecute(flags, std::forward<Fn>(fn));
+    } else if (flags.column_sampling != kColumnSampling) {
+      set_column_sampling<true>::type::DispatchAndExecute(flags, std::forward<Fn>(fn));
     } else if (flags.bin_type_size != sizeof(BinIdxType)) {
       DispatchBinType(flags.bin_type_size, [&](auto t) {
         using NewBinIdxType = decltype(t);
@@ -272,6 +287,7 @@ void ColsWiseBuildHistKernel(const std::vector<GradientPair> &gpair,
                             GHistRow hist, const std::vector<int>& fids) {
   constexpr bool kAnyMissing = BuildingManager::kAnyMissing;
   constexpr bool kFirstPage = BuildingManager::kFirstPage;
+  constexpr bool kColumnSampling = BuildingManager::kColumnSampling;
   using BinIdxType = typename BuildingManager::BinIdxType;
   const size_t size = row_indices.Size();
   const size_t *rid = row_indices.begin;
@@ -294,7 +310,9 @@ void ColsWiseBuildHistKernel(const std::vector<GradientPair> &gpair,
                           // 2 FP values: gradient and hessian.
                           // So we need to multiply each row-index/bin-index by 2
                           // to work with gradient pairs as a singe row FP array
-  for (size_t cid : fids) {
+  const size_t n_columns = kColumnSampling ? fids.size() : n_features;
+  for (size_t j = 0; j < n_columns; ++j) {
+    size_t cid = kColumnSampling ? fids[j] : j;
     const uint32_t offset = kAnyMissing ? 0 : offsets[cid];
     for (size_t i = 0; i < size; ++i) {
       const size_t row_id = rid[i];
@@ -357,12 +375,18 @@ void GHistBuilder::BuildHist(const std::vector<GradientPair> &gpair,
    */
   constexpr double kAdhocL2Size = 1024 * 1024 * 0.8;
   const bool hist_fit_to_l2 = kAdhocL2Size > 2*sizeof(float)*gmat.cut.Ptrs().back();
+
+  // Switch to read_by_column if fids.size() < n_features / kAdhocFidsRatio
+  constexpr int kAdhocFidsRatio = 1;
+  const size_t n_features = gmat.cut.Ptrs().size() - 1;
+
   bool first_page = gmat.base_rowid == 0;
-  bool read_by_column = !hist_fit_to_l2 && !any_missing;
+  bool column_sampling = fids.size() > 0;
+  bool read_by_column = (!hist_fit_to_l2 && !any_missing) || column_sampling;
   auto bin_type_size = gmat.index.GetBinTypeSize();
 
   GHistBuildingManager<any_missing>::DispatchAndExecute(
-    {first_page, read_by_column || force_read_by_column, bin_type_size},
+    {first_page, read_by_column || force_read_by_column, column_sampling, bin_type_size},
     [&](auto t) {
       using BuildingManager = decltype(t);
       BuildHistDispatch<BuildingManager>(gpair, row_indices, gmat, hist, fids);

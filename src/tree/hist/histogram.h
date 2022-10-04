@@ -27,6 +27,7 @@ class HistogramBuilder {
   common::GHistBuilder builder_;
   common::ParallelGHistBuilder buffer_;
   BatchParam param_;
+  TrainParam train_param_;
   int32_t n_threads_{-1};
   std::shared_ptr<common::ColumnSampler> column_sampler_;
   std::vector<int> fids_;
@@ -43,13 +44,15 @@ class HistogramBuilder {
    * \param is_distributed   Mostly used for testing to allow injecting parameters instead
    *                         of using global rabit variable.
    */
-  void Reset(uint32_t total_bins, BatchParam p, std::shared_ptr<common::ColumnSampler> column_sampler, int32_t n_threads, size_t n_batches,
-             bool is_distributed) {
+  void Reset(uint32_t total_bins, BatchParam p, const TrainParam& train_param,
+             std::shared_ptr<common::ColumnSampler> column_sampler, int32_t n_threads,
+             size_t n_batches, bool is_distributed) {
     CHECK_GE(n_threads, 1);
     n_threads_ = n_threads;
     column_sampler_ = column_sampler;
     n_batches_ = n_batches;
     param_ = p;
+    train_param_ = train_param;
     hist_.Init(total_bins);
     hist_local_worker_.Init(total_bins);
     buffer_.Init(total_bins);
@@ -81,16 +84,18 @@ class HistogramBuilder {
       buffer_.Reset(this->n_threads_, n_nodes, space, target_hists);
     }
 
-    if (column_sampler_) {
+    constexpr float kColsampleTh = 0.1;
+    bool column_sampling = (column_sampler_ != nullptr) &&
+                           (train_param_.colsample_bytree < kColsampleTh ||
+                            train_param_.colsample_bylevel < kColsampleTh);
+    if (column_sampling) {
       const size_t n_sampled_features = column_sampler_->GetFeatureSet(depth)->Size();
       fids_.resize(n_sampled_features);
       for (size_t i = 0; i < n_sampled_features; ++i) {
         fids_[i] = column_sampler_->GetFeatureSet(depth)->ConstHostVector()[i];
       }
     } else {
-      const size_t n_features = gidx.cut.Ptrs().size() - 1;
-      fids_.resize(n_features);
-      std::iota(fids_.begin(), fids_.end(), 0);
+      fids_.resize(0);
     }
 
     // Parallel processing by nodes and data in each node

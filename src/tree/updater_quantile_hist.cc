@@ -320,8 +320,8 @@ void QuantileHistMaker::Builder::InitData(DMatrix *fmat, const RegTree &tree,
       partitioner_.emplace_back(page.Size(), page.base_rowid, this->ctx_->Threads());
       ++page_id;
     }
-    histogram_builder_->Reset(n_total_bins, HistBatch(param_), column_sampler_, ctx_->Threads(), page_id,
-                              rabit::IsDistributed());
+    histogram_builder_->Reset(n_total_bins, HistBatch(param_), param_, column_sampler_,
+                              ctx_->Threads(), page_id, rabit::IsDistributed());
 
     if (param_.subsample < 1.0f) {
       CHECK_EQ(param_.sampling_method, TrainParam::kUniform)
