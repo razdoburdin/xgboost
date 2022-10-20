@@ -48,7 +48,7 @@ class Column {
   /* returns number of elements in column */
   size_t Size() const { return index_.size(); }
 
- private:
+ protected:
   /* bin indexes in range [0, max_bins - 1] */
   common::Span<const BinIdxType> index_;
   /* bin index offset for specific feature */
@@ -99,6 +99,30 @@ class SparseColumnIter : public Column<BinIdxT> {
       return this->kMissingId;
     }
   }
+
+  template <typename BinIdxType>
+  BinIdxType GetFeatureBinIdx(size_t idx) const {
+    const BinIdxType * ptr = reinterpret_cast<const BinIdxType *>(Column<BinIdxT>::index_.data());
+    return ptr[idx];
+  }
+
+  // For opt_partition_builder idx should be external for correct parallel processing
+  template <typename BinIdxType>
+  bst_bin_t GetBinIdx(size_t rid, size_t* idx) const {
+    const size_t column_size = this->Size();
+    if (!((*idx) < column_size)) {
+      return this->kMissingId;
+    }
+    while ((*idx) < column_size && GetRowIdx(*idx) < rid) {
+      ++(*idx);
+    }
+
+    if (((*idx) < column_size) && GetRowIdx(*idx) == rid) {
+      return this->GetFeatureBinIdx<BinIdxType>(*idx);
+    } else {
+      return this->kMissingId;
+    }
+  }
 };
 
 template <typename BinIdxT, bool any_missing>
@@ -127,6 +151,19 @@ class DenseColumnIter : public Column<BinIdxT> {
     } else {
       return this->GetGlobalBinIdx(ridx);
     }
+  }
+
+  template <typename BinIdxType>
+  BinIdxType GetFeatureBinIdx(size_t idx) const {
+    const BinIdxType * ptr = reinterpret_cast<const BinIdxType *>(Column<BinIdxT>::index_.data());
+    return ptr[idx];
+  }
+
+  template <typename BinIdxType>
+  bst_bin_t GetBinIdx(size_t idx, size_t* state) const {
+    return (any_missing && IsMissing(idx))
+           ? this->kMissingId
+           : this->GetFeatureBinIdx<BinIdxType>(idx);
   }
 };
 
@@ -197,6 +234,17 @@ class ColumnMatrix {
     } else {
       SetIndexMixedColumns(gmat);
     }
+  }
+
+  // get index data ptr
+  template <typename Data>
+  const Data* GetIndexData() const {
+    return reinterpret_cast<const Data*>(index_.data());
+  }
+
+  // get index data ptr
+  const uint8_t* GetIndexData() const {
+    return index_.data();
   }
 
   bool IsInitialized() const { return !type_.empty(); }
@@ -335,8 +383,16 @@ class ColumnMatrix {
     });
   }
 
+  const size_t* GetRowId() const {
+    return row_ind_.data();
+  }
+
   BinTypeSize GetTypeSize() const { return bins_type_size_; }
   auto GetColumnType(bst_feature_t fidx) const { return type_[fidx]; }
+
+  const std::vector<ByteType>* GetMissing() const {
+    return &missing_flags_;
+  }
 
   // And this returns part of state
   bool AnyMissing() const { return any_missing_; }

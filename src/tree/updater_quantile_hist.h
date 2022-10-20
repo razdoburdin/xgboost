@@ -32,7 +32,6 @@
 #include "../common/timer.h"
 #include "../common/hist_util.h"
 #include "../common/row_set.h"
-#include "../common/partition_builder.h"
 #include "../common/column_matrix.h"
 
 namespace xgboost {
