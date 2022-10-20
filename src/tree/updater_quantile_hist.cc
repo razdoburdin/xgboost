@@ -225,6 +225,59 @@ void QuantileHistMaker::Builder::ExpandTree(DMatrix *p_fmat, RegTree *p_tree,
   monitor_->Stop(__func__);
 }
 
+void QuantileHistMaker::Builder::SplitSiblings(
+    const std::vector<CPUExpandEntry> &nodes_for_apply_split,
+    std::vector<CPUExpandEntry> *nodes_to_evaluate, RegTree *p_tree) {
+  monitor_->Start("SplitSiblings");
+  CommonRowPartitioner &partitioner = this->partitioner_.front();
+
+  for (auto const& entry : nodes_for_apply_split) {
+    int nid = entry.nid;
+
+    const int cleft = (*p_tree)[nid].LeftChild();
+    const int cright = (*p_tree)[nid].RightChild();
+    const CPUExpandEntry left_node = CPUExpandEntry(cleft, p_tree->GetDepth(cleft), 0.0);
+    const CPUExpandEntry right_node = CPUExpandEntry(cright, p_tree->GetDepth(cright), 0.0);
+    nodes_to_evaluate->push_back(left_node);
+    nodes_to_evaluate->push_back(right_node);
+    if (entry.split.left_sum.GetHess() <= entry.split.right_sum.GetHess()) {
+      nodes_for_explicit_hist_build_.push_back(left_node);
+      nodes_for_subtraction_trick_.push_back(right_node);
+    } else {
+      nodes_for_explicit_hist_build_.push_back(right_node);
+      nodes_for_subtraction_trick_.push_back(left_node);
+    }
+  }
+  monitor_->Stop("SplitSiblings");
+}
+
+void QuantileHistMaker::Builder::AddSplitsToTree(
+          const std::vector<CPUExpandEntry>& expand,
+          Driver<CPUExpandEntry>* driver,
+          RegTree *p_tree,
+          int *num_leaves,
+          std::vector<CPUExpandEntry>* nodes_for_apply_split,
+          size_t depth, bool * is_left_small) {
+  const bool is_loss_guided = static_cast<TrainParam::TreeGrowPolicy>(param_.grow_policy)
+                              != TrainParam::kDepthWise;
+  std::vector<uint16_t> complete_node_ids;
+  for (auto const& entry : expand) {
+      nodes_for_apply_split->push_back(entry);
+      evaluator_->ApplyTreeSplit(entry, p_tree);
+      complete_node_ids.push_back((*p_tree)[entry.nid].LeftChild());
+      complete_node_ids.push_back((*p_tree)[entry.nid].RightChild());
+      *is_left_small = entry.split.left_sum.GetHess() <= entry.split.right_sum.GetHess();
+      if (entry.split.left_sum.GetHess() <= entry.split.right_sum.GetHess() || is_loss_guided) {
+        split_info_[(*p_tree)[entry.nid].LeftChild()].smalest_nodes_mask = true;
+        split_info_[(*p_tree)[entry.nid].RightChild()].smalest_nodes_mask = false;
+      } else {
+        split_info_[(*p_tree)[entry.nid].RightChild()].smalest_nodes_mask = true;
+        split_info_[(*p_tree)[entry.nid].LeftChild()].smalest_nodes_mask = false;
+      }
+  }
+  child_node_ids_ = complete_node_ids;
+}
+
 void QuantileHistMaker::Builder::UpdateTree(HostDeviceVector<GradientPair> *gpair, DMatrix *p_fmat,
                                             RegTree *p_tree,
                                             HostDeviceVector<bst_node_t> *p_out_position) {

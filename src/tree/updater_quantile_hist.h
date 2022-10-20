@@ -156,6 +156,21 @@ class QuantileHistMaker: public TreeUpdater {
     void ExpandTree(DMatrix* p_fmat, RegTree* p_tree, const std::vector<GradientPair>& gpair_h,
                     HostDeviceVector<bst_node_t>* p_out_position);
 
+    // Split nodes to 2 sets depending on amount of rows in each node
+    // Histograms for small nodes will be built explicitly
+    // Histograms for big nodes will be built by 'Subtraction Trick'
+    void SplitSiblings(const std::vector<CPUExpandEntry>& nodes,
+                       std::vector<CPUExpandEntry>* nodes_to_evaluate,
+                       RegTree *p_tree);
+
+    void AddSplitsToTree(const std::vector<CPUExpandEntry>& expand,
+                         Driver<CPUExpandEntry>* driver,
+                         RegTree *p_tree,
+                         int *num_leaves,
+                         std::vector<CPUExpandEntry>* nodes_for_apply_split,
+                         size_t depth,
+                         bool * is_left_small);
+
    private:
     const size_t n_trees_;
     const TrainParam& param_;
@@ -177,6 +192,15 @@ class QuantileHistMaker: public TreeUpdater {
     Context const* ctx_;
 
     std::unique_ptr<common::Monitor> monitor_;
+
+    common::FlexibleContainer<common::SplitNode> split_info_;
+    std::vector<uint16_t> child_node_ids_;
+
+    // key is the node id which should be calculated by Subtraction Trick, value is the node which
+    // provides the evidence for subtraction
+    std::vector<CPUExpandEntry> nodes_for_subtraction_trick_;
+    // list of nodes whose histograms would be built explicitly.
+    std::vector<CPUExpandEntry> nodes_for_explicit_hist_build_;
   };
 
  protected:
