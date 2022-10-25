@@ -7,6 +7,7 @@
 #ifndef XGBOOST_TREE_UPDATER_QUANTILE_HIST_H_
 #define XGBOOST_TREE_UPDATER_QUANTILE_HIST_H_
 
+#include <rabit/rabit.h>
 #include <xgboost/tree_updater.h>
 
 #include <algorithm>
@@ -137,23 +138,47 @@ class QuantileHistMaker: public TreeUpdater {
 
    private:
     // initialize temp data structure
-    void InitData(DMatrix* fmat, const RegTree& tree, std::vector<GradientPair>* gpair);
+    template <typename BinIdxType>
+    void InitData(const GHistIndexMatrix& gmat,
+                  const common::ColumnMatrix& column_matrix,
+                  const DMatrix& fmat,
+                  const RegTree& tree,
+                  std::vector<GradientPair>* gpair);
 
     size_t GetNumberOfTrees();
 
     void InitSampling(const DMatrix& fmat, std::vector<GradientPair>* gpair);
 
-    CPUExpandEntry InitRoot(DMatrix* p_fmat, RegTree* p_tree,
-                            const std::vector<GradientPair>& gpair_h);
+    template <bool any_missing>
+    void InitRoot(const GHistIndexMatrix &gmat,
+                  DMatrix* p_fmat,
+                  RegTree *p_tree,
+                  const std::vector<GradientPair> &gpair_h,
+                  int *num_leaves, std::vector<CPUExpandEntry> *expand);
 
-    void BuildHistogram(DMatrix* p_fmat, RegTree* p_tree,
-                        std::vector<CPUExpandEntry> const& valid_candidates,
-                        std::vector<GradientPair> const& gpair, int depth);
+    template <bool any_missing>
+    void BuildHist(const GHistIndexMatrix &gmat,
+                   DMatrix* p_fmat,
+                   RegTree *p_tree,
+                   const std::vector<GradientPair> &gpair_h);
 
-    void LeafPartition(RegTree const& tree, common::Span<GradientPair const> gpair,
+    void LeafPartition(RegTree const& tree,
                        std::vector<bst_node_t>* p_out_position);
 
-    void ExpandTree(DMatrix* p_fmat, RegTree* p_tree, const std::vector<GradientPair>& gpair_h,
+    template <typename BinIdxType>
+    void ExpandTree(const GHistIndexMatrix& gmat,
+                    const common::ColumnMatrix& column_matrix,
+                    DMatrix* p_fmat,
+                    RegTree* p_tree,
+                    std::vector<GradientPair> *gpair_ptr,
+                    HostDeviceVector<bst_node_t>* p_out_position);
+
+    template <typename BinIdxType, bool any_missing>
+    void ExpandTree(const GHistIndexMatrix& gmat,
+                    const common::ColumnMatrix& column_matrix,
+                    DMatrix* p_fmat,
+                    RegTree* p_tree,
+                    const std::vector<GradientPair>& gpair_h,
                     HostDeviceVector<bst_node_t>* p_out_position);
 
     // Split nodes to 2 sets depending on amount of rows in each node
@@ -193,14 +218,21 @@ class QuantileHistMaker: public TreeUpdater {
 
     std::unique_ptr<common::Monitor> monitor_;
 
+    // the internal row sets
+    common::RowSetCollection row_set_collection_;
+    std::vector<uint16_t> node_ids_;
     common::FlexibleContainer<common::SplitNode> split_info_;
     std::vector<uint16_t> child_node_ids_;
-
+    common::HistogramCuts feature_values_;
+ 
     // key is the node id which should be calculated by Subtraction Trick, value is the node which
     // provides the evidence for subtraction
     std::vector<CPUExpandEntry> nodes_for_subtraction_trick_;
     // list of nodes whose histograms would be built explicitly.
     std::vector<CPUExpandEntry> nodes_for_explicit_hist_build_;
+
+    // common::Monitor builder_monitor_;
+    bool partition_is_initiated_{false};
   };
 
  protected:

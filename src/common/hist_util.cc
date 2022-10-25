@@ -24,6 +24,40 @@
 namespace xgboost {
 namespace common {
 
+void ClearHist(double* dest_hist,
+                size_t begin, size_t end) {
+  for (size_t bin_id = begin; bin_id < end; ++bin_id) {
+    dest_hist[bin_id]  = 0;
+  }
+}
+
+void ReduceHist(double* dest_hist,
+                const std::vector<std::vector<uint16_t>>& local_threads_mapping,
+                std::vector<std::vector<std::vector<double>>>* histograms,
+                const size_t node_id,
+                const std::vector<uint16_t>& threads_id_for_node,
+                size_t begin, size_t end) {
+  if (threads_id_for_node.size() > 0) {
+    size_t tid = 0;
+    const size_t thread_id = threads_id_for_node[tid];
+    const size_t mapped_nod_id = local_threads_mapping[thread_id][node_id];
+    double* hist =  (*histograms)[thread_id][mapped_nod_id].data();
+    for (size_t bin_id = begin; bin_id < end; ++bin_id) {
+      dest_hist[bin_id] = hist[bin_id];
+      hist[bin_id] = 0;
+    }
+  }
+  for (size_t tid = 1; tid < threads_id_for_node.size(); ++tid) {
+    const size_t thread_id = threads_id_for_node[tid];
+    const size_t mapped_nod_id = local_threads_mapping[thread_id][node_id];
+    double* hist =  (*histograms)[thread_id][mapped_nod_id].data();
+    for (size_t bin_id = begin; bin_id < end; ++bin_id) {
+      dest_hist[bin_id] += hist[bin_id];
+      hist[bin_id] = 0;
+    }
+  }
+}
+
 HistogramCuts::HistogramCuts() {
   cut_ptrs_.HostVector().emplace_back(0);
 }
@@ -385,6 +419,137 @@ void GHistBuilder::BuildHist(const std::vector<GradientPair> &gpair,
     });
 }
 
+template<typename FPType, bool do_prefetch,
+         typename BinIdxType, bool is_root,
+         bool any_missing>
+void BuildHistKernel(const std::vector<GradientPair>& gpair,
+                     const uint32_t* rows,
+                     const size_t row_begin,
+                     const size_t row_end,
+                     const GHistIndexMatrix& gmat,
+                     uint16_t* nodes_ids,
+                     std::vector<std::vector<FPType>>* p_hists,
+                     const uint16_t* mapping_ids, uint32_t base_rowid = 0) {
+  const float* pgh = reinterpret_cast<const float*>(gpair.data());
+  const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
+  const size_t* row_ptr =  gmat.row_ptr.data();
+  const uint32_t* offsets = gmat.index.Offset();
+  const size_t n_features = row_ptr[1] - row_ptr[0];
+  const uint32_t two {2};  // Each element from 'gpair' and 'hist' contains
+                           // 2 FP values: gradient and hessian.
+                           // So we need to multiply each row-index/bin-index by 2
+                           // to work with gradient pairs as a singe row FP array
+  std::vector<std::vector<FPType>>& hists = *p_hists;
+  for (size_t i = row_begin; i < row_end; ++i) {
+    const size_t ri = is_root ? i : rows[i];
+    const size_t icol_start = any_missing ? row_ptr[ri] : ri * n_features;
+    const size_t icol_end =  any_missing ? row_ptr[ri+1] : icol_start + n_features;
+    const size_t row_size = icol_end - icol_start;
+    const size_t idx_gh = two * (ri + base_rowid);
+    const uint32_t nid = is_root ? 0 : mapping_ids[nodes_ids[ri]];
+    if (do_prefetch) {
+      const size_t icol_start_prefetch = any_missing ? row_ptr[rows[i+Prefetch::kPrefetchOffset]] :
+                                       rows[i + Prefetch::kPrefetchOffset] * n_features;
+      const size_t icol_end_prefetch = any_missing ?  row_ptr[rows[i+Prefetch::kPrefetchOffset]+1] :
+                                      icol_start_prefetch + n_features;
+
+      PREFETCH_READ_T0(pgh + two * rows[i + Prefetch::kPrefetchOffset]);
+      for (size_t j = icol_start_prefetch; j < icol_end_prefetch;
+        j+=Prefetch::GetPrefetchStep<uint32_t>()) {
+        PREFETCH_READ_T0(gradient_index + j);
+      }
+    } else if (is_root) {
+      nodes_ids[ri] = 0;
+    }
+
+    const BinIdxType* gr_index_local = gradient_index + icol_start;
+    FPType* hist_data = hists[nid].data();
+
+    // The trick with pgh_t helps the compiler to use more effective processor instructions.
+    const FPType pgh_t[] = {pgh[idx_gh], pgh[idx_gh + 1]};
+    for (size_t j = 0; j < row_size; ++j) {
+      const uint32_t idx_bin = two * (static_cast<uint32_t>(gr_index_local[j]) + (
+                                      any_missing ? 0 : offsets[j]));
+      FPType* hist_local = hist_data + idx_bin;
+      *(hist_local)     += pgh_t[0];
+      *(hist_local + 1) += pgh_t[1];
+    }
+  }
+}
+
+template <bool any_missing, bool is_root>
+void GHistBuilder::BuildHist(const std::vector<GradientPair>& gpair,
+                             const uint32_t* rows,
+                             const size_t row_begin,
+                             const size_t row_end,
+                             const GHistIndexMatrix& gmat,
+                             uint16_t* nodes_ids,
+                             std::vector<std::vector<double>>* p_hists,
+                             const uint16_t* mapping_ids,
+                             uint32_t base_rowid) const {
+  const size_t nrows = row_end - row_begin;
+  const size_t no_prefetch_size = Prefetch::NoPrefetchSize(nrows);
+  if (is_root) {
+    // contiguous memory access, built-in HW prefetching is enough
+    DispatchBinType(gmat.index.GetBinTypeSize(), [&](auto t) {
+      using BinIdxType = decltype(t);
+      BuildHistKernel<double, false, BinIdxType, is_root, any_missing>(
+        gpair, rows, row_begin, row_end, gmat, nodes_ids, p_hists,
+        mapping_ids, base_rowid);
+      });
+  } else {
+    DispatchBinType(gmat.index.GetBinTypeSize(), [&](auto t) {
+      using BinIdxType = decltype(t);
+      BuildHistKernel<double, true, BinIdxType, is_root, any_missing>(
+        gpair, rows, row_begin, row_end - no_prefetch_size,
+        gmat, nodes_ids, p_hists, mapping_ids, base_rowid);
+      BuildHistKernel<double, false, BinIdxType, is_root, any_missing>(
+        gpair, rows,  row_end - no_prefetch_size, row_end,
+        gmat, nodes_ids, p_hists, mapping_ids, base_rowid);
+    });
+  }
+}
+
+template void GHistBuilder::BuildHist<true, true>(const std::vector<GradientPair>& gpair,
+                                                  const uint32_t* rows,
+                                                  const size_t row_begin,
+                                                  const size_t row_end,
+                                                  const GHistIndexMatrix& gmat,
+                                                  uint16_t* nodes_ids,
+                                                  std::vector<std::vector<double>>* p_hists,
+                                                  const uint16_t* mapping_ids,
+                                                  uint32_t base_rowid = 0) const;
+
+template void GHistBuilder::BuildHist<true, false>(const std::vector<GradientPair>& gpair,
+                                                   const uint32_t* rows,
+                                                   const size_t row_begin,
+                                                   const size_t row_end,
+                                                   const GHistIndexMatrix& gmat,
+                                                   uint16_t* nodes_ids,
+                                                   std::vector<std::vector<double>>* p_hists,
+                                                   const uint16_t* mapping_ids,
+                                                   uint32_t base_rowid = 0) const;
+
+template void GHistBuilder::BuildHist<false, true>(const std::vector<GradientPair>& gpair,
+                                                   const uint32_t* rows,
+                                                   const size_t row_begin,
+                                                   const size_t row_end,
+                                                   const GHistIndexMatrix& gmat,
+                                                   uint16_t* nodes_ids,
+                                                   std::vector<std::vector<double>>* p_hists,
+                                                   const uint16_t* mapping_ids,
+                                                   uint32_t base_rowid = 0) const;
+
+template void GHistBuilder::BuildHist<false, false>(const std::vector<GradientPair>& gpair,
+                                                    const uint32_t* rows,
+                                                    const size_t row_begin,
+                                                    const size_t row_end,
+                                                    const GHistIndexMatrix& gmat,
+                                                    uint16_t* nodes_ids,
+                                                    std::vector<std::vector<double>>* p_hists,
+                                                    const uint16_t* mapping_ids,
+                                                    uint32_t base_rowid = 0) const;
+
 template void GHistBuilder::BuildHist<true>(const std::vector<GradientPair> &gpair,
                                             const RowSetCollection::Elem row_indices,
                                             const GHistIndexMatrix &gmat, GHistRow hist,
@@ -396,5 +561,6 @@ template void GHistBuilder::BuildHist<false>(const std::vector<GradientPair> &gp
                                              const GHistIndexMatrix &gmat, GHistRow hist,
                                              const std::vector<int>& fids,
                                              bool force_read_by_column) const;
+
 }  // namespace common
 }  // namespace xgboost

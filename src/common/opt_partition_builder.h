@@ -215,13 +215,13 @@ class OptPartitionBuilder {
           if (*state == 0) {
             *state = column.GetInitialState(first_row_id);
           }
-          cmp_value = column.template GetBinIdx<BinIdxType, int32_t>(i, state);
+          cmp_value = column.template GetBinIdx<BinIdxType>(i, state);
         } else {
           auto column = column_matrix.SparseColumn<BinIdxType>(si, row_indices.begin - base_rowid);
           if (*state == 0) {
             *state = column.GetInitialState(first_row_id);
           }
-          cmp_value = column.template GetBinIdx<BinIdxType, int32_t>(i, state);
+          cmp_value = column.template GetBinIdx<BinIdxType>(i, state);
         }
 
         if (cmp_value == Column<BinIdxType>::kMissingId) {

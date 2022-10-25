@@ -9,7 +9,7 @@
 
 #include "../common/random.h"
 #include "../data/gradient_index.h"
-#include "common_row_partitioner.h"
+#include "updater_approx.h"
 #include "constraints.h"
 #include "driver.h"
 #include "hist/evaluate_splits.h"
@@ -41,11 +41,11 @@ class GloablApproxBuilder {
   TrainParam param_;
   std::shared_ptr<common::ColumnSampler> col_sampler_;
   HistEvaluator<CPUExpandEntry> evaluator_;
-  HistogramBuilder<CPUExpandEntry> histogram_builder_;
+  HistogramBuilderForApprox<CPUExpandEntry> histogram_builder_;
   Context const *ctx_;
   ObjInfo const task_;
 
-  std::vector<CommonRowPartitioner> partitioner_;
+  std::vector<ApproxRowPartitioner> partitioner_;
   // Pointer to last updated tree, used for update prediction cache.
   RegTree *p_last_tree_{nullptr};
   common::Monitor *monitor_;
@@ -68,7 +68,7 @@ class GloablApproxBuilder {
       } else {
         CHECK_EQ(n_total_bins, page.cut.TotalBins());
       }
-      partitioner_.emplace_back(this->ctx_, page.Size(), page.base_rowid);
+      partitioner_.emplace_back(page.Size(), page.base_rowid);
       n_batches_++;
     }
 

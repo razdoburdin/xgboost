@@ -32,12 +32,12 @@ enum ColumnType : uint8_t { kDenseColumn, kSparseColumn };
     bin id is stored as index[i] + index_base.
     Different types of column index for each column allow
     to reduce the memory usage. */
-template <typename BinIdxType>
+template <typename BinIdxT>
 class Column {
  public:
   static constexpr bst_bin_t kMissingId = -1;
 
-  Column(common::Span<const BinIdxType> index, bst_bin_t least_bin_idx)
+  Column(common::Span<const BinIdxT> index, bst_bin_t least_bin_idx)
       : index_(index), index_base_(least_bin_idx) {}
   virtual ~Column() = default;
 
@@ -49,8 +49,14 @@ class Column {
   size_t Size() const { return index_.size(); }
 
  protected:
+  template <typename BinIdxType>
+  BinIdxType GetFeatureBinIdx(size_t idx) const {
+    const BinIdxType * ptr = reinterpret_cast<const BinIdxType *>(Column<BinIdxT>::index_.data());
+    return ptr[idx];
+  }
+
   /* bin indexes in range [0, max_bins - 1] */
-  common::Span<const BinIdxType> index_;
+  common::Span<const BinIdxT> index_;
   /* bin index offset for specific feature */
   bst_bin_t const index_base_;
 };
@@ -68,18 +74,19 @@ class SparseColumnIter : public Column<BinIdxT> {
  public:
   SparseColumnIter(common::Span<const BinIdxT> index, bst_bin_t least_bin_idx,
                    common::Span<const size_t> row_ind, bst_row_t first_row_idx)
-      : Base{index, least_bin_idx}, row_ind_(row_ind) {
-    // first_row_id is the first row in the leaf partition
+      : Base{index, least_bin_idx}, row_ind_(row_ind), idx_(GetInitialState(first_row_idx)) {}
+
+  SparseColumnIter(SparseColumnIter const&) = delete;
+  SparseColumnIter(SparseColumnIter&&) = default;
+
+  size_t GetInitialState(const size_t first_row_idx) const {
     const size_t* row_data = RowIndices();
     const size_t column_size = this->Size();
     // search first nonzero row with index >= rid_span.front()
     // note that the input row partition is always sorted.
     const size_t* p = std::lower_bound(row_data, row_data + column_size, first_row_idx);
-    // column_size if all missing
-    idx_ = p - row_data;
+    return p - row_data;
   }
-  SparseColumnIter(SparseColumnIter const&) = delete;
-  SparseColumnIter(SparseColumnIter&&) = default;
 
   size_t GetRowIdx(size_t idx) const { return RowIndices()[idx]; }
   bst_bin_t operator[](size_t rid) {
@@ -100,12 +107,6 @@ class SparseColumnIter : public Column<BinIdxT> {
     }
   }
 
-  template <typename BinIdxType>
-  BinIdxType GetFeatureBinIdx(size_t idx) const {
-    const BinIdxType * ptr = reinterpret_cast<const BinIdxType *>(Column<BinIdxT>::index_.data());
-    return ptr[idx];
-  }
-
   // For opt_partition_builder idx should be external for correct parallel processing
   template <typename BinIdxType>
   bst_bin_t GetBinIdx(size_t rid, size_t* idx) const {
@@ -118,7 +119,7 @@ class SparseColumnIter : public Column<BinIdxT> {
     }
 
     if (((*idx) < column_size) && GetRowIdx(*idx) == rid) {
-      return this->GetFeatureBinIdx<BinIdxType>(*idx);
+      return this->template GetFeatureBinIdx<BinIdxType>(*idx);
     } else {
       return this->kMissingId;
     }
@@ -143,6 +144,8 @@ class DenseColumnIter : public Column<BinIdxT> {
   DenseColumnIter(DenseColumnIter const&) = delete;
   DenseColumnIter(DenseColumnIter&&) = default;
 
+  size_t GetInitialState(const size_t first_row_idx) const { return 0; }
+
   bool IsMissing(size_t ridx) const { return missing_flags_[feature_offset_ + ridx]; }
 
   bst_bin_t operator[](size_t ridx) const {
@@ -154,16 +157,10 @@ class DenseColumnIter : public Column<BinIdxT> {
   }
 
   template <typename BinIdxType>
-  BinIdxType GetFeatureBinIdx(size_t idx) const {
-    const BinIdxType * ptr = reinterpret_cast<const BinIdxType *>(Column<BinIdxT>::index_.data());
-    return ptr[idx];
-  }
-
-  template <typename BinIdxType>
   bst_bin_t GetBinIdx(size_t idx, size_t* state) const {
     return (any_missing && IsMissing(idx))
            ? this->kMissingId
-           : this->GetFeatureBinIdx<BinIdxType>(idx);
+           : this->template GetFeatureBinIdx<BinIdxType>(idx);
   }
 };
 

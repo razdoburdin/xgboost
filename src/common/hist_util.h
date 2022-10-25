@@ -194,6 +194,11 @@ struct BinTypeMap<kUint16BinsTypeSize> {
     using Type = uint16_t;
 };
 
+using BinTypeSizeSequence = std::integer_sequence<uint32_t,
+  BinTypeSize::kUint8BinsTypeSize, BinTypeSize::kUint16BinsTypeSize,
+  BinTypeSize::kUint32BinsTypeSize>;
+using BoolSequence = std::integer_sequence<bool, true, false>;
+
 /**
  * \brief Dispatch for bin type, fn is a function that accepts a scalar of the bin type.
  */
@@ -422,6 +427,11 @@ class HistCollection {
     n_nodes_added_ = 0;
   }
 
+  // get number of bins
+  uint32_t GetNumBins() const {
+      return nbins_;
+  }
+
   // create an empty histogram for i-th node
   void AddHistRow(bst_uint nid) {
     constexpr uint32_t kMax = std::numeric_limits<uint32_t>::max();
@@ -471,12 +481,54 @@ class HistCollection {
  * Supports processing multiple tree-nodes for nested parallelism
  * Able to reduce histograms across threads in efficient way
  */
-class ParallelGHistBuilder {
+class ParallelGHistBuilderForApprox {
  public:
+  std::vector<std::vector<std::vector<double>>> histograms_buffer;
+  std::vector<std::vector<uint16_t>> local_threads_mapping;
+
   void Init(size_t nbins) {
     if (nbins != nbins_) {
       hist_buffer_.Init(nbins);
       nbins_ = nbins;
+    }
+  }
+
+  void AllocateHistBufer(const int32_t max_depth,
+                         const size_t n_threads) {
+    max_depth_ = std::max(max_depth, 1);
+    if (histograms_buffer.size() == 0) {
+      histograms_buffer.resize(n_threads);
+      local_threads_mapping.resize(n_threads);
+      #pragma omp parallel num_threads(n_threads)
+      {
+        const size_t tid = omp_get_thread_num();
+        local_threads_mapping[tid].resize((1 << (max_depth_ + 2)));
+        histograms_buffer[tid].resize((1 << (max_depth_ - 1)));
+      }
+    }
+  }
+
+  void AllocateHistForLocalThread(const std::vector<uint16_t>& node_id_for_local_thread,
+                                  const size_t tid) {
+    size_t max_nid = 0;
+    const size_t local_thread_size = node_id_for_local_thread.size();
+    for (size_t nid = 0; nid < local_thread_size; ++nid) {
+      max_nid = std::max(max_nid, static_cast<size_t>(node_id_for_local_thread[nid]));
+    }
+    if (local_threads_mapping[tid].size() <= max_nid) {
+      local_threads_mapping[tid].resize(max_nid + 1);
+    }
+    if (histograms_buffer[tid].size() <= local_thread_size) {
+      histograms_buffer[tid].resize(local_thread_size + 1);
+    }
+    for (size_t nid = 0; nid < local_thread_size; ++nid) {
+      const size_t node_id = node_id_for_local_thread[nid];
+      CHECK_LT(node_id, local_threads_mapping[tid].size());
+      CHECK_LT(nid, histograms_buffer[tid].size());
+      local_threads_mapping[tid][node_id] = nid;
+      if (histograms_buffer[tid][nid].size() == 0) {
+        histograms_buffer[tid][nid].resize(nbins_*2, 0);
+      }
     }
   }
 
@@ -620,6 +672,8 @@ class ParallelGHistBuilder {
   size_t nthreads_ = 0;
   /*! \brief number of nodes which will be processed in parallel  */
   size_t nodes_ = 0;
+  /*! \brief max depth which will be processed */
+  int32_t max_depth_ = 1;
   /*! \brief Buffer for additional histograms for Parallel processing  */
   HistCollection hist_buffer_;
   /*!
@@ -640,19 +694,283 @@ class ParallelGHistBuilder {
   std::map<std::pair<size_t, size_t>, int> tid_nid_to_hist_;
 };
 
+
+void ClearHist(double* dest_hist,
+                size_t begin, size_t end);
+
+void ReduceHist(double* dest_hist,
+                const std::vector<std::vector<uint16_t>>& local_threads_mapping,
+                std::vector<std::vector<std::vector<double>>>* histograms,
+                const size_t node_id,
+                const std::vector<uint16_t>& threads_id_for_node,
+                size_t begin, size_t end);
+
 /*!
- * \brief builder for histograms of gradient statistics
+ * \brief Stores temporary histograms to compute them in parallel
+ * Supports processing multiple tree-nodes for nested parallelism
+ * Able to reduce histograms across threads in efficient way
  */
+class ParallelGHistBuilder {
+ public:
+  std::vector<std::vector<std::vector<double>>> histograms_buffer;
+  std::vector<std::vector<uint16_t>> local_threads_mapping;
+
+  std::vector<std::vector<std::vector<double>>>* GetHistBuffer() {
+    return &histograms_buffer;
+  }
+
+  std::vector<std::vector<uint16_t>>* GetLocalThreadsMapping() {
+    return &local_threads_mapping;
+  }
+
+  void Init(size_t nbins) {
+    if (nbins != nbins_) {
+      hist_buffer_.Init(nbins);
+      nbins_ = nbins;
+    }
+  }
+
+  void AllocateHistBufer(const int32_t max_depth,
+                         const size_t n_threads) {
+    max_depth_ = std::max(max_depth, 1);
+    if (histograms_buffer.size() == 0) {
+      histograms_buffer.resize(n_threads);
+      local_threads_mapping.resize(n_threads);
+      #pragma omp parallel num_threads(n_threads)
+      {
+        const size_t tid = omp_get_thread_num();
+        local_threads_mapping[tid].resize((1 << (max_depth_ + 2)));
+        histograms_buffer[tid].resize((1 << (max_depth_ - 1)));
+      }
+    }
+  }
+
+  void AllocateHistForLocalThread(const std::vector<uint16_t>& node_id_for_local_thread,
+                                  const size_t tid) {
+    size_t max_nid = 0;
+    const size_t local_thread_size = node_id_for_local_thread.size();
+    for (size_t nid = 0; nid < local_thread_size; ++nid) {
+      max_nid = std::max(max_nid, static_cast<size_t>(node_id_for_local_thread[nid]));
+    }
+    if (local_threads_mapping[tid].size() <= max_nid) {
+      local_threads_mapping[tid].resize(max_nid + 1);
+    }
+    if (histograms_buffer[tid].size() <= local_thread_size) {
+      histograms_buffer[tid].resize(local_thread_size + 1);
+    }
+    for (size_t nid = 0; nid < local_thread_size; ++nid) {
+      const size_t node_id = node_id_for_local_thread[nid];
+      CHECK_LT(node_id, local_threads_mapping[tid].size());
+      CHECK_LT(nid, histograms_buffer[tid].size());
+      local_threads_mapping[tid][node_id] = nid;
+      if (histograms_buffer[tid][nid].size() == 0) {
+        histograms_buffer[tid][nid].resize(nbins_*2, 0);
+      }
+    }
+  }
+
+  void ReduceHist(double* dest_hist, const std::vector<uint16_t>& threads_id_for_nodes,
+                  size_t nid, size_t begin, size_t end) {
+    if (threads_id_for_nodes.size() != 0) {
+      common::ReduceHist(dest_hist,
+                         local_threads_mapping,
+                         &histograms_buffer,
+                         nid,
+                         threads_id_for_nodes,
+                         2 * begin, 2 * end);
+    } else {
+      common::ClearHist(dest_hist, 2 * begin, 2 * end);
+    }
+  }
+
+  // Add new elements if needed, mark all hists as unused
+  // targeted_hists - already allocated hists which should contain final results after Reduce() call
+  void Reset(size_t nthreads, size_t nodes, const BlockedSpace2d& space,
+             const std::vector<GHistRow>& targeted_hists) {
+    hist_buffer_.Init(nbins_);
+    tid_nid_to_hist_.clear();
+    threads_to_nids_map_.clear();
+
+    targeted_hists_ = targeted_hists;
+
+    CHECK_EQ(nodes, targeted_hists.size());
+
+    nodes_    = nodes;
+    nthreads_ = nthreads;
+
+    MatchThreadsToNodes(space);
+    AllocateAdditionalHistograms();
+    MatchNodeNidPairToHist();
+
+    hist_was_used_.resize(nthreads * nodes_);
+    std::fill(hist_was_used_.begin(), hist_was_used_.end(), static_cast<int>(false));
+  }
+
+  // Get specified hist, initialize hist by zeros if it wasn't used before
+  GHistRow GetInitializedHist(size_t tid, size_t nid) {
+    CHECK_LT(nid, nodes_);
+    CHECK_LT(tid, nthreads_);
+
+    int idx = tid_nid_to_hist_.at({tid, nid});
+    if (idx >= 0) {
+      hist_buffer_.AllocateData(idx);
+    }
+    GHistRow hist = idx == -1 ? targeted_hists_[nid] : hist_buffer_[idx];
+
+    if (!hist_was_used_[tid * nodes_ + nid]) {
+      InitilizeHistByZeroes(hist, 0, hist.size());
+      hist_was_used_[tid * nodes_ + nid] = static_cast<int>(true);
+    }
+
+    return hist;
+  }
+
+  // Reduce following bins (begin, end] for nid-node in dst across threads
+  void ReduceHist(size_t nid, size_t begin, size_t end) const {
+    CHECK_GT(end, begin);
+    CHECK_LT(nid, nodes_);
+
+    GHistRow dst = targeted_hists_[nid];
+
+    bool is_updated = false;
+    for (size_t tid = 0; tid < nthreads_; ++tid) {
+      if (hist_was_used_[tid * nodes_ + nid]) {
+        is_updated = true;
+
+        int idx = tid_nid_to_hist_.at({tid, nid});
+        GHistRow src = idx == -1 ? targeted_hists_[nid] : hist_buffer_[idx];
+
+        if (dst.data() != src.data()) {
+          IncrementHist(dst, src, begin, end);
+        }
+      }
+    }
+    if (!is_updated) {
+      // In distributed mode - some tree nodes can be empty on local machines,
+      // So we need just set local hist by zeros in this case
+      InitilizeHistByZeroes(dst, begin, end);
+    }
+  }
+
+  void MatchThreadsToNodes(const BlockedSpace2d& space) {
+    const size_t space_size = space.Size();
+    const size_t chunck_size = space_size / nthreads_ + !!(space_size % nthreads_);
+
+    threads_to_nids_map_.resize(nthreads_ * nodes_, false);
+
+    for (size_t tid = 0; tid < nthreads_; ++tid) {
+      size_t begin = chunck_size * tid;
+      size_t end   = std::min(begin + chunck_size, space_size);
+
+      if (begin < space_size) {
+        size_t nid_begin = space.GetFirstDimension(begin);
+        size_t nid_end   = space.GetFirstDimension(end-1);
+
+        for (size_t nid = nid_begin; nid <= nid_end; ++nid) {
+          // true - means thread 'tid' will work to compute partial hist for node 'nid'
+          threads_to_nids_map_[tid * nodes_ + nid] = true;
+        }
+      }
+    }
+  }
+
+  void AllocateAdditionalHistograms() {
+    size_t hist_allocated_additionally = 0;
+
+    for (size_t nid = 0; nid < nodes_; ++nid) {
+      int nthreads_for_nid = 0;
+
+      for (size_t tid = 0; tid < nthreads_; ++tid) {
+        if (threads_to_nids_map_[tid * nodes_ + nid]) {
+          nthreads_for_nid++;
+        }
+      }
+
+      // In distributed mode - some tree nodes can be empty on local machines,
+      // set nthreads_for_nid to 0 in this case.
+      // In another case - allocate additional (nthreads_for_nid - 1) histograms,
+      // because one is already allocated externally (will store final result for the node).
+      hist_allocated_additionally += std::max<int>(0, nthreads_for_nid - 1);
+    }
+
+    for (size_t i = 0; i < hist_allocated_additionally; ++i) {
+      hist_buffer_.AddHistRow(i);
+    }
+  }
+
+ private:
+  void MatchNodeNidPairToHist() {
+    size_t hist_allocated_additionally = 0;
+
+    for (size_t nid = 0; nid < nodes_; ++nid) {
+      bool first_hist = true;
+      for (size_t tid = 0; tid < nthreads_; ++tid) {
+        if (threads_to_nids_map_[tid * nodes_ + nid]) {
+          if (first_hist) {
+            tid_nid_to_hist_[{tid, nid}] = -1;
+            first_hist = false;
+          } else {
+            tid_nid_to_hist_[{tid, nid}] = hist_allocated_additionally++;
+          }
+        }
+      }
+    }
+  }
+
+  /*! \brief number of bins in each histogram */
+  size_t nbins_ = 0;
+  /*! \brief number of threads for parallel computation */
+  size_t nthreads_ = 0;
+  /*! \brief number of nodes which will be processed in parallel  */
+  size_t nodes_ = 0;
+  /*! \brief max depth which will be processed */
+  int32_t max_depth_ = 1;
+
+  /*! \brief Buffer for additional histograms for Parallel processing  */
+  HistCollection hist_buffer_;
+  /*!
+   * \brief Marks which hists were used, it means that they should be merged.
+   * Contains only {true or false} values
+   * but 'int' is used instead of 'bool', because std::vector<bool> isn't thread safe
+   */
+  std::vector<int> hist_was_used_;
+
+  /*! \brief Buffer for additional histograms for Parallel processing  */
+  std::vector<bool> threads_to_nids_map_;
+  /*! \brief Contains histograms for final results  */
+  std::vector<GHistRow> targeted_hists_;
+  /*!
+   * \brief map pair {tid, nid} to index of allocated histogram from hist_buffer_ and targeted_hists_,
+   * -1 is reserved for targeted_hists_
+   */
+  std::map<std::pair<size_t, size_t>, int> tid_nid_to_hist_;
+};
+
+// /*!
+//  * \brief builder for histograms of gradient statistics
+//  */
 class GHistBuilder {
  public:
   GHistBuilder() = default;
   explicit GHistBuilder(uint32_t nbins): nbins_{nbins} {}
 
   // construct a histogram via histogram aggregation
+  template <bool any_missing, bool is_root>
+  void BuildHist(const std::vector<GradientPair>& gpair,
+                 const uint32_t* rows,
+                 const size_t row_begin,
+                 const size_t row_end,
+                 const GHistIndexMatrix& gmat,
+                 uint16_t* nodes_ids,
+                 std::vector<std::vector<double>>* p_hists,
+                 const uint16_t* mapping_ids, uint32_t base_rowid = 0) const;
+
+  // construct a histogram via histogram aggregation
   template <bool any_missing>
   void BuildHist(const std::vector<GradientPair>& gpair, const RowSetCollection::Elem row_indices,
                  const GHistIndexMatrix& gmat, GHistRow hist, const std::vector<int>& fids,
                  bool force_read_by_column = false) const;
+
   uint32_t GetNumBins() const {
       return nbins_;
   }
@@ -661,6 +979,7 @@ class GHistBuilder {
   /*! \brief number of all bins over all features */
   uint32_t nbins_ { 0 };
 };
+
 }  // namespace common
 }  // namespace xgboost
 #endif  // XGBOOST_COMMON_HIST_UTIL_H_
