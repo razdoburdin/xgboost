@@ -4,7 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "../../../src/common/numeric.h"
-#include "../../../src/tree/common_row_partitioner.h"
+#include "../../../src/tree/updater_approx.h"
 #include "../helpers.h"
 #include "test_partitioner.h"
 
@@ -13,7 +13,7 @@ namespace tree {
 TEST(Approx, Partitioner) {
   size_t n_samples = 1024, n_features = 1, base_rowid = 0;
   GenericParameter ctx;
-  CommonRowPartitioner partitioner{&ctx, n_samples, base_rowid};
+  ApproxRowPartitioner partitioner{n_samples, base_rowid};
   ASSERT_EQ(partitioner.base_rowid, base_rowid);
   ASSERT_EQ(partitioner.Size(), 1);
   ASSERT_EQ(partitioner.Partitions()[0].Size(), n_samples);
@@ -32,7 +32,7 @@ TEST(Approx, Partitioner) {
     {
       auto min_value = page.cut.MinValues()[split_ind];
       RegTree tree;
-      CommonRowPartitioner partitioner{&ctx, n_samples, base_rowid};
+      ApproxRowPartitioner partitioner{n_samples, base_rowid};
       GetSplit(&tree, min_value, &candidates);
       partitioner.UpdatePosition(&ctx, page, candidates, &tree);
       ASSERT_EQ(partitioner.Size(), 3);
@@ -40,7 +40,7 @@ TEST(Approx, Partitioner) {
       ASSERT_EQ(partitioner[2].Size(), n_samples);
     }
     {
-      CommonRowPartitioner partitioner{&ctx, n_samples, base_rowid};
+      ApproxRowPartitioner partitioner{n_samples, base_rowid};
       auto ptr = page.cut.Ptrs()[split_ind + 1];
       float split_value = page.cut.Values().at(ptr / 2);
       RegTree tree;
@@ -71,7 +71,7 @@ void TestLeafPartition(size_t n_samples) {
   size_t const n_features = 2, base_rowid = 0;
   GenericParameter ctx;
   common::RowSetCollection row_set;
-  CommonRowPartitioner partitioner{&ctx, n_samples, base_rowid};
+  ApproxRowPartitioner partitioner{n_samples, base_rowid};
 
   auto Xy = RandomDataGenerator{n_samples, n_features, 0}.GenerateDMatrix(true);
   std::vector<CPUExpandEntry> candidates{{0, 0, 0.4}};
