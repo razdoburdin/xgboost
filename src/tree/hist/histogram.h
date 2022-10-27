@@ -80,12 +80,20 @@ class HistogramBuilder {
       const std::vector<common::Slice>& local_slices = thread_info->addr;
       buffer_.AllocateHistForLocalThread(thread_info->nodes_id, tid);
       for (const common::Slice& slice : local_slices) {
-        const uint32_t* rows = slice.addr;
-        // CHECK(rows != nullptr);
+        const size_t* rows = slice.addr;
+        auto rid_set = common::RowSetCollection::Elem(rows + slice.b,
+                                                      rows + slice.e);
+
+        std::vector<size_t> rows_vec;
+        if (rows == nullptr) {
+          rows_vec.resize(slice.e - slice.b);
+          std::iota(rows_vec.begin(), rows_vec.end(), slice.b);
+          rid_set = common::RowSetCollection::Elem(rows_vec.data(),
+                                                   rows_vec.data() + rows_vec.size());
+        }
         builder_.template BuildHist<any_missing, is_root>(
-          gpair_h, rows, slice.b, slice.e, gidx, node_ids.data(),
-          &buffer_.histograms_buffer[tid], buffer_.local_threads_mapping[tid].data(),
-          opt_partition_builder.base_rowid);
+          gpair_h, rid_set, gidx, node_ids.data(),
+          &buffer_.histograms_buffer[tid], buffer_.local_threads_mapping[tid].data());
       }
     }
   }

@@ -180,7 +180,7 @@ void OptPartitionBuilder::UpdateThreadsWork<false, true>(
       if (curr_thread_node_size == 0) {
         thread_info = threads_cyclic_view.NextItem();
       } else {
-        uint32_t* slice_addr = thread_info->rows_nodes_wise.data();
+        size_t* slice_addr = thread_info->rows_nodes_wise.data();
         uint32_t slice_begin = nodes_count_range->begin;
         uint32_t slice_end = slice_begin;
         CHECK_EQ(nodes_count_range->begin + curr_thread_node_size,
@@ -219,7 +219,7 @@ void OptPartitionBuilder::UpdateThreadsWork<false, false>(
     std::vector<uint32_t> borrowed_work;
     while (curr_thread_size != 0) {
       borrowed_work.push_back(threads_saturation_view.Idx());
-      uint32_t* slice_addr = thread_info->vec_rows.data();
+      size_t* slice_addr = thread_info->vec_rows.data();
       uint32_t slice_begin = 1 + thread_info->vec_rows[0] - curr_vec_rows_size;
       uint32_t slice_end = 1 + thread_info->vec_rows[0];
       if (curr_vec_rows_size > curr_thread_size) {

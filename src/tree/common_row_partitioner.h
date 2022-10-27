@@ -362,7 +362,7 @@ class CommonRowPartitioner {
     const size_t block_size = common::GetBlockSize(gmat.row_ptr.size() - 1, ctx->Threads());
     if (is_loss_guided) {
       opt_partition_builder_.ResizeRowsBuffer(gmat.row_ptr.size() - 1);
-      uint32_t* row_set_collection_vec_p = opt_partition_builder_.GetRowsBuffer();
+      size_t* row_set_collection_vec_p = opt_partition_builder_.GetRowsBuffer();
       #pragma omp parallel num_threads(ctx->Threads())
       {
         const size_t tid = omp_get_thread_num();
@@ -392,7 +392,7 @@ class CommonRowPartitioner {
 
     if (is_loss_guide) {
       opt_partition_builder_.ResizeRowsBuffer(gmat.row_ptr.size() - 1);
-      uint32_t* row_set_collection_vec_p = opt_partition_builder_.GetRowsBuffer();
+      size_t* row_set_collection_vec_p = opt_partition_builder_.GetRowsBuffer();
       #pragma omp parallel num_threads(ctx->Threads())
       {
         const size_t tid = omp_get_thread_num();

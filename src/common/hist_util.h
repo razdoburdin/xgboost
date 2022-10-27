@@ -957,13 +957,11 @@ class GHistBuilder {
   // construct a histogram via histogram aggregation
   template <bool any_missing, bool is_root>
   void BuildHist(const std::vector<GradientPair>& gpair,
-                 const uint32_t* rows,
-                 const size_t row_begin,
-                 const size_t row_end,
+                 const RowSetCollection::Elem row_indices,
                  const GHistIndexMatrix& gmat,
                  uint16_t* nodes_ids,
                  std::vector<std::vector<double>>* p_hists,
-                 const uint16_t* mapping_ids, uint32_t base_rowid = 0) const;
+                 const uint16_t* mapping_ids) const;
 
   // construct a histogram via histogram aggregation
   template <bool any_missing>

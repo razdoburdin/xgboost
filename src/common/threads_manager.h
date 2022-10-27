@@ -16,7 +16,7 @@ namespace xgboost {
 namespace common {
 
 struct Slice {
-  uint32_t* addr {nullptr};
+  size_t* addr {nullptr};
   uint32_t b {0};
   uint32_t e {0};
   uint32_t Size() const {
@@ -112,13 +112,13 @@ class ThreadsManager {
 
     std::vector<Slice> addr;
     std::vector<uint16_t> nodes_id;
-    std::vector<uint32_t> rows_nodes_wise;
+    std::vector<size_t> rows_nodes_wise;
 
     FlexibleContainer<uint32_t> nodes_count;
     FlexibleContainer<NodesCountRange> nodes_count_range;
 
-    std::vector<uint32_t> vec_rows;
-    std::vector<uint32_t> vec_rows_remain;
+    std::vector<size_t> vec_rows;
+    std::vector<size_t> vec_rows_remain;
 
     FlexibleContainer<size_t> states;
 

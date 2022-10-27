@@ -47,10 +47,10 @@ class OptPartitionBuilder {
   const uint8_t* data_hash;
   std::vector<bool>* missing_ptr;
   size_t* row_ind_ptr;
-  std::vector<uint32_t> row_set_collection_vec;
+  std::vector<size_t> row_set_collection_vec;
   uint32_t gmat_n_rows;
   uint32_t base_rowid;
-  uint32_t* row_indices_ptr;
+  size_t* row_indices_ptr;
   size_t n_threads = 0;
   uint32_t summ_size = 0;
   uint32_t summ_size_remain = 0;
@@ -171,8 +171,8 @@ class OptPartitionBuilder {
     uint32_t rows_left_count = 0;
     auto thread_info = tm.GetThreadInfoPtr(tid);
 
-    uint32_t* rows = thread_info->vec_rows.data();
-    uint32_t* rows_left = nullptr;
+    size_t* rows = thread_info->vec_rows.data();
+    size_t* rows_left = nullptr;
     if (is_loss_guided) {
       rows_left = thread_info->vec_rows_remain.data();
     } else {
@@ -263,7 +263,7 @@ class OptPartitionBuilder {
     row_indices_ptr = row_set_collection_vec.data();
   }
 
-  uint32_t* GetRowsBuffer() const {
+  size_t* GetRowsBuffer() const {
     return row_indices_ptr;
   }
 

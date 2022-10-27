@@ -170,12 +170,14 @@ constexpr size_t Prefetch::kNoPrefetchSize;
 
 struct RuntimeFlags {
   const bool first_page;
+  const bool contiguous_block;
   const bool read_by_column;
   const bool column_sampling;
   const BinTypeSize bin_type_size;
 };
 
 template <bool _any_missing,
+          bool _contiguous_block = false,
           bool _first_page = false,
           bool _read_by_column = false,
           bool _column_sampling = false,
@@ -183,38 +185,45 @@ template <bool _any_missing,
 class GHistBuildingManager {
  public:
   constexpr static bool kAnyMissing = _any_missing;
+  constexpr static bool kContiguousBlock = _contiguous_block;
   constexpr static bool kFirstPage = _first_page;
   constexpr static bool kReadByColumn = _read_by_column;
   constexpr static bool kColumnSampling = _column_sampling;
   using BinIdxType = BinIdxTypeName;
 
  private:
+  template <bool new_contiguous_block>
+  struct SetContiguousBlock {
+    using Type = GHistBuildingManager<kAnyMissing, new_contiguous_block, kFirstPage,
+                                      kReadByColumn, kColumnSampling, BinIdxType>;
+  };
+
   template <bool new_first_page>
   struct SetFirstPage {
-    using Type = GHistBuildingManager<kAnyMissing, new_first_page, kReadByColumn,
-                                      kColumnSampling, BinIdxType>;
+    using Type = GHistBuildingManager<kAnyMissing, kContiguousBlock, new_first_page,
+                                      kReadByColumn, kColumnSampling, BinIdxType>;
   };
 
   template <bool new_read_by_column>
   struct SetReadByColumn {
-    using Type = GHistBuildingManager<kAnyMissing, kFirstPage, new_read_by_column,
-                                      kColumnSampling, BinIdxType>;
+    using Type = GHistBuildingManager<kAnyMissing, kContiguousBlock, kFirstPage,
+                                      new_read_by_column, kColumnSampling, BinIdxType>;
   };
 
   template <bool new_column_sampling>
   struct SetColumnSampling {
-    using Type = GHistBuildingManager<kAnyMissing, kFirstPage, kReadByColumn,
-                                      new_column_sampling, BinIdxType>;
+    using Type = GHistBuildingManager<kAnyMissing, kContiguousBlock, kFirstPage,
+                                      kReadByColumn, new_column_sampling, BinIdxType>;
   };
 
   template <typename NewBinIdxType>
   struct SetBinIdxType {
-    using Type = GHistBuildingManager<kAnyMissing, kFirstPage, kReadByColumn,
-                                      kColumnSampling, NewBinIdxType>;
+    using Type = GHistBuildingManager<kAnyMissing, kContiguousBlock, kFirstPage,
+                                      kReadByColumn, kColumnSampling, NewBinIdxType>;
   };
 
-  using Type = GHistBuildingManager<kAnyMissing, kFirstPage, kReadByColumn,
-                                    kColumnSampling, BinIdxType>;
+  using Type = GHistBuildingManager<kAnyMissing, kContiguousBlock, kFirstPage,
+                                    kReadByColumn, kColumnSampling, BinIdxType>;
 
  public:
   /* Entry point to dispatcher
@@ -224,7 +233,9 @@ class GHistBuildingManager {
    */
   template <typename Fn>
   static void DispatchAndExecute(const RuntimeFlags& flags, Fn&& fn) {
-    if (flags.first_page != kFirstPage) {
+    if (flags.contiguous_block != kContiguousBlock) {
+      SetContiguousBlock<true>::Type::DispatchAndExecute(flags, std::forward<Fn>(fn));
+    } else if (flags.first_page != kFirstPage) {
       SetFirstPage<true>::Type::DispatchAndExecute(flags, std::forward<Fn>(fn));
     } else if (flags.read_by_column != kReadByColumn) {
       SetReadByColumn<true>::Type::DispatchAndExecute(flags, std::forward<Fn>(fn));
@@ -374,11 +385,9 @@ void BuildHistDispatch(const std::vector<GradientPair> &gpair,
   } else {
     const size_t nrows = row_indices.Size();
     const size_t no_prefetch_size = Prefetch::NoPrefetchSize(nrows);
-    // if need to work with all rows from bin-matrix (e.g. root node)
-    const bool contiguousBlock =
-        (row_indices.begin[nrows - 1] - row_indices.begin[0]) == (nrows - 1);
 
-    if (contiguousBlock) {
+    // if need to work with all rows from bin-matrix (e.g. root node)
+    if (BuildingManager::kContiguousBlock) {
       // contiguous memory access, built-in HW prefetching is enough
       RowsWiseBuildHistKernel<false, BuildingManager>(gpair, row_indices, gmat, hist);
     } else {
@@ -403,6 +412,9 @@ void GHistBuilder::BuildHist(const std::vector<GradientPair> &gpair,
   /* force_read_by_column is used for testing the columnwise building of histograms.
    * default force_read_by_column = false
    */
+  const size_t *rid = row_indices.begin;
+  const size_t nrows = row_indices.Size();
+  const bool contiguous_block = (rid[nrows - 1] - rid[0]) == (nrows - 1);
   constexpr double kAdhocL2Size = 1024 * 1024 * 0.8;
   const bool hist_fit_to_l2 = kAdhocL2Size > 2*sizeof(float)*gmat.cut.Ptrs().back();
   bool first_page = gmat.base_rowid == 0;
@@ -411,144 +423,170 @@ void GHistBuilder::BuildHist(const std::vector<GradientPair> &gpair,
                         (!hist_fit_to_l2 && !any_missing);
   auto bin_type_size = gmat.index.GetBinTypeSize();
 
-  GHistBuildingManager<any_missing>::DispatchAndExecute(
-    {first_page, read_by_column || force_read_by_column, column_sampling, bin_type_size},
+  GHistBuildingManager<any_missing, false>::DispatchAndExecute(
+    {first_page, contiguous_block, read_by_column || force_read_by_column,
+     column_sampling, bin_type_size},
     [&](auto t) {
       using BuildingManager = decltype(t);
       BuildHistDispatch<BuildingManager>(gpair, row_indices, gmat, hist, fids);
     });
 }
 
-template<typename FPType, bool do_prefetch,
-         typename BinIdxType, bool is_root,
-         bool any_missing>
-void BuildHistKernel(const std::vector<GradientPair>& gpair,
-                     const uint32_t* rows,
-                     const size_t row_begin,
-                     const size_t row_end,
-                     const GHistIndexMatrix& gmat,
-                     uint16_t* nodes_ids,
-                     std::vector<std::vector<FPType>>* p_hists,
-                     const uint16_t* mapping_ids, uint32_t base_rowid = 0) {
+template<bool do_prefetch, class BuildingManager>
+void RowsWiseBuildHistKernel(const std::vector<GradientPair>& gpair,
+                             const RowSetCollection::Elem row_indices,
+                             const GHistIndexMatrix& gmat,
+                             uint16_t* nodes_ids,
+                             std::vector<std::vector<double>>* p_hists,
+                             const uint16_t* mapping_ids) {
+  constexpr bool kAnyMissing = BuildingManager::kAnyMissing;
+  constexpr bool kContiguousBlock = BuildingManager::kContiguousBlock;
+  constexpr bool kFirstPage = BuildingManager::kFirstPage;
+  using BinIdxType = typename BuildingManager::BinIdxType;
+
+  const size_t size = row_indices.Size();
+  const size_t rid_start = row_indices.begin[0];
+  const size_t *rid = row_indices.begin;
   const float* pgh = reinterpret_cast<const float*>(gpair.data());
   const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
   const size_t* row_ptr =  gmat.row_ptr.data();
+  auto base_rowid = gmat.base_rowid;
   const uint32_t* offsets = gmat.index.Offset();
   const size_t n_features = row_ptr[1] - row_ptr[0];
   const uint32_t two {2};  // Each element from 'gpair' and 'hist' contains
                            // 2 FP values: gradient and hessian.
                            // So we need to multiply each row-index/bin-index by 2
                            // to work with gradient pairs as a singe row FP array
-  std::vector<std::vector<FPType>>& hists = *p_hists;
-  for (size_t i = row_begin; i < row_end; ++i) {
-    const size_t ri = is_root ? i : rows[i];
-    const size_t icol_start = any_missing ? row_ptr[ri] : ri * n_features;
-    const size_t icol_end =  any_missing ? row_ptr[ri+1] : icol_start + n_features;
+  std::vector<std::vector<double>>& hists = *p_hists;
+  for (size_t i = 0; i < size; ++i) {
+    const size_t ri = kContiguousBlock ? i + rid_start: rid[i];
+    const size_t icol_start = kAnyMissing ? row_ptr[ri] : ri * n_features;
+    const size_t icol_end =  kAnyMissing ? row_ptr[ri+1] : icol_start + n_features;
     const size_t row_size = icol_end - icol_start;
     const size_t idx_gh = two * (ri + base_rowid);
-    const uint32_t nid = is_root ? 0 : mapping_ids[nodes_ids[ri]];
+    const uint32_t nid = kContiguousBlock ? 0 : mapping_ids[nodes_ids[ri]];
     if (do_prefetch) {
-      const size_t icol_start_prefetch = any_missing ? row_ptr[rows[i+Prefetch::kPrefetchOffset]] :
-                                       rows[i + Prefetch::kPrefetchOffset] * n_features;
-      const size_t icol_end_prefetch = any_missing ?  row_ptr[rows[i+Prefetch::kPrefetchOffset]+1] :
-                                      icol_start_prefetch + n_features;
+      const size_t ri_prefetch = kContiguousBlock ? i + Prefetch::kPrefetchOffset + rid_start
+                                                  : rid[i+Prefetch::kPrefetchOffset];
+      const size_t icol_start_prefetch = kAnyMissing ? row_ptr[ri_prefetch] :
+                                         ri_prefetch * n_features;
+      const size_t icol_end_prefetch = kAnyMissing ?  row_ptr[ri_prefetch+1] :
+                                       icol_start_prefetch + n_features;
 
-      PREFETCH_READ_T0(pgh + two * rows[i + Prefetch::kPrefetchOffset]);
+      PREFETCH_READ_T0(pgh + two * ri_prefetch);
       for (size_t j = icol_start_prefetch; j < icol_end_prefetch;
         j+=Prefetch::GetPrefetchStep<uint32_t>()) {
         PREFETCH_READ_T0(gradient_index + j);
       }
-    } else if (is_root) {
+    } else if (kContiguousBlock) {
       nodes_ids[ri] = 0;
     }
 
     const BinIdxType* gr_index_local = gradient_index + icol_start;
-    FPType* hist_data = hists[nid].data();
+    double* hist_data = hists[nid].data();
 
     // The trick with pgh_t helps the compiler to use more effective processor instructions.
-    const FPType pgh_t[] = {pgh[idx_gh], pgh[idx_gh + 1]};
+    const double pgh_t[] = {pgh[idx_gh], pgh[idx_gh + 1]};
     for (size_t j = 0; j < row_size; ++j) {
       const uint32_t idx_bin = two * (static_cast<uint32_t>(gr_index_local[j]) + (
-                                      any_missing ? 0 : offsets[j]));
-      FPType* hist_local = hist_data + idx_bin;
+                                      kAnyMissing ? 0 : offsets[j]));
+      double* hist_local = hist_data + idx_bin;
       *(hist_local)     += pgh_t[0];
       *(hist_local + 1) += pgh_t[1];
     }
   }
 }
 
+
+template <class BuildingManager>
+void BuildHistDispatch(const std::vector<GradientPair>& gpair,
+                       const RowSetCollection::Elem row_indices,
+                       const GHistIndexMatrix& gmat,
+                       uint16_t* nodes_ids,
+                       std::vector<std::vector<double>>* p_hists,
+                       const uint16_t* mapping_ids) {
+  // if (BuildingManager::kReadByColumn) {
+  //   ColsWiseBuildHistKernel<BuildingManager>(gpair, row_indices, gmat, hist, fids);
+  // } else {
+    const size_t nrows = row_indices.Size();
+    const size_t no_prefetch_size = Prefetch::NoPrefetchSize(nrows);
+    // if need to work with all rows from bin-matrix (e.g. root node)
+    if (BuildingManager::kContiguousBlock) {
+      // contiguous memory access, built-in HW prefetching is enough
+      RowsWiseBuildHistKernel<false, BuildingManager>(gpair, row_indices, gmat,
+                                                      nodes_ids, p_hists, mapping_ids);
+    } else {
+      const RowSetCollection::Elem span1(row_indices.begin,
+                                         row_indices.end - no_prefetch_size);
+      const RowSetCollection::Elem span2(row_indices.end - no_prefetch_size,
+                                         row_indices.end);
+
+      RowsWiseBuildHistKernel<true, BuildingManager>(gpair, span1, gmat,
+                                                     nodes_ids, p_hists, mapping_ids);
+      // no prefetching to avoid loading extra memory
+      RowsWiseBuildHistKernel<false, BuildingManager>(gpair, span2, gmat,
+                                                      nodes_ids, p_hists, mapping_ids);;
+    }
+  // }
+}
+
 template <bool any_missing, bool is_root>
 void GHistBuilder::BuildHist(const std::vector<GradientPair>& gpair,
-                             const uint32_t* rows,
-                             const size_t row_begin,
-                             const size_t row_end,
+                             const RowSetCollection::Elem row_indices,
                              const GHistIndexMatrix& gmat,
                              uint16_t* nodes_ids,
                              std::vector<std::vector<double>>* p_hists,
-                             const uint16_t* mapping_ids,
-                             uint32_t base_rowid) const {
-  const size_t nrows = row_end - row_begin;
-  const size_t no_prefetch_size = Prefetch::NoPrefetchSize(nrows);
-  if (is_root) {
-    // contiguous memory access, built-in HW prefetching is enough
-    DispatchBinType(gmat.index.GetBinTypeSize(), [&](auto t) {
-      using BinIdxType = decltype(t);
-      BuildHistKernel<double, false, BinIdxType, is_root, any_missing>(
-        gpair, rows, row_begin, row_end, gmat, nodes_ids, p_hists,
-        mapping_ids, base_rowid);
-      });
-  } else {
-    DispatchBinType(gmat.index.GetBinTypeSize(), [&](auto t) {
-      using BinIdxType = decltype(t);
-      BuildHistKernel<double, true, BinIdxType, is_root, any_missing>(
-        gpair, rows, row_begin, row_end - no_prefetch_size,
-        gmat, nodes_ids, p_hists, mapping_ids, base_rowid);
-      BuildHistKernel<double, false, BinIdxType, is_root, any_missing>(
-        gpair, rows,  row_end - no_prefetch_size, row_end,
-        gmat, nodes_ids, p_hists, mapping_ids, base_rowid);
+                             const uint16_t* mapping_ids) const {
+  /* force_read_by_column is used for testing the columnwise building of histograms.
+   * default force_read_by_column = false
+   */
+  bool force_read_by_column = false;
+  constexpr double kAdhocL2Size = 1024 * 1024 * 0.8;
+  const bool hist_fit_to_l2 = kAdhocL2Size > 2*sizeof(float)*gmat.cut.Ptrs().back();
+  bool first_page = gmat.base_rowid == 0;
+  // bool column_sampling = fids.size() > 0;
+  bool column_sampling = false;
+  bool read_by_column = column_sampling ||
+                        (!hist_fit_to_l2 && !any_missing);
+  auto bin_type_size = gmat.index.GetBinTypeSize();
+
+  GHistBuildingManager<any_missing>::DispatchAndExecute(
+    {first_page, is_root, read_by_column || force_read_by_column,
+      column_sampling, bin_type_size},
+    [&](auto t) {
+      using BuildingManager = decltype(t);
+      BuildHistDispatch<BuildingManager>(gpair, row_indices, gmat, nodes_ids,
+                                          p_hists, mapping_ids);
     });
   }
-}
 
 template void GHistBuilder::BuildHist<true, true>(const std::vector<GradientPair>& gpair,
-                                                  const uint32_t* rows,
-                                                  const size_t row_begin,
-                                                  const size_t row_end,
+                                                  const RowSetCollection::Elem row_indices,
                                                   const GHistIndexMatrix& gmat,
                                                   uint16_t* nodes_ids,
                                                   std::vector<std::vector<double>>* p_hists,
-                                                  const uint16_t* mapping_ids,
-                                                  uint32_t base_rowid = 0) const;
+                                                  const uint16_t* mapping_ids) const;
 
 template void GHistBuilder::BuildHist<true, false>(const std::vector<GradientPair>& gpair,
-                                                   const uint32_t* rows,
-                                                   const size_t row_begin,
-                                                   const size_t row_end,
+                                                   const RowSetCollection::Elem row_indices,
                                                    const GHistIndexMatrix& gmat,
                                                    uint16_t* nodes_ids,
                                                    std::vector<std::vector<double>>* p_hists,
-                                                   const uint16_t* mapping_ids,
-                                                   uint32_t base_rowid = 0) const;
+                                                   const uint16_t* mapping_ids) const;
 
 template void GHistBuilder::BuildHist<false, true>(const std::vector<GradientPair>& gpair,
-                                                   const uint32_t* rows,
-                                                   const size_t row_begin,
-                                                   const size_t row_end,
+                                                   const RowSetCollection::Elem row_indices,
                                                    const GHistIndexMatrix& gmat,
                                                    uint16_t* nodes_ids,
                                                    std::vector<std::vector<double>>* p_hists,
-                                                   const uint16_t* mapping_ids,
-                                                   uint32_t base_rowid = 0) const;
+                                                   const uint16_t* mapping_ids) const;
 
 template void GHistBuilder::BuildHist<false, false>(const std::vector<GradientPair>& gpair,
-                                                    const uint32_t* rows,
-                                                    const size_t row_begin,
-                                                    const size_t row_end,
+                                                    const RowSetCollection::Elem row_indices,
                                                     const GHistIndexMatrix& gmat,
                                                     uint16_t* nodes_ids,
                                                     std::vector<std::vector<double>>* p_hists,
-                                                    const uint16_t* mapping_ids,
-                                                    uint32_t base_rowid = 0) const;
+                                                    const uint16_t* mapping_ids) const;
 
 template void GHistBuilder::BuildHist<true>(const std::vector<GradientPair> &gpair,
                                             const RowSetCollection::Elem row_indices,
