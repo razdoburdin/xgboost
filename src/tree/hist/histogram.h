@@ -216,7 +216,7 @@ class HistogramBuilder {
     ParallelSubtractionHist(space2, nodes_for_subtraction_trick,
                             nodes_for_explicit_hist_build, p_tree);
   }
-  
+
   template <typename PartitionType>
   void SyncHistogramLocal(
       RegTree *p_tree,

@@ -224,7 +224,7 @@ class QuantileHistMaker: public TreeUpdater {
     common::FlexibleContainer<common::SplitNode> split_info_;
     std::vector<uint16_t> child_node_ids_;
     common::HistogramCuts feature_values_;
- 
+
     // key is the node id which should be calculated by Subtraction Trick, value is the node which
     // provides the evidence for subtraction
     std::vector<CPUExpandEntry> nodes_for_subtraction_trick_;
