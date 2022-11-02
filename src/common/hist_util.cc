@@ -470,27 +470,25 @@ void ColsWiseBuildHistKernel(const std::vector<GradientPair>& gpair,
     const uint32_t offset = kAnyMissing ? 0 : offsets[cid];
     for (size_t i = 0; i < size; ++i) {
       const size_t ri = kContiguousBlock ? i + rid_start: rid[i];
-      const size_t icol_start =
-          kAnyMissing ? get_row_ptr(ri) : get_rid(ri) * n_features;
-      const size_t icol_end =
-          kAnyMissing ? get_row_ptr(ri + 1) : icol_start + n_features;
-      if (cid < icol_end - icol_start) {
-        const size_t idx_gh = two * (ri + base_rowid);
-        const uint32_t nid = kContiguousBlock ? 0 : mapping_ids[nodes_ids[ri]];
-        if (kContiguousBlock) {
-          nodes_ids[ri] = 0;
-        }
+      const size_t icol_start = kAnyMissing ? row_ptr[ri] : ri * n_features;
+      const size_t icol_end =  kAnyMissing ? row_ptr[ri+1] : icol_start + n_features;
 
+      if (cid < icol_end - icol_start) {
+        const uint32_t nid = kContiguousBlock ? 0 : mapping_ids[nodes_ids[ri]];
         const BinIdxType* gr_index_local = gradient_index + icol_start;
         double* hist_data = hists[nid].data();
 
+        const size_t idx_gh = two * (ri + base_rowid);
         // The trick with pgh_t helps the compiler to use more effective processor instructions.
         const double pgh_t[] = {pgh[idx_gh], pgh[idx_gh + 1]};
         const uint32_t idx_bin = two * (static_cast<uint32_t>(gr_index_local[cid]) + (
-                                        kAnyMissing ? 0 : offsets[cid]));
+                                        kAnyMissing ? 0 : offset));
         double* hist_local = hist_data + idx_bin;
         *(hist_local)     += pgh_t[0];
         *(hist_local + 1) += pgh_t[1];
+      }
+      if (kContiguousBlock && (cid == n_columns - 1)) {
+        nodes_ids[ri] = 0;
       }
     }
   }
@@ -515,12 +513,6 @@ void RowsWiseBuildHistKernel(const std::vector<GradientPair>& gpair,
   const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
   const size_t* row_ptr =  gmat.row_ptr.data();
   auto base_rowid = gmat.base_rowid;
-  auto get_row_ptr = [&](size_t ridx) {
-    return kFirstPage ? row_ptr[ridx] : row_ptr[ridx - base_rowid];
-  };
-  auto get_rid = [&](size_t ridx) {
-    return kFirstPage ? ridx : (ridx - base_rowid);
-  };
 
   const uint32_t* offsets = gmat.index.Offset();
   const size_t n_features = row_ptr[1] - row_ptr[0];
@@ -531,10 +523,8 @@ void RowsWiseBuildHistKernel(const std::vector<GradientPair>& gpair,
   std::vector<std::vector<double>>& hists = *p_hists;
   for (size_t i = 0; i < size; ++i) {
     const size_t ri = kContiguousBlock ? i + rid_start: rid[i];
-    const size_t icol_start =
-        kAnyMissing ? get_row_ptr(ri) : get_rid(ri) * n_features;
-    const size_t icol_end =
-        kAnyMissing ? get_row_ptr(ri + 1) : icol_start + n_features;
+    const size_t icol_start = kAnyMissing ? row_ptr[ri] : ri * n_features;
+    const size_t icol_end =  kAnyMissing ? row_ptr[ri+1] : icol_start + n_features;
 
     const size_t row_size = icol_end - icol_start;
     const size_t idx_gh = two * (ri + base_rowid);
@@ -542,10 +532,8 @@ void RowsWiseBuildHistKernel(const std::vector<GradientPair>& gpair,
     if (do_prefetch) {
       const size_t ri_prefetch = kContiguousBlock ? i + Prefetch::kPrefetchOffset + rid_start
                                                   : rid[i+Prefetch::kPrefetchOffset];
-      const size_t icol_start_prefetch = kAnyMissing ? row_ptr[ri_prefetch] :
-                                         ri_prefetch * n_features;
-      const size_t icol_end_prefetch = kAnyMissing ?  row_ptr[ri_prefetch+1] :
-                                       icol_start_prefetch + n_features;
+      const size_t icol_start_prefetch = kAnyMissing ? row_ptr[ri_prefetch] : ri_prefetch * n_features;
+      const size_t icol_end_prefetch =  kAnyMissing ? row_ptr[ri_prefetch+1] : icol_start_prefetch + n_features;
 
       PREFETCH_READ_T0(pgh + two * ri_prefetch);
       for (size_t j = icol_start_prefetch; j < icol_end_prefetch;
@@ -583,14 +571,14 @@ void BuildHistDispatch(const std::vector<GradientPair>& gpair,
     ColsWiseBuildHistKernel<BuildingManager>(gpair, row_indices, gmat,
                                              nodes_ids, p_hists, mapping_ids);
   } else {
-    const size_t nrows = row_indices.Size();
-    const size_t no_prefetch_size = Prefetch::NoPrefetchSize(nrows);
     // if need to work with all rows from bin-matrix (e.g. root node)
     if (BuildingManager::kContiguousBlock) {
       // contiguous memory access, built-in HW prefetching is enough
       RowsWiseBuildHistKernel<false, BuildingManager>(gpair, row_indices, gmat,
                                                       nodes_ids, p_hists, mapping_ids);
     } else {
+      const size_t nrows = row_indices.Size();
+      const size_t no_prefetch_size = Prefetch::NoPrefetchSize(nrows);
       const RowSetCollection::Elem span1(row_indices.begin,
                                          row_indices.end - no_prefetch_size);
       const RowSetCollection::Elem span2(row_indices.end - no_prefetch_size,
