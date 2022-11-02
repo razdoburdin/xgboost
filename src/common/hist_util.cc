@@ -532,8 +532,10 @@ void RowsWiseBuildHistKernel(const std::vector<GradientPair>& gpair,
     if (do_prefetch) {
       const size_t ri_prefetch = kContiguousBlock ? i + Prefetch::kPrefetchOffset + rid_start
                                                   : rid[i+Prefetch::kPrefetchOffset];
-      const size_t icol_start_prefetch = kAnyMissing ? row_ptr[ri_prefetch] : ri_prefetch * n_features;
-      const size_t icol_end_prefetch =  kAnyMissing ? row_ptr[ri_prefetch+1] : icol_start_prefetch + n_features;
+      const size_t icol_start_prefetch = kAnyMissing ? row_ptr[ri_prefetch]
+                                                     : ri_prefetch * n_features;
+      const size_t icol_end_prefetch  =  kAnyMissing ? row_ptr[ri_prefetch+1]
+                                                     : icol_start_prefetch + n_features;
 
       PREFETCH_READ_T0(pgh + two * ri_prefetch);
       for (size_t j = icol_start_prefetch; j < icol_end_prefetch;
