@@ -961,7 +961,8 @@ class GHistBuilder {
                  const GHistIndexMatrix& gmat,
                  uint16_t* nodes_ids,
                  std::vector<std::vector<double>>* p_hists,
-                 const uint16_t* mapping_ids) const;
+                 const uint16_t* mapping_ids,
+                 bool force_read_by_column = false) const;
 
   // construct a histogram via histogram aggregation
   template <bool any_missing>

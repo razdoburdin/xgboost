@@ -68,7 +68,8 @@ class HistogramBuilder {
                        const std::vector<GradientPair> &gpair_h,
                        const PartitionType* p_opt_partition_builder,
                        // template?
-                       std::vector<uint16_t>* p_node_ids) {
+                       std::vector<uint16_t>* p_node_ids,
+                       bool force_read_by_column) {
     const PartitionType& opt_partition_builder = *p_opt_partition_builder;
     std::vector<uint16_t>& node_ids = *p_node_ids;
     int nthreads = this->n_threads_;
@@ -87,13 +88,16 @@ class HistogramBuilder {
         std::vector<size_t> rows_vec;
         if (rows == nullptr) {
           rows_vec.resize(slice.e - slice.b);
-          std::iota(rows_vec.begin(), rows_vec.end(), slice.b);
+          rows_vec.front() = slice.b;
+          rows_vec.back() = slice.e - 1;
+          // std::iota(rows_vec.begin(), rows_vec.end(), slice.b);
           rid_set = common::RowSetCollection::Elem(rows_vec.data(),
                                                    rows_vec.data() + rows_vec.size());
         }
         builder_.template BuildHist<any_missing, is_root>(
           gpair_h, rid_set, gidx, node_ids.data(),
-          &buffer_.histograms_buffer[tid], buffer_.local_threads_mapping[tid].data());
+          &buffer_.histograms_buffer[tid], buffer_.local_threads_mapping[tid].data(),
+          force_read_by_column);
       }
     }
   }
@@ -123,6 +127,7 @@ class HistogramBuilder {
                  std::vector<GradientPair> const &gpair,
                  const PartitionType* p_opt_partition_builder,
                  std::vector<uint16_t>* p_node_ids,
+                 bool force_read_by_column = false,
                  const std::vector<std::vector<uint16_t>>* merged_thread_ids = nullptr) {
     int starting_index = std::numeric_limits<int>::max();
     int sync_count = 0;
@@ -134,11 +139,13 @@ class HistogramBuilder {
     if (gidx.IsDense()) {
       this->BuildLocalHistograms<false, is_root>(page_id, gidx,
                                         nodes_for_explicit_hist_build,
-                                        gpair, p_opt_partition_builder, p_node_ids);
+                                        gpair, p_opt_partition_builder, p_node_ids,
+                                        force_read_by_column);
     } else {
       this->BuildLocalHistograms<true, is_root>(page_id, gidx,
                                        nodes_for_explicit_hist_build,
-                                       gpair, p_opt_partition_builder, p_node_ids);
+                                       gpair, p_opt_partition_builder, p_node_ids,
+                                       force_read_by_column);
     }
 
     CHECK_GE(n_batches_, 1);

@@ -292,7 +292,7 @@ void TestBuildHistogram(bool is_distributed, bool force_read_by_column) {
     // histogram.BuildHist(0, gidx, &tree, row_set_collection,
     //                     nodes_for_explicit_hist_build, {}, gpair, 0, force_read_by_column);
     histogram.BuildHist<true>(0, gidx, &tree, nodes_for_explicit_hist_build,
-                              {}, gpair, &opt_partition_builder, &node_ids);
+                              {}, gpair, &opt_partition_builder, &node_ids, force_read_by_column);
     // histogram.template BuildHist<uint8_t, true>(0, gidx, &tree,
     //                   nodes_for_explicit_hist_build_, {}, gpair,
     //                   &opt_partition_builder, &node_ids);
@@ -392,7 +392,7 @@ void TestHistogramCategorical(size_t n_categories, bool force_read_by_column) {
     //                     force_read_by_column);
       cat_hist.BuildHist<true>(0, gidx, &tree,
                                nodes_for_explicit_hist_build, {},
-                               gpair.HostVector(), &opt_partition_builder, &node_ids);
+                               gpair.HostVector(), &opt_partition_builder, &node_ids, force_read_by_column);
   }
 
   /**
