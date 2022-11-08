@@ -621,7 +621,7 @@ void GHistBuilder::BuildHist(const std::vector<GradientPair>& gpair,
     [&](auto t) {
       using BuildingManager = decltype(t);
       BuildHistDispatch<BuildingManager>(gpair, row_indices, gmat, nodes_ids,
-                                          p_hists, mapping_ids);
+                                         p_hists, mapping_ids);
     });
   }
 

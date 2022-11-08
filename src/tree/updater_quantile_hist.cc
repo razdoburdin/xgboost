@@ -79,7 +79,9 @@ void QuantileHistMaker::Builder::InitRoot(
   nodes_for_explicit_hist_build_ = {node};
   nodes_for_subtraction_trick_.clear();
   constexpr bool kIsRoot = true;
+  monitor_->Start("BuildRootHist");
   this-> template BuildHist<kIsRoot>(gmat, p_fmat, p_tree, gpair_h);
+  monitor_->Stop("BuildRootHist");
   {
     GradientPairPrecise grad_stat;
     if (p_fmat->IsDense()) {
@@ -149,7 +151,7 @@ void QuantileHistMaker::Builder::BuildHist(const GHistIndexMatrix &gmat,
         page_id, gidx, p_tree,
         nodes_for_explicit_hist_build_, nodes_for_subtraction_trick_, gpair_h,
         &(partitioner.GetOptPartition()),
-        &(partitioner.GetNodeAssignments()), &merged_thread_ids);
+        &(partitioner.GetNodeAssignments()), false, &merged_thread_ids);
     ++page_id;
   }
 }
@@ -201,7 +203,9 @@ void QuantileHistMaker::Builder::ExpandTree(
   bool is_loss_guide = static_cast<TrainParam::TreeGrowPolicy>(param_.grow_policy) ==
                        TrainParam::kDepthWise ? false : true;
 
+  monitor_->Start("InitRoot");
   InitRoot<any_missing>(gmat, p_fmat, p_tree, gpair_h, &num_leaves, &expand);
+  monitor_->Stop("InitRoot");
   driver.Push(expand[0]);
   child_node_ids_.clear();
   child_node_ids_.emplace_back(0);

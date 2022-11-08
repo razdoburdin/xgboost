@@ -29,6 +29,7 @@ class HistogramBuilder {
   common::ParallelGHistBuilder buffer_;
   BatchParam param_;
   int32_t n_threads_{-1};
+  std::vector<std::vector<size_t>> rows_vecs;
   size_t n_batches_{0};
   // Whether XGBoost is running in distributed environment.
   bool is_distributed_{false};
@@ -48,6 +49,7 @@ class HistogramBuilder {
              bool is_distributed) {
     CHECK_GE(n_threads, 1);
     n_threads_ = n_threads;
+    rows_vecs.resize(n_threads);
     n_batches_ = n_batches;
     hist_.Init(total_bins);
     param_ = p;
@@ -73,27 +75,29 @@ class HistogramBuilder {
     const PartitionType& opt_partition_builder = *p_opt_partition_builder;
     std::vector<uint16_t>& node_ids = *p_node_ids;
     int nthreads = this->n_threads_;
-
     #pragma omp parallel num_threads(nthreads)
     {
-      size_t tid = omp_get_thread_num();
+      const size_t tid = omp_get_thread_num();
       auto thread_info = opt_partition_builder.tm.GetThreadInfoPtr(tid);
       const std::vector<common::Slice>& local_slices = thread_info->addr;
+
       buffer_.AllocateHistForLocalThread(thread_info->nodes_id, tid);
+
       for (const common::Slice& slice : local_slices) {
         const size_t* rows = slice.addr;
         auto rid_set = common::RowSetCollection::Elem(rows + slice.b,
                                                       rows + slice.e);
-
-        std::vector<size_t> rows_vec;
         if (rows == nullptr) {
-          rows_vec.resize(slice.e - slice.b);
-          rows_vec.front() = slice.b;
-          rows_vec.back() = slice.e - 1;
-          // std::iota(rows_vec.begin(), rows_vec.end(), slice.b);
-          rid_set = common::RowSetCollection::Elem(rows_vec.data(),
-                                                   rows_vec.data() + rows_vec.size());
+          size_t size = slice.e - slice.b;
+          if (rows_vecs[tid].size() < size) {
+            rows_vecs[tid].resize(size);
+          }
+          rows_vecs[tid][0] = slice.b;
+          rows_vecs[tid][size - 1] = slice.e - 1;
+          rid_set = common::RowSetCollection::Elem(rows_vecs[tid].data(),
+                                                   rows_vecs[tid].data() + size);
         }
+
         builder_.template BuildHist<any_missing, is_root>(
           gpair_h, rid_set, gidx, node_ids.data(),
           &buffer_.histograms_buffer[tid], buffer_.local_threads_mapping[tid].data(),
