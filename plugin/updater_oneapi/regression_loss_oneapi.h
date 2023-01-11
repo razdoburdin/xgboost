@@ -39,7 +39,7 @@ struct LinearSquareLossOneAPI {
 
   static const char* Name() { return "reg:squarederror_oneapi"; }
 
-  static ObjInfo Info() { return {ObjInfo::kRegression, true}; }
+  static ObjInfo Info() { return {ObjInfo::kRegression, true, false}; }
 };
 
 // TODO: DPC++ does not fully support std math inside offloaded kernels
@@ -67,7 +67,7 @@ struct SquaredLogErrorOneAPI {
 
   static const char* Name() { return "reg:squaredlogerror_oneapi"; }
 
-  static ObjInfo Info() { return {ObjInfo::kRegression, false}; }
+  static ObjInfo Info() { return ObjInfo::kRegression; }
 };
 
 // logistic loss for probability regression task
@@ -104,7 +104,7 @@ struct LogisticRegressionOneAPI {
 
   static const char* Name() { return "reg:logistic_oneapi"; }
 
-  static ObjInfo Info() { return {ObjInfo::kRegression, false}; }
+  static ObjInfo Info() { return ObjInfo::kRegression; }
 };
 
 // logistic loss for binary classification task
@@ -144,7 +144,7 @@ struct LogisticRawOneAPI : public LogisticRegressionOneAPI {
 
   static const char* Name() { return "binary:logitraw_oneapi"; }
 
-  static ObjInfo Info() { return {ObjInfo::kRegression, false}; }
+  static ObjInfo Info() { return ObjInfo::kRegression; }
 };
 
 }  // namespace obj

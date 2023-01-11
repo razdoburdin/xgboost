@@ -34,7 +34,7 @@ class PredictorOneAPI : public Predictor {
     if (generic_param->device_id != GenericParameter::kDefaultId) {
       int n_devices = (int)devices.size();
       CHECK_LT(generic_param->device_id, n_devices);
-      is_cpu = devices[generic_param->device_id].is_cpu() | devices[generic_param->device_id].is_host();
+      is_cpu = devices[generic_param->device_id].is_cpu();
     }
     LOG(INFO) << "device_id = " << generic_param->device_id << ", is_cpu = " << int(is_cpu);
 
@@ -60,11 +60,11 @@ class PredictorOneAPI : public Predictor {
     predictor_backend_->PredictBatch(dmat, predts, model, tree_begin, tree_end);
   }
 
-  bool InplacePredict(dmlc::any const &x, std::shared_ptr<DMatrix> p_m,
+  bool InplacePredict(std::shared_ptr<DMatrix> p_m,
                       const gbm::GBTreeModel &model, float missing,
                       PredictionCacheEntry *out_preds, uint32_t tree_begin,
                       unsigned tree_end) const override {
-    return predictor_backend_->InplacePredict(x, p_m, model, missing, out_preds, tree_begin, tree_end);
+    return predictor_backend_->InplacePredict(p_m, model, missing, out_preds, tree_begin, tree_end);
   }
 
   void PredictInstance(const SparsePage::Inst& inst,
@@ -306,6 +306,7 @@ class GPUPredictorOneAPI : public Predictor {
       CHECK_EQ(out_preds->Size(), n);
       std::copy(base_margin.begin(), base_margin.end(), out_preds_h.begin());
     } else {
+      auto base_score = model.learner_model_param->BaseScore(ctx_)(0);
       if (!base_margin.empty()) {
         std::ostringstream oss;
         oss << "Ignoring the base margin, since it has incorrect length. "
@@ -318,11 +319,10 @@ class GPUPredictorOneAPI : public Predictor {
           oss << "[number of data points], i.e. " << info.num_row_ << ". ";
         }
         oss << "Instead, all data points will use "
-            << "base_score = " << model.learner_model_param->base_score;
+            << "base_score = " << base_score;
         LOG(WARNING) << oss.str();
       }
-      std::fill(out_preds_h.begin(), out_preds_h.end(),
-                model.learner_model_param->base_score);
+      std::fill(out_preds_h.begin(), out_preds_h.end(), base_score);
     }
   }
 
@@ -333,8 +333,9 @@ class GPUPredictorOneAPI : public Predictor {
     if (generic_param->device_id != GenericParameter::kDefaultId) {
       qu_ = sycl::queue(devices[generic_param->device_id]);
     } else {
-      sycl::default_selector selector;
-      qu_ = sycl::queue(selector);
+      // sycl::default_selector selector;
+      // qu_ = sycl::queue(selector);
+      qu_ = sycl::queue(sycl::default_selector_v);
     }
   }
 
@@ -364,11 +365,11 @@ class GPUPredictorOneAPI : public Predictor {
     }
   }
 
-  bool InplacePredict(dmlc::any const &x, std::shared_ptr<DMatrix> p_m,
+  bool InplacePredict(std::shared_ptr<DMatrix> p_m,
                       const gbm::GBTreeModel &model, float missing,
                       PredictionCacheEntry *out_preds, uint32_t tree_begin,
                       unsigned tree_end) const override {
-    return cpu_predictor->InplacePredict(x, p_m, model, missing, out_preds, tree_begin, tree_end);
+    return cpu_predictor->InplacePredict(p_m, model, missing, out_preds, tree_begin, tree_end);
   }
 
   void PredictInstance(const SparsePage::Inst& inst,

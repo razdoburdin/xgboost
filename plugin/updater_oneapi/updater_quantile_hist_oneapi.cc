@@ -35,26 +35,27 @@ void QuantileHistMakerOneAPI::Configure(const Args& args) {
   if (param.device_id != GenericParameter::kDefaultId) {
     int n_devices = (int)devices.size();
     CHECK_LT(param.device_id, n_devices);
-    is_cpu = devices[param.device_id].is_cpu() | devices[param.device_id].is_host();
+    is_cpu = devices[param.device_id].is_cpu();
   }
   LOG(INFO) << "device_id = " << param.device_id << ", is_cpu = " << int(is_cpu);
 
   if (is_cpu)
   {
-    updater_backend_.reset(TreeUpdater::Create("grow_quantile_histmaker", tparam_, task_));
+    updater_backend_.reset(TreeUpdater::Create("grow_quantile_histmaker", ctx_, task_));
     updater_backend_->Configure(args);
   }
   else
   {
-    updater_backend_.reset(TreeUpdater::Create("grow_quantile_histmaker_oneapi_gpu", tparam_, task_));
+    updater_backend_.reset(TreeUpdater::Create("grow_quantile_histmaker_oneapi_gpu", ctx_, task_));
     updater_backend_->Configure(args);
   }
 }
 
 void QuantileHistMakerOneAPI::Update(HostDeviceVector<GradientPair> *gpair,
                                      DMatrix *dmat,
+                                     common::Span<HostDeviceVector<bst_node_t>> out_position,
                                      const std::vector<RegTree *> &trees) {
-  updater_backend_->Update(gpair, dmat, trees);
+  updater_backend_->Update(gpair, dmat, out_position, trees);
 }
 
 bool QuantileHistMakerOneAPI::UpdatePredictionCache(
@@ -78,7 +79,7 @@ void GPUQuantileHistMakerOneAPI::Configure(const Args& args) {
 
   // initialize pruner
   if (!pruner_) {
-    pruner_.reset(TreeUpdater::Create("prune", tparam_, task_));
+    pruner_.reset(TreeUpdater::Create("prune", ctx_, task_));
   }
   pruner_->Configure(args);
   param_.UpdateAllowUnknown(args);
@@ -113,6 +114,7 @@ void GPUQuantileHistMakerOneAPI::CallBuilderUpdate(const std::unique_ptr<Builder
 }
 void GPUQuantileHistMakerOneAPI::Update(HostDeviceVector<GradientPair> *gpair,
                                         DMatrix *dmat,
+                                        common::Span<HostDeviceVector<bst_node_t>> out_position,
                                         const std::vector<RegTree *> &trees) {
   if (dmat != p_last_dmat_ || is_gmat_initialized_ == false) {
     updater_monitor_.Start("GmatInitialization");
@@ -243,7 +245,8 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::ReduceHists(std::vector<
     const GradientPairT* psrc = reinterpret_cast<const GradientPairT*>(this_hist.DataConst());
     std::copy(psrc, psrc + nbins, reduce_buffer.begin() + i * nbins);
   }
-  histred_.Allreduce(reduce_buffer.data(), nbins * sync_ids.size());
+  collective::Allreduce<collective::Operation::kSum>(reduce_buffer.data(), nbins * sync_ids.size());
+  // histred_.Allreduce(reduce_buffer.data(), nbins * sync_ids.size());
   for (size_t i = 0; i < sync_ids.size(); i++) {
     auto this_hist = hist_[sync_ids[i]];
     GradientPairT* psrc = reinterpret_cast<GradientPairT*>(this_hist.Data());
@@ -1349,7 +1352,8 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitNewNode(int nid,
           grad_stat.Add(gpair[*it].GetGrad(), gpair[*it].GetHess());
         }
       }
-      histred_.Allreduce(&grad_stat, 1);
+      collective::Allreduce<collective::Operation::kSum>(&grad_stat, 1);
+      // histred_.Allreduce(&grad_stat, 1);
       snode_[nid].stats = GradStatsOneAPI<GradientSumT>(grad_stat.GetGrad(), grad_stat.GetHess());
     } else {
       int parent_id = tree[nid].Parent();
@@ -1397,15 +1401,15 @@ template void GPUQuantileHistMakerOneAPI::Builder<double>::PartitionKernel<uint3
 XGBOOST_REGISTER_TREE_UPDATER(QuantileHistMakerOneAPI, "grow_quantile_histmaker_oneapi")
 .describe("Grow tree using quantized histogram with dpc++.")
 .set_body(
-    [](ObjInfo task) {
-      return new QuantileHistMakerOneAPI(task);
+    [](GenericParameter const* ctx, ObjInfo task) {
+      return new QuantileHistMakerOneAPI(ctx, task);
     });
 
 XGBOOST_REGISTER_TREE_UPDATER(GPUQuantileHistMakerOneAPI, "grow_quantile_histmaker_oneapi_gpu")
 .describe("Grow tree using quantized histogram with dpc++ on GPU.")
 .set_body(
-    []() {
-      return new GPUQuantileHistMakerOneAPI();
+    [](GenericParameter const* ctx, ObjInfo task) {
+      return new GPUQuantileHistMakerOneAPI(ctx, task);
     });
 }  // namespace tree
 }  // namespace xgboost

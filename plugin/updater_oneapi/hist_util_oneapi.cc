@@ -110,7 +110,7 @@ void GHistIndexMatrixOneAPI::Init(sycl::queue qu,
                                   int max_bins) {
   nfeatures = p_fmat_device.p_mat->Info().num_col_;
 
-  cut = SketchOnDMatrix(p_fmat_device.p_mat, max_bins);
+  cut = SketchOnDMatrix(p_fmat_device.p_mat, max_bins, common::OmpGetNumThreads(0));
   cut_device.Init(qu, cut);
 
   max_num_bins = max_bins;

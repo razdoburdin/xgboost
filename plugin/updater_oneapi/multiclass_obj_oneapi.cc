@@ -78,8 +78,9 @@ class SoftmaxMultiClassObjOneAPI : public ObjFunction {
   void Configure(Args const& args) override {
     param_.UpdateAllowUnknown(args);
 
-    sycl::default_selector selector;
-    qu_ = sycl::queue(selector);
+    // sycl::default_selector selector;
+    // qu_ = sycl::queue(selector);
+    qu_ = sycl::queue(sycl::default_selector_v);
   }
 
   void GetGradient(const HostDeviceVector<bst_float>& preds,
@@ -108,7 +109,7 @@ class SoftmaxMultiClassObjOneAPI : public ObjFunction {
     }
 
     sycl::buffer<bst_float, 1> preds_buf(preds.HostPointer(), preds.Size());
-    sycl::buffer<bst_float, 1> labels_buf(info.labels.HostPointer(), info.labels.Size());
+    sycl::buffer<bst_float, 1> labels_buf(info.labels.Data()->HostPointer(), info.labels.Size());
     sycl::buffer<GradientPair, 1> out_gpair_buf(out_gpair->HostPointer(), out_gpair->Size());
     sycl::buffer<bst_float, 1> weights_buf(is_null_weight ? NULL : info.weights_.HostPointer(),
                                                is_null_weight ? 1 : info.weights_.Size());
@@ -209,7 +210,7 @@ class SoftmaxMultiClassObjOneAPI : public ObjFunction {
     }
   }
 
-  struct ObjInfo Task() const override {return {ObjInfo::kClassification, false}; }
+  struct ObjInfo Task() const override {return {ObjInfo::kClassification}; }
 
   void SaveConfig(Json* p_out) const override {
     auto& out = *p_out;

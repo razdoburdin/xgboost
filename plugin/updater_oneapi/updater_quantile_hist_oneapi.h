@@ -98,11 +98,12 @@ struct OneAPIHistMakerTrainParam
 /*! \brief construct a tree using quantized feature values with DPC++ interface */
 class QuantileHistMakerOneAPI: public TreeUpdater {
  public:
-  explicit QuantileHistMakerOneAPI(ObjInfo task) : task_{task} {}
+  explicit QuantileHistMakerOneAPI(GenericParameter const* ctx, ObjInfo task) : TreeUpdater(ctx), task_{task} {}
   void Configure(const Args& args) override;
 
   void Update(HostDeviceVector<GradientPair>* gpair,
               DMatrix* dmat,
+              common::Span<HostDeviceVector<bst_node_t>> out_position,
               const std::vector<RegTree*>& trees) override;
 
   bool UpdatePredictionCache(const DMatrix* data,
@@ -162,13 +163,14 @@ struct NodeEntry {
 /*! \brief construct a tree using quantized feature values with DPC++ backend on GPU*/
 class GPUQuantileHistMakerOneAPI: public TreeUpdater {
  public:
-  explicit GPUQuantileHistMakerOneAPI(ObjInfo task) : task_{task} {
+  explicit GPUQuantileHistMakerOneAPI(GenericParameter const* ctx, ObjInfo task) : TreeUpdater(ctx), task_{task} {
     updater_monitor_.Init("GPUQuantileHistMakerOneAPI");
   }
   void Configure(const Args& args) override;
 
   void Update(HostDeviceVector<GradientPair>* gpair,
               DMatrix* dmat,
+              common::Span<HostDeviceVector<bst_node_t>> out_position,
               const std::vector<RegTree*>& trees) override;
 
   bool UpdatePredictionCache(const DMatrix* data,
@@ -490,7 +492,7 @@ class GPUQuantileHistMakerOneAPI: public TreeUpdater {
     common::Monitor builder_monitor_;
     common::Monitor kernel_monitor_;
     common::ParallelGHistBuilderOneAPI<GradientSumT> hist_buffer_;
-    rabit::Reducer<GradientPairT, GradientPairT::Reduce> histred_;
+    // rabit::op::Reducer<GradientPairT, GradientPairT::Reduce> histred_;
     std::unique_ptr<HistSynchronizerOneAPI<GradientSumT>> hist_synchronizer_;
     std::unique_ptr<HistRowsAdderOneAPI<GradientSumT>> hist_rows_adder_;
 
