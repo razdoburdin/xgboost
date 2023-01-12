@@ -73,8 +73,7 @@ void GPUQuantileHistMakerOneAPI::Configure(const Args& args) {
   if (param.device_id != GenericParameter::kDefaultId) {
     qu_ = sycl::queue(devices[param.device_id]);
   } else {
-    sycl::default_selector selector;
-    qu_ = sycl::queue(selector);
+    qu_ = sycl::queue(sycl::default_selector_v);
   }
 
   // initialize pruner
@@ -107,9 +106,10 @@ template<typename GradientSumT>
 void GPUQuantileHistMakerOneAPI::CallBuilderUpdate(const std::unique_ptr<Builder<GradientSumT>>& builder,
                                                    HostDeviceVector<GradientPair> *gpair,
                                                    DMatrix *dmat,
+                                                   common::Span<HostDeviceVector<bst_node_t>> out_position,
                                                    const std::vector<RegTree *> &trees) {
   for (auto tree : trees) {
-    builder->Update(gmat_, gpair, dmat, tree);
+    builder->Update(gmat_, gpair, dmat, out_position, tree);
   }
 }
 void GPUQuantileHistMakerOneAPI::Update(HostDeviceVector<GradientPair> *gpair,
@@ -136,12 +136,12 @@ void GPUQuantileHistMakerOneAPI::Update(HostDeviceVector<GradientPair> *gpair,
     if (!float_builder_) {
       SetBuilder(&float_builder_, dmat);
     }
-    CallBuilderUpdate(float_builder_, gpair, dmat, trees);
+    CallBuilderUpdate(float_builder_, gpair, dmat, out_position, trees);
   } else {
     if (!double_builder_) {
       SetBuilder(&double_builder_, dmat);
     }
-    CallBuilderUpdate(double_builder_, gpair, dmat, trees);
+    CallBuilderUpdate(double_builder_, gpair, dmat, out_position, trees);
   }
 
   param_.learning_rate = lr;
@@ -245,7 +245,9 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::ReduceHists(std::vector<
     const GradientPairT* psrc = reinterpret_cast<const GradientPairT*>(this_hist.DataConst());
     std::copy(psrc, psrc + nbins, reduce_buffer.begin() + i * nbins);
   }
-  collective::Allreduce<collective::Operation::kSum>(reduce_buffer.data(), nbins * sync_ids.size());
+  collective::Allreduce<collective::Operation::kSum>(
+    reinterpret_cast<GradientSumT*>(reduce_buffer.data()),
+    2 * nbins * sync_ids.size());
   // histred_.Allreduce(reduce_buffer.data(), nbins * sync_ids.size());
   for (size_t i = 0; i < sync_ids.size(); i++) {
     auto this_hist = hist_[sync_ids[i]];
@@ -604,6 +606,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::Update(
     const GHistIndexMatrixOneAPI &gmat,
     HostDeviceVector<GradientPair> *gpair,
     DMatrix *p_fmat,
+    common::Span<HostDeviceVector<bst_node_t>> out_position,
     RegTree *p_tree) {
   builder_monitor_.Start("Update");
 
@@ -626,7 +629,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::Update(
     p_tree->Stat(nid).base_weight = snode_[nid].weight;
     p_tree->Stat(nid).sum_hess = static_cast<float>(snode_[nid].stats.GetHess());
   }
-  pruner_->Update(gpair, p_fmat, std::vector<RegTree*>{p_tree});
+  pruner_->Update(gpair, p_fmat, out_position, std::vector<RegTree*>{p_tree});
 
   builder_monitor_.Stop("Update");
 }
@@ -852,15 +855,9 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitData(const GHistInde
   }
   // store a pointer to the tree
   p_last_tree_ = &tree;
-  if (data_layout_ == kDenseDataOneBased) {
-    column_sampler_.Init(info.num_col_, info.feature_weights.ConstHostVector(),
-                         param_.colsample_bynode, param_.colsample_bylevel,
-                         param_.colsample_bytree, true);
-  } else {
-    column_sampler_.Init(info.num_col_, info.feature_weights.ConstHostVector(),
-                         param_.colsample_bynode, param_.colsample_bylevel,
-                         param_.colsample_bytree, false);
-  }
+  column_sampler_.Init(info.num_col_, info.feature_weights.ConstHostVector(),
+                       param_.colsample_bynode, param_.colsample_bylevel,
+                       param_.colsample_bytree);
   if (data_layout_ == kDenseDataZeroBased || data_layout_ == kDenseDataOneBased) {
     /* specialized code for dense data:
        choose the column that has a least positive number of discrete bins.
@@ -1352,7 +1349,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitNewNode(int nid,
           grad_stat.Add(gpair[*it].GetGrad(), gpair[*it].GetHess());
         }
       }
-      collective::Allreduce<collective::Operation::kSum>(&grad_stat, 1);
+      collective::Allreduce<collective::Operation::kSum>(reinterpret_cast<GradientSumT*>(&grad_stat), 2);
       // histred_.Allreduce(&grad_stat, 1);
       snode_[nid].stats = GradStatsOneAPI<GradientSumT>(grad_stat.GetGrad(), grad_stat.GetHess());
     } else {

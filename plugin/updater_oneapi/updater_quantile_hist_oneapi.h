@@ -254,6 +254,7 @@ class GPUQuantileHistMakerOneAPI: public TreeUpdater {
     virtual void Update(const GHistIndexMatrixOneAPI& gmat,
                         HostDeviceVector<GradientPair>* gpair,
                         DMatrix* p_fmat,
+                        common::Span<HostDeviceVector<bst_node_t>> out_position,
                         RegTree* p_tree);
 
     inline void BuildHist(const std::vector<GradientPair>& gpair,
@@ -507,6 +508,7 @@ class GPUQuantileHistMakerOneAPI: public TreeUpdater {
   void CallBuilderUpdate(const std::unique_ptr<Builder<GradientSumT>>& builder,
                          HostDeviceVector<GradientPair> *gpair,
                          DMatrix *dmat,
+                         common::Span<HostDeviceVector<bst_node_t>> out_position,
                          const std::vector<RegTree *> &trees);
 
  protected:
