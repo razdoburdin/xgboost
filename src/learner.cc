@@ -318,6 +318,7 @@ DMLC_REGISTER_PARAMETER(GenericParameter);
 
 int constexpr GenericParameter::kCpuId;
 int64_t constexpr GenericParameter::kDefaultSeed;
+int constexpr GenericParameter::kDefaultId;
 
 GenericParameter::GenericParameter() : cfs_cpu_count_{common::GetCfsCPUCount()} {}
 
@@ -807,7 +808,8 @@ class LearnerConfiguration : public Learner {
   void ConfigureObjective(LearnerTrainParam const& old, Args* p_args) {
     // Once binary IO is gone, NONE of these config is useful.
     if (cfg_.find("num_class") != cfg_.cend() && cfg_.at("num_class") != "0" &&
-        tparam_.objective != "multi:softprob") {
+        (tparam_.objective != "multi:softprob") &&
+        (tparam_.objective != "multi:softprob_oneapi")) {
       cfg_["num_output_group"] = cfg_["num_class"];
       if (atoi(cfg_["num_class"].c_str()) > 1 && cfg_.count("objective") == 0) {
         tparam_.objective = "multi:softmax";
