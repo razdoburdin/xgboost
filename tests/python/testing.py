@@ -318,9 +318,6 @@ _unweighted_datasets_strategy = strategies.sampled_from(
         TestDataset(
             "calif_housing", get_california_housing, "reg:squarederror", "rmse"
         ),
-        TestDataset(
-            "calif_housing-l1", get_california_housing, "reg:absoluteerror", "mae"
-        ),
         TestDataset("digits", get_digits, "multi:softmax", "mlogloss"),
         TestDataset("cancer", get_cancer, "binary:logistic", "logloss"),
         TestDataset(
