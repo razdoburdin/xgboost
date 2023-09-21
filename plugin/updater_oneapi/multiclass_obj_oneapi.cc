@@ -95,7 +95,7 @@ class SoftmaxMultiClassObjOneAPI : public ObjFunction {
       std::vector<sycl::device> devices = sycl::device::get_devices();
       qu_ = sycl::queue(devices[rabit::GetRank()]);
     } else {
-      qu_ = sycl::queue(sycl::default_selector());
+      qu_ = sycl::queue(sycl::default_selector_v);
     }
   }
 
