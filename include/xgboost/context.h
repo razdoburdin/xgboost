@@ -22,6 +22,9 @@ struct CUDAContext;
 struct DeviceSym {
   static auto constexpr CPU() { return "cpu"; }
   static auto constexpr CUDA() { return "cuda"; }
+  static auto constexpr SYCL() { return "sycl"; }
+  static auto constexpr SYCL_CPU() { return "sycl:cpu"; }
+  static auto constexpr SYCL_GPU() { return "sycl:gpu"; }
 };
 
 /**
@@ -29,12 +32,15 @@ struct DeviceSym {
  *        viewing types like `linalg::TensorView`.
  */
 struct DeviceOrd {
-  enum Type : std::int16_t { kCPU = 0, kCUDA = 1 } device{kCPU};
+  enum Type : std::int16_t { kCPU = 0, kCUDA = 1, kSycl = 2, kSyclCpu = 3, kSyclGpu = 4} device{kCPU};
   // CUDA device ordinal.
   bst_d_ordinal_t ordinal{-1};
 
   [[nodiscard]] bool IsCUDA() const { return device == kCUDA; }
   [[nodiscard]] bool IsCPU() const { return device == kCPU; }
+  [[nodiscard]] bool IsSycl() const { return device == kSycl; }
+  [[nodiscard]] bool IsSyclCPU() const { return device == kSyclCPU; }
+  [[nodiscard]] bool IsSyclGPU() const { return device == kSyclGPU; }
 
   DeviceOrd() = default;
   constexpr DeviceOrd(Type type, bst_d_ordinal_t ord) : device{type}, ordinal{ord} {}
@@ -55,6 +61,27 @@ struct DeviceOrd {
    */
   [[nodiscard]] static auto CUDA(bst_d_ordinal_t ordinal) { return DeviceOrd{kCUDA, ordinal}; }
 
+  /**
+   * @brief Constructor for SYCL.
+   *
+   * @param ordinal CUDA device ordinal.
+   */
+  [[nodiscard]] constexpr static auto SYCL(bst_d_ordinal_t ordinal) { return DeviceOrd{kSycl, kSyclCPU}; }
+
+  /**
+   * @brief Constructor for SYCL CPU.
+   *
+   * @param ordinal CUDA device ordinal.
+   */
+  [[nodiscard]] constexpr static auto SYCL_CPU(bst_d_ordinal_t ordinal) { return DeviceOrd{kSyclCPU, kSyclCPU}; }
+
+  /**
+   * @brief Constructor for SYCL GPU.
+   *
+   * @param ordinal CUDA device ordinal.
+   */
+  [[nodiscard]] constexpr static auto SYCL_GPU(bst_d_ordinal_t ordinal) { return DeviceOrd{kSyclGPU, kSyclCPU}; }
+
   [[nodiscard]] bool operator==(DeviceOrd const& that) const {
     return device == that.device && ordinal == that.ordinal;
   }
@@ -68,6 +95,12 @@ struct DeviceOrd {
         return DeviceSym::CPU();
       case DeviceOrd::kCUDA:
         return DeviceSym::CUDA() + (':' + std::to_string(ordinal));
+      case DeviceOrd::kSycl:
+        return DeviceSym::SYCL() + (':' + std::to_string(ordinal));
+      case DeviceOrd::kSyclCPU:
+        return DeviceSym::SYCL_CPU() + (':' + std::to_string(ordinal));
+      case DeviceOrd::kSyclGPU:
+        return DeviceSym::SYCL_GPU() + (':' + std::to_string(ordinal));
       default: {
         LOG(FATAL) << "Unknown device.";
         return "";
