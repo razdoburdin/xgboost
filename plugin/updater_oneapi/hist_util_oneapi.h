@@ -191,7 +191,7 @@ struct GHistIndexMatrixOneAPI {
   size_t row_stride;
 
   // Create a global histogram matrix based on a given DMatrix device wrapper
-  void Init(sycl::queue qu, const DeviceMatrixOneAPI& p_fmat_device, int max_num_bins);
+  void Init(sycl::queue qu, Context const * ctx, const DeviceMatrixOneAPI& p_fmat_device, int max_num_bins);
 
   template <typename BinIdxType>
   void SetIndexData(sycl::queue qu, common::Span<BinIdxType> index_data_span,

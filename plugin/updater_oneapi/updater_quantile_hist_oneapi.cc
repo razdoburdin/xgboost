@@ -106,7 +106,7 @@ void QuantileHistMakerOneAPIBackend::Update(TrainParam const *param,
   if (dmat != p_last_dmat_ || is_gmat_initialized_ == false) {
     updater_monitor_.Start("GmatInitialization");
     DeviceMatrixOneAPI dmat_device(qu_, dmat);
-    gmat_.Init(qu_, dmat_device, static_cast<uint32_t>(param_.max_bin));
+    gmat_.Init(qu_, ctx_, dmat_device, static_cast<uint32_t>(param_.max_bin));
     updater_monitor_.Stop("GmatInitialization");
     is_gmat_initialized_ = true;
   }

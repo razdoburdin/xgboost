@@ -106,11 +106,12 @@ void GHistIndexMatrixOneAPI::ResizeIndex(const size_t n_offsets,
 }
 
 void GHistIndexMatrixOneAPI::Init(sycl::queue qu,
+                                  Context const * ctx,
                                   const DeviceMatrixOneAPI& p_fmat_device,
                                   int max_bins) {
   nfeatures = p_fmat_device.p_mat->Info().num_col_;
 
-  cut = SketchOnDMatrix(p_fmat_device.p_mat, max_bins, common::OmpGetNumThreads(0));
+  cut = SketchOnDMatrix(ctx, p_fmat_device.p_mat, max_bins);
   cut_device.Init(qu, cut);
 
   max_num_bins = max_bins;
