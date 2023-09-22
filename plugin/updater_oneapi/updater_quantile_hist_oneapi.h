@@ -14,6 +14,7 @@
 #include "hist_util_oneapi.h"
 #include "row_set_oneapi.h"
 #include "split_evaluator_oneapi.h"
+#include "device_manager_oneapi.h"
 
 #include "xgboost/data.h"
 #include "xgboost/json.h"
@@ -98,16 +99,17 @@ struct OneAPIHistMakerTrainParam
 /*! \brief construct a tree using quantized feature values with DPC++ interface */
 class QuantileHistMakerOneAPI: public TreeUpdater {
  public:
-  explicit QuantileHistMakerOneAPI(Context const* ctx, ObjInfo task) : TreeUpdater(ctx), task_{task} {}
+  explicit QuantileHistMakerOneAPI(Context const* ctx, ObjInfo const * task) : TreeUpdater(ctx), ctx_(ctx), task_{task} {}
   void Configure(const Args& args) override;
 
-  void Update(HostDeviceVector<GradientPair>* gpair,
+  void Update(TrainParam const *param,
+              HostDeviceVector<GradientPair>* gpair,
               DMatrix* dmat,
               common::Span<HostDeviceVector<bst_node_t>> out_position,
               const std::vector<RegTree*>& trees) override;
 
   bool UpdatePredictionCache(const DMatrix* data,
-                             linalg::VectorView<bst_float> out_preds) override;
+                             linalg::MatrixView<float> out_preds) override;
 
   void LoadConfig(Json const& in) override {
     if (updater_backend_) {
@@ -139,7 +141,10 @@ class QuantileHistMakerOneAPI: public TreeUpdater {
   // training parameter
   TrainParam param_;
 
-  ObjInfo task_;
+  DeviceManagerOneAPI device_manager;
+
+  ObjInfo const *task_{nullptr};
+  Context const* ctx_;
   std::unique_ptr<TreeUpdater> updater_backend_;
 };
 
@@ -161,20 +166,21 @@ struct NodeEntry {
 // actual builder that runs the algorithm
 
 /*! \brief construct a tree using quantized feature values with DPC++ backend on GPU*/
-class GPUQuantileHistMakerOneAPI: public TreeUpdater {
+class QuantileHistMakerOneAPIBackend: public TreeUpdater {
  public:
-  explicit GPUQuantileHistMakerOneAPI(Context const* ctx, ObjInfo task) : TreeUpdater(ctx), task_{task} {
-    updater_monitor_.Init("GPUQuantileHistMakerOneAPI");
+  explicit QuantileHistMakerOneAPIBackend(Context const* ctx, ObjInfo const * task) : TreeUpdater(ctx), ctx_(ctx), task_{task} {
+    updater_monitor_.Init("QuantileHistMakerOneAPIBackend");
   }
   void Configure(const Args& args) override;
 
-  void Update(HostDeviceVector<GradientPair>* gpair,
+  void Update(TrainParam const *param,
+              HostDeviceVector<GradientPair>* gpair,
               DMatrix* dmat,
               common::Span<HostDeviceVector<bst_node_t>> out_position,
               const std::vector<RegTree*>& trees) override;
 
   bool UpdatePredictionCache(const DMatrix* data,
-                             linalg::VectorView<bst_float> out_preds) override;
+                             linalg::MatrixView<float> out_preds) override;
 
   void LoadConfig(Json const& in) override {
     auto const& config = get<Object const>(in);
@@ -253,7 +259,9 @@ class GPUQuantileHistMakerOneAPI: public TreeUpdater {
       kernel_monitor_.Init("QuantileOneAPI::Kernels");
     }
     // update one tree, growing
-    void Update(const GHistIndexMatrixOneAPI &gmat,
+    void Update(Context const * ctx,
+                TrainParam const *param,
+                const GHistIndexMatrixOneAPI &gmat,
                 HostDeviceVector<GradientPair> *gpair,
                 const USMVector<GradientPair, MemoryType::on_device>& gpair_device,
                 DMatrix *p_fmat,
@@ -278,12 +286,13 @@ class GPUQuantileHistMakerOneAPI: public TreeUpdater {
     }
 
     bool UpdatePredictionCache(const DMatrix* data,
-                               linalg::VectorView<bst_float> p_out_preds);
+                               linalg::MatrixView<float> p_out_preds);
     void SetHistSynchronizer(HistSynchronizerOneAPI<GradientSumT>* sync);
     void SetHistRowsAdder(HistRowsAdderOneAPI<GradientSumT>* adder);
 
     // initialize temp data structure
-    void InitData(const GHistIndexMatrixOneAPI& gmat,
+    void InitData(Context const * ctx,
+                  const GHistIndexMatrixOneAPI& gmat,
                   const std::vector<GradientPair>& gpair,
                   const USMVector<GradientPair, MemoryType::on_device> &gpair_device,
                   const DMatrix& fmat,
@@ -513,6 +522,7 @@ class GPUQuantileHistMakerOneAPI: public TreeUpdater {
 
   template<typename GradientSumT>
   void CallBuilderUpdate(const std::unique_ptr<Builder<GradientSumT>>& builder,
+                         TrainParam const *param,
                          HostDeviceVector<GradientPair> *gpair,
                          DMatrix *dmat,
                          common::Span<HostDeviceVector<bst_node_t>> out_position,
@@ -526,13 +536,15 @@ class GPUQuantileHistMakerOneAPI: public TreeUpdater {
   FeatureInteractionConstraintHost int_constraint_;
 
   sycl::queue qu_;
-  ObjInfo task_;
+  DeviceManagerOneAPI device_manager;
+  Context const* ctx_;
+  ObjInfo const *task_{nullptr};
 };
 
 template <typename GradientSumT>
 class HistSynchronizerOneAPI {
  public:
-  using BuilderT = GPUQuantileHistMakerOneAPI::Builder<GradientSumT>;
+  using BuilderT = QuantileHistMakerOneAPIBackend::Builder<GradientSumT>;
 
   virtual void SyncHistograms(BuilderT* builder,
                               std::vector<int>& sync_ids,
@@ -543,7 +555,7 @@ class HistSynchronizerOneAPI {
 template <typename GradientSumT>
 class BatchHistSynchronizerOneAPI: public HistSynchronizerOneAPI<GradientSumT> {
  public:
-  using BuilderT = GPUQuantileHistMakerOneAPI::Builder<GradientSumT>;
+  using BuilderT = QuantileHistMakerOneAPIBackend::Builder<GradientSumT>;
   void SyncHistograms(BuilderT* builder,
                       std::vector<int>& sync_ids,
                       RegTree *p_tree) override;
@@ -559,7 +571,7 @@ class BatchHistSynchronizerOneAPI: public HistSynchronizerOneAPI<GradientSumT> {
 template <typename GradientSumT>
 class DistributedHistSynchronizerOneAPI: public HistSynchronizerOneAPI<GradientSumT> {
  public:
-  using BuilderT = GPUQuantileHistMakerOneAPI::Builder<GradientSumT>;
+  using BuilderT = QuantileHistMakerOneAPIBackend::Builder<GradientSumT>;
   using ExpandEntryT = typename BuilderT::ExpandEntry;
 
   void SyncHistograms(BuilderT* builder, std::vector<int>& sync_ids, RegTree *p_tree) override;
@@ -572,7 +584,7 @@ class DistributedHistSynchronizerOneAPI: public HistSynchronizerOneAPI<GradientS
 template <typename GradientSumT>
 class HistRowsAdderOneAPI {
  public:
-  using BuilderT = GPUQuantileHistMakerOneAPI::Builder<GradientSumT>;
+  using BuilderT = QuantileHistMakerOneAPIBackend::Builder<GradientSumT>;
 
   virtual void AddHistRows(BuilderT* builder, std::vector<int>& sync_ids, RegTree *p_tree) = 0;
   virtual ~HistRowsAdderOneAPI() = default;
@@ -581,14 +593,14 @@ class HistRowsAdderOneAPI {
 template <typename GradientSumT>
 class BatchHistRowsAdderOneAPI: public HistRowsAdderOneAPI<GradientSumT> {
  public:
-  using BuilderT = GPUQuantileHistMakerOneAPI::Builder<GradientSumT>;
+  using BuilderT = QuantileHistMakerOneAPIBackend::Builder<GradientSumT>;
   void AddHistRows(BuilderT*, std::vector<int>& sync_ids, RegTree *p_tree) override;
 };
 
 template <typename GradientSumT>
 class DistributedHistRowsAdderOneAPI: public HistRowsAdderOneAPI<GradientSumT> {
  public:
-  using BuilderT = GPUQuantileHistMakerOneAPI::Builder<GradientSumT>;
+  using BuilderT = QuantileHistMakerOneAPIBackend::Builder<GradientSumT>;
   void AddHistRows(BuilderT*, std::vector<int>& sync_ids, RegTree *p_tree) override;
 };
 

@@ -16,7 +16,7 @@
 #include "xgboost/objective.h"
 #include "xgboost/json.h"
 
-
+#include "device_manager_oneapi.h"
 #include "CL/sycl.hpp"
 
 
@@ -87,16 +87,7 @@ class SoftmaxMultiClassObjOneAPI : public ObjFunction {
 
   void Configure(Args const& args) override {
     param_.UpdateAllowUnknown(args);
-
-
-    // sycl::default_selector selector;
-    // qu_ = sycl::queue(selector);
-    if (rabit::IsDistributed()) {
-      std::vector<sycl::device> devices = sycl::device::get_devices();
-      qu_ = sycl::queue(devices[rabit::GetRank()]);
-    } else {
-      qu_ = sycl::queue(sycl::default_selector_v);
-    }
+    qu_ = device_manager.GetQueue(ctx_->Device());
   }
 
 
@@ -270,6 +261,7 @@ class SoftmaxMultiClassObjOneAPI : public ObjFunction {
   // Cache for max_preds
   mutable HostDeviceVector<bst_float> max_preds_;
 
+  DeviceManagerOneAPI device_manager;
 
   mutable sycl::queue qu_;
 };

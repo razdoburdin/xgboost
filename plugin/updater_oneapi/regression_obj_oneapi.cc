@@ -12,7 +12,8 @@
 
 #include "../../src/common/transform.h"
 #include "../../src/common/common.h"
-#include "./regression_loss_oneapi.h"
+#include "regression_loss_oneapi.h"
+#include "device_manager_oneapi.h"
 
 #include "CL/sycl.hpp"
 
@@ -40,15 +41,7 @@ class RegLossObjOneAPI : public ObjFunction {
 
   void Configure(const std::vector<std::pair<std::string, std::string> >& args) override {
     param_.UpdateAllowUnknown(args);
-
-    // sycl::default_selector selector;
-    // qu_ = sycl::queue(selector);
-    if (rabit::IsDistributed()) {
-      std::vector<sycl::device> devices = sycl::device::get_devices();
-      qu_ = sycl::queue(devices[rabit::GetRank()]);
-    } else {
-      qu_ = sycl::queue(sycl::default_selector_v);
-    }
+    qu_ = device_manager.GetQueue(ctx_->Device());
   }
 
   void GetGradient(const HostDeviceVector<bst_float>& preds,
@@ -170,6 +163,7 @@ class RegLossObjOneAPI : public ObjFunction {
 
  protected:
   RegLossParamOneAPI param_;
+  DeviceManagerOneAPI device_manager;
 
   mutable sycl::queue qu_;
 };

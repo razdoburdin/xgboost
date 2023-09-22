@@ -8,7 +8,7 @@
 #include "xgboost/logging.h"
 #include "xgboost/tree_updater.h"
 
-#include "./updater_quantile_hist_oneapi.h"
+#include "updater_quantile_hist_oneapi.h"
 #include "data_oneapi.h"
 
 namespace xgboost {
@@ -23,24 +23,11 @@ DMLC_REGISTRY_FILE_TAG(updater_quantile_hist_oneapi);
 DMLC_REGISTER_PARAMETER(OneAPIHistMakerTrainParam);
 
 void QuantileHistMakerOneAPI::Configure(const Args& args) {
-  Context param;
-  param.UpdateAllowUnknown(args);
+  const DeviceOrd device_spec = ctx_->Device();
 
-  bool is_cpu = false;
-  std::vector<sycl::device> devices = sycl::device::get_devices();
-  for (size_t i = 0; i < devices.size(); i++)
-  {
-    LOG(INFO) << "device_id = " << i << ", name = " << devices[i].get_info<sycl::info::device::name>();
-  }
-  if (rabit::IsDistributed()) {
-      LOG(INFO) << "rabit rank = " << rabit::GetRank();
-  }
-  if (param.device_id != Context::kDefaultId) {
-    int n_devices = (int)devices.size();
-    CHECK_LT(param.device_id, n_devices);
-    is_cpu = devices[param.device_id].is_cpu();
-  }
-  LOG(INFO) << "device_id = " << param.device_id << ", is_cpu = " << int(is_cpu);
+  sycl::device device = device_manager.GetDevice(device_spec);
+  bool is_cpu = device.is_cpu();
+  LOG(INFO) << "device = " << device_spec.Name() << ", is_cpu = " << int(is_cpu);
 
   if (is_cpu)
   {
@@ -49,39 +36,28 @@ void QuantileHistMakerOneAPI::Configure(const Args& args) {
   }
   else
   {
-    updater_backend_.reset(TreeUpdater::Create("grow_quantile_histmaker_oneapi_gpu", ctx_, task_));
+    updater_backend_.reset(TreeUpdater::Create("grow_quantile_histmaker_oneapi_backend", ctx_, task_));
     updater_backend_->Configure(args);
   }
 }
 
-void QuantileHistMakerOneAPI::Update(HostDeviceVector<GradientPair> *gpair,
+void QuantileHistMakerOneAPI::Update(TrainParam const *param,
+                                     HostDeviceVector<GradientPair> *gpair,
                                      DMatrix *dmat,
                                      common::Span<HostDeviceVector<bst_node_t>> out_position,
                                      const std::vector<RegTree *> &trees) {
-  updater_backend_->Update(gpair, dmat, out_position, trees);
+  updater_backend_->Update(param, gpair, dmat, out_position, trees);
 }
 
 bool QuantileHistMakerOneAPI::UpdatePredictionCache(
     const DMatrix* data,
-    linalg::VectorView<bst_float> out_preds) {
+    linalg::MatrixView<float> out_preds) {
   return updater_backend_->UpdatePredictionCache(data, out_preds);
 }
 
-void GPUQuantileHistMakerOneAPI::Configure(const Args& args) {
-  Context param;
-  param.UpdateAllowUnknown(args);
-
-  std::vector<sycl::device> devices = sycl::device::get_devices();
-
-  if (param.device_id != Context::kDefaultId) {
-    qu_ = sycl::queue(devices[param.device_id]);
-  } else {
-    if (rabit::IsDistributed()) {
-      qu_ = sycl::queue(devices[rabit::GetRank()]);
-    } else {
-      qu_ = sycl::queue(sycl::default_selector());
-    }
-  }
+void QuantileHistMakerOneAPIBackend::Configure(const Args& args) {
+  const DeviceOrd device_spec = ctx_->Device();
+  qu_ = device_manager.GetQueue(device_spec);
 
   // initialize pruner
   if (!pruner_) {
@@ -93,7 +69,7 @@ void GPUQuantileHistMakerOneAPI::Configure(const Args& args) {
 }
 
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::SetBuilder(std::unique_ptr<Builder<GradientSumT>>* builder,
+void QuantileHistMakerOneAPIBackend::SetBuilder(std::unique_ptr<Builder<GradientSumT>>* builder,
                                             DMatrix *dmat) {
   builder->reset(new Builder<GradientSumT>(
                 qu_,
@@ -110,7 +86,8 @@ void GPUQuantileHistMakerOneAPI::SetBuilder(std::unique_ptr<Builder<GradientSumT
 }
 
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::CallBuilderUpdate(const std::unique_ptr<Builder<GradientSumT>>& builder,
+void QuantileHistMakerOneAPIBackend::CallBuilderUpdate(const std::unique_ptr<Builder<GradientSumT>>& builder,
+                                                   TrainParam const *param,
                                                    HostDeviceVector<GradientPair> *gpair,
                                                    DMatrix *dmat,
                                                    common::Span<HostDeviceVector<bst_node_t>> out_position,
@@ -118,13 +95,14 @@ void GPUQuantileHistMakerOneAPI::CallBuilderUpdate(const std::unique_ptr<Builder
   const std::vector<GradientPair>& gpair_h = gpair->ConstHostVector();
   USMVector<GradientPair, MemoryType::on_device> gpair_device(qu_, gpair_h);
   for (auto tree : trees) {
-    builder->Update(gmat_, gpair, gpair_device, dmat, out_position, tree);
+    builder->Update(ctx_, param, gmat_, gpair, gpair_device, dmat, out_position, tree);
   }
 }
-void GPUQuantileHistMakerOneAPI::Update(HostDeviceVector<GradientPair> *gpair,
-                                        DMatrix *dmat,
-                                        common::Span<HostDeviceVector<bst_node_t>> out_position,
-                                        const std::vector<RegTree *> &trees) {
+void QuantileHistMakerOneAPIBackend::Update(TrainParam const *param,
+                                            HostDeviceVector<GradientPair> *gpair,
+                                            DMatrix *dmat,
+                                            common::Span<HostDeviceVector<bst_node_t>> out_position,
+                                            const std::vector<RegTree *> &trees) {
   if (dmat != p_last_dmat_ || is_gmat_initialized_ == false) {
     updater_monitor_.Start("GmatInitialization");
     DeviceMatrixOneAPI dmat_device(qu_, dmat);
@@ -145,12 +123,12 @@ void GPUQuantileHistMakerOneAPI::Update(HostDeviceVector<GradientPair> *gpair,
     if (!float_builder_) {
       SetBuilder(&float_builder_, dmat);
     }
-    CallBuilderUpdate(float_builder_, gpair, dmat, out_position, trees);
+    CallBuilderUpdate(float_builder_, param, gpair, dmat, out_position, trees);
   } else {
     if (!double_builder_) {
       SetBuilder(&double_builder_, dmat);
     }
-    CallBuilderUpdate(double_builder_, gpair, dmat, out_position, trees);
+    CallBuilderUpdate(double_builder_, param, gpair, dmat, out_position, trees);
   }
 
   param_.learning_rate = lr;
@@ -158,8 +136,8 @@ void GPUQuantileHistMakerOneAPI::Update(HostDeviceVector<GradientPair> *gpair,
   p_last_dmat_ = dmat;
 }
 
-bool GPUQuantileHistMakerOneAPI::UpdatePredictionCache(const DMatrix* data,
-                                                       linalg::VectorView<bst_float> out_preds) {
+bool QuantileHistMakerOneAPIBackend::UpdatePredictionCache(const DMatrix* data,
+                                                           linalg::MatrixView<float> out_preds) {
   if (param_.subsample < 1.0f) {
     return false;
   } else {
@@ -250,7 +228,7 @@ void DistributedHistSynchronizerOneAPI<GradientSumT>::ParallelSubtractionHist(
 }
 
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::ReduceHists(std::vector<int>& sync_ids, size_t nbins) {
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::ReduceHists(std::vector<int>& sync_ids, size_t nbins) {
   std::vector<GradientPairT> reduce_buffer(sync_ids.size() * nbins);
   for (size_t i = 0; i < sync_ids.size(); i++) {
     auto this_hist = hist_[sync_ids[i]];
@@ -330,19 +308,19 @@ void DistributedHistRowsAdderOneAPI<GradientSumT>::AddHistRows(BuilderT *builder
 }
 
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::SetHistSynchronizer(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::SetHistSynchronizer(
     HistSynchronizerOneAPI<GradientSumT> *sync) {
   hist_synchronizer_.reset(sync);
 }
 
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::SetHistRowsAdder(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::SetHistRowsAdder(
     HistRowsAdderOneAPI<GradientSumT> *adder) {
   hist_rows_adder_.reset(adder);
 }
 
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::BuildHistogramsLossGuide(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::BuildHistogramsLossGuide(
     ExpandEntry entry,
     const GHistIndexMatrixOneAPI &gmat,
     RegTree *p_tree,
@@ -364,7 +342,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::BuildHistogramsLossGuide
 }
 
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::BuildLocalHistograms(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::BuildLocalHistograms(
     const GHistIndexMatrixOneAPI &gmat,
     RegTree *p_tree,
     const USMVector<GradientPair, MemoryType::on_device> &gpair_device) {
@@ -393,7 +371,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::BuildLocalHistograms(
 }
 
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::BuildNodeStats(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::BuildNodeStats(
     const GHistIndexMatrixOneAPI &gmat,
     DMatrix *p_fmat,
     RegTree *p_tree,
@@ -419,7 +397,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::BuildNodeStats(
 }
 
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::AddSplitsToTree(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::AddSplitsToTree(
     const GHistIndexMatrixOneAPI &gmat,
     RegTree *p_tree,
     int *num_leaves,
@@ -461,7 +439,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::AddSplitsToTree(
 }
 
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::EvaluateAndApplySplits(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::EvaluateAndApplySplits(
     const GHistIndexMatrixOneAPI &gmat,
     RegTree *p_tree,
     int *num_leaves,
@@ -483,7 +461,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::EvaluateAndApplySplits(
 //    and use 'Subtraction Trick' to built the histogram for the right child node.
 //    This ensures that the workers operate on the same set of tree nodes.
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::SplitSiblings(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::SplitSiblings(
     const std::vector<ExpandEntry> &nodes,
     std::vector<ExpandEntry> *small_siblings,
     std::vector<ExpandEntry> *big_siblings,
@@ -513,7 +491,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::SplitSiblings(
 }
 
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::ExpandWithDepthWise(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::ExpandWithDepthWise(
     const GHistIndexMatrixOneAPI &gmat,
     DMatrix *p_fmat,
     RegTree *p_tree,
@@ -553,7 +531,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::ExpandWithDepthWise(
 }
 
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::ExpandWithLossGuide(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::ExpandWithLossGuide(
     const GHistIndexMatrixOneAPI& gmat,
     DMatrix* p_fmat,
     RegTree* p_tree,
@@ -630,7 +608,9 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::ExpandWithLossGuide(
 }
 
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::Update(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::Update(
+    Context const * ctx,
+    TrainParam const *param,
     const GHistIndexMatrixOneAPI &gmat,
     HostDeviceVector<GradientPair> *gpair,
     const USMVector<GradientPair, MemoryType::on_device>& gpair_device,
@@ -643,27 +623,27 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::Update(
   tree_evaluator_ = TreeEvaluatorOneAPI<GradientSumT>(qu_, param_, p_fmat->Info().num_col_);
   interaction_constraints_.Reset();
 
-  this->InitData(gmat, gpair_h, gpair_device, *p_fmat, *p_tree);
+  this->InitData(ctx, gmat, gpair_h, gpair_device, *p_fmat, *p_tree);
   if (param_.grow_policy == TrainParam::kLossGuide) {
     ExpandWithLossGuide(gmat, p_fmat, p_tree, gpair_h, gpair_device);
   } else {
     ExpandWithDepthWise(gmat, p_fmat, p_tree, gpair_h, gpair_device);
   }
 
-  for (int nid = 0; nid < p_tree->param.num_nodes; ++nid) {
+  for (int nid = 0; nid < p_tree->NumNodes(); ++nid) {
     p_tree->Stat(nid).loss_chg = snode_[nid].best.loss_chg;
     p_tree->Stat(nid).base_weight = snode_[nid].weight;
     p_tree->Stat(nid).sum_hess = static_cast<float>(snode_[nid].stats.GetHess());
   }
-  pruner_->Update(gpair, p_fmat, out_position, std::vector<RegTree*>{p_tree});
+  pruner_->Update(param, gpair, p_fmat, out_position, std::vector<RegTree*>{p_tree});
 
   builder_monitor_.Stop("Update");
 }
 
 template<typename GradientSumT>
-bool GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::UpdatePredictionCache(
+bool QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::UpdatePredictionCache(
     const DMatrix* data,
-    linalg::VectorView<bst_float> out_preds) {
+    linalg::MatrixView<float> out_preds) {
   // p_last_fmat_ is a valid pointer as long as UpdatePredictionCache() is called in
   // conjunction with Update().
   if (!p_last_fmat_ || !p_last_tree_ || data != p_last_fmat_) {
@@ -708,7 +688,7 @@ bool GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::UpdatePredictionCache(
   return true;
 }
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitSampling(const std::vector<GradientPair>& gpair,
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::InitSampling(const std::vector<GradientPair>& gpair,
                                                                      const USMVector<GradientPair, MemoryType::on_device> &gpair_device,
                                                                      const DMatrix& fmat,
                                                                      USMVector<size_t, MemoryType::on_device>& row_indices_device) {
@@ -835,7 +815,9 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitSampling(const std::
 #endif  // XGBOOST_CUSTOMIZE_GLOBAL_PRNG
 }
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitData(const GHistIndexMatrixOneAPI& gmat,
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::InitData(
+                                          Context const * ctx,
+                                          const GHistIndexMatrixOneAPI& gmat,
                                           const std::vector<GradientPair>& gpair,
                                           const USMVector<GradientPair, MemoryType::on_device> &gpair_device,
                                           const DMatrix& fmat,
@@ -957,7 +939,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitData(const GHistInde
   }
   // store a pointer to the tree
   p_last_tree_ = &tree;
-  column_sampler_.Init(info.num_col_, info.feature_weights.ConstHostVector(),
+  column_sampler_.Init(ctx, info.num_col_, info.feature_weights.ConstHostVector(),
                        param_.colsample_bynode, param_.colsample_bylevel,
                        param_.colsample_bytree);
   if (data_layout_ == kDenseDataZeroBased || data_layout_ == kDenseDataOneBased) {
@@ -998,7 +980,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitData(const GHistInde
 // then - there are no missing values
 // else - there are missing values
 template <typename GradientSumT>
-bool GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::SplitContainsMissingValues(
+bool QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::SplitContainsMissingValues(
     const GradStatsOneAPI<GradientSumT>& e, const NodeEntry<GradientSumT>& snode) {
   if (e.GetGrad() == snode.stats.GetGrad() && e.GetHess() == snode.stats.GetHess()) {
     return false;
@@ -1009,7 +991,7 @@ bool GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::SplitContainsMissingValu
 
 // nodes_set - set of nodes to be processed in parallel
 template<typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::EvaluateSplits(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::EvaluateSplits(
                                                const std::vector<ExpandEntry>& nodes_set,
                                                const GHistIndexMatrixOneAPI& gmat,
                                                const HistCollectionOneAPI<GradientSumT, MemoryType::on_device>& hist,
@@ -1093,7 +1075,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::EvaluateSplits(
 // for the particular feature fid.
 template <typename GradientSumT>
 template <int d_step>
-GradStatsOneAPI<GradientSumT> GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::EnumerateSplit(
+GradStatsOneAPI<GradientSumT> QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::EnumerateSplit(
     const uint32_t* cut_ptr,
     const bst_float* cut_val,
     const bst_float* cut_minval,
@@ -1157,7 +1139,7 @@ GradStatsOneAPI<GradientSumT> GPUQuantileHistMakerOneAPI::Builder<GradientSumT>:
 // Returns the sum of gradients corresponding to the data points that contains a non-missing value
 // for the particular feature fid.
 template <typename GradientSumT>
-GradStatsOneAPI<GradientSumT> GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::EnumerateSplit(
+GradStatsOneAPI<GradientSumT> QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::EnumerateSplit(
     sycl::sub_group& sg,
     const uint32_t* cut_ptr,
     const bst_float* cut_val,
@@ -1288,7 +1270,7 @@ inline sycl::event PartitionSparseKernel(sycl::queue& qu,
 
 template <typename GradientSumT>
 template <typename BinIdxType>
-sycl::event GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::PartitionKernel(
+sycl::event QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::PartitionKernel(
     const size_t nid,
     const int32_t split_cond,
     const GHistIndexMatrixOneAPI& gmat,
@@ -1315,7 +1297,7 @@ sycl::event GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::PartitionKernel(
 }
 
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::FindSplitConditions(
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::FindSplitConditions(
     const std::vector<ExpandEntry>& nodes,
     const RegTree& tree,
     const GHistIndexMatrixOneAPI& gmat,
@@ -1343,7 +1325,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::FindSplitConditions(
   }
 }
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::AddSplitsToRowSet(const std::vector<ExpandEntry>& nodes,
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::AddSplitsToRowSet(const std::vector<ExpandEntry>& nodes,
                                                                           RegTree* p_tree) {
   const size_t n_nodes = nodes.size();
   for (size_t i = 0; i < n_nodes; ++i) {
@@ -1357,7 +1339,7 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::AddSplitsToRowSet(const 
 }
 
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::ApplySplit(const std::vector<ExpandEntry> nodes,
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::ApplySplit(const std::vector<ExpandEntry> nodes,
                                                                    const GHistIndexMatrixOneAPI& gmat,
                                                                    const HistCollectionOneAPI<GradientSumT, MemoryType::on_device>& hist,
                                                                    RegTree* p_tree) {
@@ -1419,14 +1401,14 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::ApplySplit(const std::ve
 }
 
 template <typename GradientSumT>
-void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitNewNode(int nid,
+void QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::InitNewNode(int nid,
                                                                     const GHistIndexMatrixOneAPI& gmat,
                                                                     const std::vector<GradientPair>& gpair,
                                                                     const DMatrix& fmat,
                                                                     const RegTree& tree) {
   builder_monitor_.Start("InitNewNode");
   {
-    snode_.Resize(qu_, tree.param.num_nodes, NodeEntry<GradientSumT>(param_));
+    snode_.Resize(qu_, tree.NumNodes(), NodeEntry<GradientSumT>(param_));
   }
 
   {
@@ -1481,39 +1463,39 @@ void GPUQuantileHistMakerOneAPI::Builder<GradientSumT>::InitNewNode(int nid,
   builder_monitor_.Stop("InitNewNode");
 }
 
-template struct GPUQuantileHistMakerOneAPI::Builder<float>;
-template struct GPUQuantileHistMakerOneAPI::Builder<double>;
-template sycl::event GPUQuantileHistMakerOneAPI::Builder<float>::PartitionKernel<uint8_t>(
+template struct QuantileHistMakerOneAPIBackend::Builder<float>;
+template struct QuantileHistMakerOneAPIBackend::Builder<double>;
+template sycl::event QuantileHistMakerOneAPIBackend::Builder<float>::PartitionKernel<uint8_t>(
     const size_t nid, const int32_t split_cond, const GHistIndexMatrixOneAPI &gmat,
     const RegTree::Node& node, common::Span<size_t>& rid_buf, size_t* parts_size, sycl::event priv_event);
-template sycl::event GPUQuantileHistMakerOneAPI::Builder<float>::PartitionKernel<uint16_t>(
+template sycl::event QuantileHistMakerOneAPIBackend::Builder<float>::PartitionKernel<uint16_t>(
     const size_t nid, const int32_t split_cond, const GHistIndexMatrixOneAPI &gmat,
     const RegTree::Node& node, common::Span<size_t>& rid_buf, size_t* parts_size, sycl::event priv_event);
-template sycl::event GPUQuantileHistMakerOneAPI::Builder<float>::PartitionKernel<uint32_t>(
+template sycl::event QuantileHistMakerOneAPIBackend::Builder<float>::PartitionKernel<uint32_t>(
     const size_t nid, const int32_t split_cond, const GHistIndexMatrixOneAPI &gmat,
     const RegTree::Node& node, common::Span<size_t>& rid_buf, size_t* parts_size, sycl::event priv_event);
-template sycl::event GPUQuantileHistMakerOneAPI::Builder<double>::PartitionKernel<uint8_t>(
+template sycl::event QuantileHistMakerOneAPIBackend::Builder<double>::PartitionKernel<uint8_t>(
     const size_t nid, const int32_t split_cond, const GHistIndexMatrixOneAPI &gmat,
     const RegTree::Node& node, common::Span<size_t>& rid_buf, size_t* parts_size, sycl::event priv_event);
-template sycl::event GPUQuantileHistMakerOneAPI::Builder<double>::PartitionKernel<uint16_t>(
+template sycl::event QuantileHistMakerOneAPIBackend::Builder<double>::PartitionKernel<uint16_t>(
     const size_t nid, const int32_t split_cond, const GHistIndexMatrixOneAPI &gmat,
     const RegTree::Node& node, common::Span<size_t>& rid_buf, size_t* parts_size, sycl::event priv_event);
-template sycl::event GPUQuantileHistMakerOneAPI::Builder<double>::PartitionKernel<uint32_t>(
+template sycl::event QuantileHistMakerOneAPIBackend::Builder<double>::PartitionKernel<uint32_t>(
     const size_t nid, const int32_t split_cond, const GHistIndexMatrixOneAPI &gmat,
     const RegTree::Node& node, common::Span<size_t>& rid_buf, size_t* parts_size, sycl::event priv_event);
 
 XGBOOST_REGISTER_TREE_UPDATER(QuantileHistMakerOneAPI, "grow_quantile_histmaker_oneapi")
 .describe("Grow tree using quantized histogram with dpc++.")
 .set_body(
-    [](Context const* ctx, ObjInfo task) {
+    [](Context const* ctx, ObjInfo const * task) {
       return new QuantileHistMakerOneAPI(ctx, task);
     });
 
-XGBOOST_REGISTER_TREE_UPDATER(GPUQuantileHistMakerOneAPI, "grow_quantile_histmaker_oneapi_gpu")
+XGBOOST_REGISTER_TREE_UPDATER(QuantileHistMakerOneAPIBackend, "grow_quantile_histmaker_oneapi_backend")
 .describe("Grow tree using quantized histogram with dpc++ on GPU.")
 .set_body(
-    [](Context const* ctx, ObjInfo task) {
-      return new GPUQuantileHistMakerOneAPI(ctx, task);
+    [](Context const* ctx, ObjInfo const * task) {
+      return new QuantileHistMakerOneAPIBackend(ctx, task);
     });
 }  // namespace tree
 }  // namespace xgboost

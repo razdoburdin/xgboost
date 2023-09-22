@@ -9,11 +9,14 @@
 #include "data_oneapi.h"
 
 #include "xgboost/tree_model.h"
+#include "xgboost/predictor.h"
 #include "xgboost/tree_updater.h"
 
 #include "../../src/data/adapter.h"
 #include "../../src/common/math.h"
 #include "../../src/gbm/gbtree_model.h"
+
+#include "./device_manager_oneapi.h"
 
 #include "CL/sycl.hpp"
 
@@ -26,26 +29,17 @@ class PredictorOneAPI : public Predictor {
  public:
   explicit PredictorOneAPI(Context const* context) :
       Predictor::Predictor{context} {
-    bool is_cpu = false;
-    std::vector<sycl::device> devices = sycl::device::get_devices();
-    for (size_t i = 0; i < devices.size(); i++)
-    {
-      LOG(INFO) << "device_id = " << i << ", name = " << devices[i].get_info<sycl::info::device::name>();
-    }
-    if (context->device_id != Context::kDefaultId) {
-      int n_devices = (int)devices.size();
-      CHECK_LT(context->device_id, n_devices);
-      is_cpu = devices[context->device_id].is_cpu();
-    }
-    LOG(INFO) << "device_id = " << context->device_id << ", is_cpu = " << int(is_cpu);
+    const DeviceOrd device_spec = context->Device();
 
-    if (is_cpu)
-    {
+    sycl::device device = device_manager.GetDevice(device_spec);
+    bool is_cpu = device.is_cpu();
+
+    LOG(INFO) << "device = " << device_spec.Name() << ", is_cpu = " << int(is_cpu);
+
+    if (is_cpu) {
       predictor_backend_.reset(Predictor::Create("cpu_predictor", context));
-    }
-    else
-    {
-      predictor_backend_.reset(Predictor::Create("oneapi_predictor_gpu", context));
+    } else{
+      predictor_backend_.reset(Predictor::Create("oneapi_predictor_backend", context));
     }
   }
 
@@ -70,8 +64,9 @@ class PredictorOneAPI : public Predictor {
 
   void PredictInstance(const SparsePage::Inst& inst,
                        std::vector<bst_float>* out_preds,
-                       const gbm::GBTreeModel& model, unsigned ntree_limit) const override {
-    predictor_backend_->PredictInstance(inst, out_preds, model, ntree_limit);
+                       const gbm::GBTreeModel& model, unsigned ntree_limit,
+                       bool is_column_split) const override {
+    predictor_backend_->PredictInstance(inst, out_preds, model, ntree_limit, is_column_split);
   }
 
   void PredictLeaf(DMatrix* p_fmat, HostDeviceVector<bst_float>* out_preds,
@@ -102,6 +97,7 @@ class PredictorOneAPI : public Predictor {
   }
 
  private:
+  DeviceManagerOneAPI device_manager;
   std::unique_ptr<Predictor> predictor_backend_;
 };
 
@@ -171,7 +167,6 @@ class DeviceModelOneAPI {
 
   void Init(sycl::queue qu, const gbm::GBTreeModel& model, size_t tree_begin, size_t tree_end) {
     qu_ = qu;
-    CHECK_EQ(model.param.size_leaf_vector, 0);
 
     tree_segments_.Resize(qu_, (tree_end - tree_begin) + 1);
     int sum = 0;
@@ -293,7 +288,7 @@ void DevicePredictInternal(sycl::queue qu,
   }).wait();
 }
 
-class GPUPredictorOneAPI : public Predictor {
+class PredictorBackendOneAPI : public Predictor {
  protected:
   void InitOutPredictions(const MetaInfo& info,
                           HostDeviceVector<bst_float>* out_preds,
@@ -328,20 +323,9 @@ class GPUPredictorOneAPI : public Predictor {
   }
 
  public:
-  explicit GPUPredictorOneAPI(Context const* context) :
+  explicit PredictorBackendOneAPI(Context const* context) :
       Predictor::Predictor{context}, cpu_predictor(Predictor::Create("cpu_predictor", context)) {
-    std::vector<sycl::device> devices = sycl::device::get_devices();
-    if (context->device_id != Context::kDefaultId) {
-      qu_ = sycl::queue(devices[context->device_id]);
-    } else {
-      // sycl::default_selector selector;
-      // qu_ = sycl::queue(selector);
-      if (rabit::IsDistributed()) {
-        qu_ = sycl::queue(devices[rabit::GetRank()]);
-      } else {
-        qu_ = sycl::queue(sycl::default_selector());
-    }
-    }
+    qu_ = device_manager.GetQueue(context->Device());
   }
 
   void PredictBatch(DMatrix *dmat, PredictionCacheEntry *predts,
@@ -379,8 +363,9 @@ class GPUPredictorOneAPI : public Predictor {
 
   void PredictInstance(const SparsePage::Inst& inst,
                        std::vector<bst_float>* out_preds,
-                       const gbm::GBTreeModel& model, unsigned ntree_limit) const override {
-    cpu_predictor->PredictInstance(inst, out_preds, model, ntree_limit);
+                       const gbm::GBTreeModel& model, unsigned ntree_limit,
+                       bool is_column_split) const override {
+    cpu_predictor->PredictInstance(inst, out_preds, model, ntree_limit, is_column_split);
   }
 
   void PredictLeaf(DMatrix* p_fmat, HostDeviceVector<bst_float>* out_preds,
@@ -404,6 +389,7 @@ class GPUPredictorOneAPI : public Predictor {
   }
 
  private:
+  DeviceManagerOneAPI device_manager;
   sycl::queue qu_;
 
   std::unique_ptr<Predictor> cpu_predictor;
@@ -417,10 +403,10 @@ XGBOOST_REGISTER_PREDICTOR(PredictorOneAPI, "oneapi_predictor")
             return new PredictorOneAPI(context);
           });
 
-XGBOOST_REGISTER_PREDICTOR(GPUPredictorOneAPI, "oneapi_predictor_gpu")
+XGBOOST_REGISTER_PREDICTOR(PredictorBackendOneAPI, "oneapi_predictor_backend")
 .describe("Make predictions using DPC++.")
 .set_body([](Context const* context) {
-            return new GPUPredictorOneAPI(context);
+            return new PredictorBackendOneAPI(context);
           });
 
 }  // namespace predictor

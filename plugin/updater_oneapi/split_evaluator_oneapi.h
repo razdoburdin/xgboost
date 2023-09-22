@@ -15,7 +15,7 @@
 
 #include "xgboost/tree_model.h"
 #include "xgboost/host_device_vector.h"
-#include "xgboost/generic_parameters.h"
+#include "xgboost/context.h"
 #include "../../src/common/transform.h"
 #include "../../src/common/math.h"
 #include "../../src/tree/param.h"
