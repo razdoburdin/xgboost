@@ -22,7 +22,7 @@ struct CUDAContext;
 struct DeviceSym {
   static auto constexpr CPU() { return "cpu"; }
   static auto constexpr CUDA() { return "cuda"; }
-  static auto constexpr SYCL() { return "sycl"; }
+  static auto constexpr SYCL_default() { return "sycl"; }
   static auto constexpr SYCL_CPU() { return "sycl:cpu"; }
   static auto constexpr SYCL_GPU() { return "sycl:gpu"; }
 };
@@ -32,13 +32,14 @@ struct DeviceSym {
  *        viewing types like `linalg::TensorView`.
  */
 struct DeviceOrd {
-  enum Type : std::int16_t { kCPU = 0, kCUDA = 1, kSycl = 2, kSyclCpu = 3, kSyclGpu = 4} device{kCPU};
-  // CUDA device ordinal.
-  bst_d_ordinal_t ordinal{-1};
+  enum Type : std::int16_t { kCPU = 0, kCUDA = 1, kSyclDefault = 2, kSyclCPU = 3, kSyclGPU = 4} device{kCPU};
+  constexpr static bst_d_ordinal_t kDefaultOrdinal = -1;
+  // CUDA or Sycl device ordinal.
+  bst_d_ordinal_t ordinal{kDefaultOrdinal};
 
   [[nodiscard]] bool IsCUDA() const { return device == kCUDA; }
   [[nodiscard]] bool IsCPU() const { return device == kCPU; }
-  [[nodiscard]] bool IsSycl() const { return device == kSycl; }
+  [[nodiscard]] bool IsSyclDefault() const { return device == kSyclDefault; }
   [[nodiscard]] bool IsSyclCPU() const { return device == kSyclCPU; }
   [[nodiscard]] bool IsSyclGPU() const { return device == kSyclGPU; }
 
@@ -53,7 +54,7 @@ struct DeviceOrd {
   /**
    * @brief Constructor for CPU.
    */
-  [[nodiscard]] constexpr static auto CPU() { return DeviceOrd{kCPU, -1}; }
+  [[nodiscard]] constexpr static auto CPU() { return DeviceOrd{kCPU, kDefaultOrdinal}; }
   /**
    * @brief Constructor for CUDA device.
    *
@@ -64,23 +65,23 @@ struct DeviceOrd {
   /**
    * @brief Constructor for SYCL.
    *
-   * @param ordinal CUDA device ordinal.
+   * @param ordinal SYCL device ordinal.
    */
-  [[nodiscard]] constexpr static auto SYCL(bst_d_ordinal_t ordinal) { return DeviceOrd{kSycl, kSyclCPU}; }
+  [[nodiscard]] constexpr static auto SYCL_default(bst_d_ordinal_t ordinal = kDefaultOrdinal) { return DeviceOrd{kSyclDefault, ordinal}; }
 
   /**
    * @brief Constructor for SYCL CPU.
    *
-   * @param ordinal CUDA device ordinal.
+   * @param ordinal SYCL CPU device ordinal.
    */
-  [[nodiscard]] constexpr static auto SYCL_CPU(bst_d_ordinal_t ordinal) { return DeviceOrd{kSyclCPU, kSyclCPU}; }
+  [[nodiscard]] constexpr static auto SYCL_CPU(bst_d_ordinal_t ordinal = kDefaultOrdinal) { return DeviceOrd{kSyclCPU, ordinal}; }
 
   /**
    * @brief Constructor for SYCL GPU.
    *
-   * @param ordinal CUDA device ordinal.
+   * @param ordinal SYCL GPU device ordinal.
    */
-  [[nodiscard]] constexpr static auto SYCL_GPU(bst_d_ordinal_t ordinal) { return DeviceOrd{kSyclGPU, kSyclCPU}; }
+  [[nodiscard]] constexpr static auto SYCL_GPU(bst_d_ordinal_t ordinal = kDefaultOrdinal) { return DeviceOrd{kSyclGPU, ordinal}; }
 
   [[nodiscard]] bool operator==(DeviceOrd const& that) const {
     return device == that.device && ordinal == that.ordinal;
@@ -95,8 +96,8 @@ struct DeviceOrd {
         return DeviceSym::CPU();
       case DeviceOrd::kCUDA:
         return DeviceSym::CUDA() + (':' + std::to_string(ordinal));
-      case DeviceOrd::kSycl:
-        return DeviceSym::SYCL() + (':' + std::to_string(ordinal));
+      case DeviceOrd::kSyclDefault:
+        return DeviceSym::SYCL_default() + (':' + std::to_string(ordinal));
       case DeviceOrd::kSyclCPU:
         return DeviceSym::SYCL_CPU() + (':' + std::to_string(ordinal));
       case DeviceOrd::kSyclGPU:
