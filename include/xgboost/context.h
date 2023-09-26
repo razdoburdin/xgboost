@@ -170,6 +170,19 @@ struct Context : public XGBoostParameter<Context> {
    */
   [[nodiscard]] bool IsCUDA() const { return Device().IsCUDA(); }
   /**
+   * @brief Is XGBoost running on the default SYCL device?
+   */
+  [[nodiscard]] bool IsSyclDefault() const { return Device().IsSyclDefault(); }
+  /**
+   * @brief Is XGBoost running on a SYCL CPU?
+   */
+  [[nodiscard]] bool IsSyclCPU() const { return Device().IsSyclCPU(); }
+  /**
+   * @brief Is XGBoost running on a SYCL GPU?
+   */
+  [[nodiscard]] bool IsSyclGPU() const { return Device().IsSyclGPU(); }
+
+  /**
    * @brief Get the current device and ordinal.
    */
   [[nodiscard]] DeviceOrd Device() const { return device_; }
