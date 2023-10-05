@@ -9,7 +9,7 @@
 namespace xgboost {
 
 sycl::device DeviceManagerOneAPI::GetDevice(const DeviceOrd& device_spec) const {
-    bool not_use_default_selector = (device_spec.ordinal != DeviceOrd::kDefaultOrdinal) ||
+    bool not_use_default_selector = (device_spec.ordinal != kDefaultOrdinal) ||
                                     (rabit::IsDistributed());
     if (not_use_default_selector) {
       DeviceRegister& device_register = GetDevicesRegister();
@@ -44,7 +44,7 @@ sycl::queue DeviceManagerOneAPI::GetQueue(const DeviceOrd& device_spec) const {
         return queue_register.at(device_spec.Name());
     }
     
-    bool not_use_default_selector = (device_spec.ordinal != DeviceOrd::kDefaultOrdinal) ||
+    bool not_use_default_selector = (device_spec.ordinal != kDefaultOrdinal) ||
                                     (rabit::IsDistributed());
     std::lock_guard<std::mutex> guard(queue_registering_mutex);
     if (not_use_default_selector) {
@@ -101,14 +101,5 @@ DeviceManagerOneAPI::QueueRegister_t& DeviceManagerOneAPI::GetQueueRegister() co
     static QueueRegister_t queue_register;
     return queue_register;
 }
-
-// XGBOOST_REGISTERATE_DEVICE("oneapi")
-// .set_body(DeviceType::kOneAPI_Auto);
-
-// XGBOOST_REGISTERATE_DEVICE("oneapi:cpu")
-// .set_body(DeviceType::kOneAPI_CPU);
-
-// XGBOOST_REGISTERATE_DEVICE("oneapi:gpu")
-// .set_body(DeviceType::kOneAPI_GPU);
 
 }  // namespace xgboost

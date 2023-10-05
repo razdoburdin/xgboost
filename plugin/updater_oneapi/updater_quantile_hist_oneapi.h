@@ -209,7 +209,7 @@ class QuantileHistMakerOneAPIBackend: public TreeUpdater {
   }
 
   char const* Name() const override {
-    return "grow_quantile_histmaker_oneapi_gpu";
+    return "grow_quantile_histmaker_oneapi_backend";
   }
 
  protected:

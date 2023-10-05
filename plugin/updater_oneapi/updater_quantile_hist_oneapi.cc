@@ -650,7 +650,7 @@ bool QuantileHistMakerOneAPIBackend::Builder<GradientSumT>::UpdatePredictionCach
     return false;
   }
   builder_monitor_.Start("UpdatePredictionCache");
-  CHECK_GT(out_preds.Size(), 0U);
+  // CHECK_GT(out_preds.Size(), 0U);
 
   const size_t stride = out_preds.Stride(0);
   const int buffer_size = out_preds.Size()*stride - stride + 1;

@@ -8,6 +8,8 @@
 
 #include "data_oneapi.h"
 
+#include "dmlc/registry.h"
+
 #include "xgboost/tree_model.h"
 #include "xgboost/predictor.h"
 #include "xgboost/tree_updater.h"
@@ -31,8 +33,13 @@ class PredictorOneAPI : public Predictor {
       Predictor::Predictor{context} {
     const DeviceOrd device_spec = context->Device();
 
-    sycl::device device = device_manager.GetDevice(device_spec);
-    bool is_cpu = device.is_cpu();
+    bool is_cpu;
+    if (device_spec.IsSycl()) {
+      sycl::device device = device_manager.GetDevice(device_spec);
+      is_cpu = device.is_cpu();
+    } else {
+      is_cpu = true;
+    }
 
     LOG(INFO) << "device = " << device_spec.Name() << ", is_cpu = " << int(is_cpu);
 
@@ -399,15 +406,11 @@ class PredictorBackendOneAPI : public Predictor {
 
 XGBOOST_REGISTER_PREDICTOR(PredictorOneAPI, "oneapi_predictor")
 .describe("Make predictions using DPC++.")
-.set_body([](Context const* context) {
-            return new PredictorOneAPI(context);
-          });
+.set_body([](Context const *ctx) { return new PredictorOneAPI(ctx); });
 
 XGBOOST_REGISTER_PREDICTOR(PredictorBackendOneAPI, "oneapi_predictor_backend")
 .describe("Make predictions using DPC++.")
-.set_body([](Context const* context) {
-            return new PredictorBackendOneAPI(context);
-          });
+.set_body([](Context const* ctx) { return new PredictorBackendOneAPI(ctx); });
 
 }  // namespace predictor
 }  // namespace xgboost

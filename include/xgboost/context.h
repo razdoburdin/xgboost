@@ -31,9 +31,9 @@ struct DeviceSym {
  * @brief A type for device ordinal. The type is packed into 32-bit for efficient use in
  *        viewing types like `linalg::TensorView`.
  */
+constexpr static bst_d_ordinal_t kDefaultOrdinal = -1;
 struct DeviceOrd {
   enum Type : std::int16_t { kCPU = 0, kCUDA = 1, kSyclDefault = 2, kSyclCPU = 3, kSyclGPU = 4} device{kCPU};
-  constexpr static bst_d_ordinal_t kDefaultOrdinal = -1;
   // CUDA or Sycl device ordinal.
   bst_d_ordinal_t ordinal{kDefaultOrdinal};
 
@@ -42,6 +42,9 @@ struct DeviceOrd {
   [[nodiscard]] bool IsSyclDefault() const { return device == kSyclDefault; }
   [[nodiscard]] bool IsSyclCPU() const { return device == kSyclCPU; }
   [[nodiscard]] bool IsSyclGPU() const { return device == kSyclGPU; }
+  [[nodiscard]] bool IsSycl() const { return (IsSyclDefault() ||
+                                              IsSyclCPU() ||
+                                              IsSyclGPU()); }
 
   DeviceOrd() = default;
   constexpr DeviceOrd(Type type, bst_d_ordinal_t ord) : device{type}, ordinal{ord} {}
@@ -218,6 +221,29 @@ struct Context : public XGBoostParameter<Context> {
   /**
    * @brief Call function based on the current device.
    */
+  template <typename CPUFn, typename CUDAFn, typename SYCLFn>
+  decltype(auto) DispatchDevice(CPUFn&& cpu_fn, CUDAFn&& cuda_fn, SYCLFn&& sycl_fn) const {
+    static_assert(std::is_same_v<std::invoke_result_t<CPUFn>, std::invoke_result_t<CUDAFn>>);
+    switch (this->Device().device) {
+      case DeviceOrd::kCPU:
+        return cpu_fn();
+      case DeviceOrd::kCUDA:
+        return cuda_fn();
+      case DeviceOrd::kSyclDefault:
+        return sycl_fn();
+      case DeviceOrd::kSyclCPU:
+        return sycl_fn();
+      case DeviceOrd::kSyclGPU:
+        return sycl_fn();
+      default:
+        // Do not use the device name as this is likely an internal error, the name
+        // wouldn't be valid.
+        LOG(FATAL) << "Unknown device type:"
+                   << static_cast<std::underlying_type_t<DeviceOrd::Type>>(this->Device().device);
+        break;
+    }
+    return std::invoke_result_t<CPUFn>();
+  }
   template <typename CPUFn, typename CUDAFn>
   decltype(auto) DispatchDevice(CPUFn&& cpu_fn, CUDAFn&& cuda_fn) const {
     static_assert(std::is_same_v<std::invoke_result_t<CPUFn>, std::invoke_result_t<CUDAFn>>);
@@ -226,6 +252,12 @@ struct Context : public XGBoostParameter<Context> {
         return cpu_fn();
       case DeviceOrd::kCUDA:
         return cuda_fn();
+      case DeviceOrd::kSyclDefault:
+        LOG(FATAL) << "The requested feature is not implemented for sycl yet";
+      case DeviceOrd::kSyclCPU:
+        LOG(FATAL) << "The requested feature is not implemented for sycl yet";
+      case DeviceOrd::kSyclGPU:
+        LOG(FATAL) << "The requested feature is not implemented for sycl yet";
       default:
         // Do not use the device name as this is likely an internal error, the name
         // wouldn't be valid.
@@ -260,7 +292,9 @@ struct Context : public XGBoostParameter<Context> {
   void SetDeviceOrdinal(Args const& kwargs);
   Context& SetDevice(DeviceOrd d) {
     this->device_ = d;
-    this->gpu_id = d.ordinal;  // this can be removed once we move away from `gpu_id`.
+    if (d.IsCUDA()) {
+      this->gpu_id = d.ordinal;  // this can be removed once we move away from `gpu_id`.
+    }
     this->device = d.Name();
     return *this;
   }
