@@ -184,6 +184,12 @@ struct Context : public XGBoostParameter<Context> {
    * @brief Is XGBoost running on a SYCL GPU?
    */
   [[nodiscard]] bool IsSyclGPU() const { return Device().IsSyclGPU(); }
+  /**
+   * @brief Is XGBoost running on any SYCL device?
+   */
+  [[nodiscard]] bool IsSycl() const { return IsSyclDefault()
+                                             || IsSyclCPU() 
+                                             || IsSyclGPU(); }
 
   /**
    * @brief Get the current device and ordinal.

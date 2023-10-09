@@ -3,8 +3,8 @@ import pytest
 import sys
 import numpy as np
 
+from xgboost import testing as tm
 sys.path.append("tests/python")
-import testing as tm               # noqa
 import test_with_sklearn as twskl  # noqa
 
 pytestmark = pytest.mark.skipif(**tm.no_sklearn())
@@ -23,8 +23,8 @@ def test_oneapi_binary_classification():
     for cls in (xgb.XGBClassifier, xgb.XGBRFClassifier):
         for train_index, test_index in kf.split(X, y):
             xgb_model = cls(
-                random_state=42, updater='grow_quantile_histmaker_oneapi',
-                n_estimators=4, device_id=-1).fit(X[train_index], y[train_index])
+                random_state=42, device='sycl:gpu',
+                n_estimators=4).fit(X[train_index], y[train_index])
             preds = xgb_model.predict(X[test_index])
             labels = y[test_index]
             err = sum(1 for i in range(len(preds))

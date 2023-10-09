@@ -6,8 +6,9 @@ from hypothesis import given, strategies, assume, settings, note
 
 import sys
 import os
-sys.path.append("tests/python")
-import testing as tm
+# sys.path.append("tests/python")
+# import testing as tm
+from xgboost import testing as tm
 
 parameter_strategy = strategies.fixed_dictionaries({
     'max_depth': strategies.integers(0, 11),
@@ -34,16 +35,18 @@ def train_result(param, dmat, num_rounds):
 
 class TestOneAPIUpdaters:
     @given(parameter_strategy, strategies.integers(1, 5),
-           tm.dataset_strategy.filter(lambda x: x.name != "empty"))
+           tm.make_dataset_strategy())
     @settings(deadline=None)
     def test_oneapi_hist(self, param, num_rounds, dataset):
-        param['updater'] = 'grow_quantile_histmaker_oneapi'
+        param['tree_method'] = 'hist'
+        param['device'] = 'sycl:gpu'
+        param['verbosity'] = 0
         param = dataset.set_params(param)
         result = train_result(param, dataset.get_dmat(), num_rounds)
         note(result)
         assert tm.non_increasing(result['train'][dataset.metric])
 
-    @given(tm.dataset_strategy.filter(lambda x: x.name != "empty"), strategies.integers(0, 1))
+    @given(tm.make_dataset_strategy(), strategies.integers(0, 1))
     @settings(deadline=None)
     def test_specified_device_id_oneapi_update(self, dataset, device_id):
         # Read the list of sycl-devicese
@@ -59,7 +62,7 @@ class TestOneAPIUpdaters:
             if len(devices[idx]) >= len(target_device_type):
                 if devices[idx][1:1+len(target_device_type)] == target_device_type:
                     if (found_devices == device_id):
-                        param = {'updater': 'grow_quantile_histmaker_oneapi', 'device_id': idx}
+                        param = {'device': f"sycl:gpu:{idx}"}
                         param = dataset.set_params(param)
                         result = train_result(param, dataset.get_dmat(), 10)
                         assert tm.non_increasing(result['train'][dataset.metric])

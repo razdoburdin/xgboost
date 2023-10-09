@@ -6,8 +6,7 @@ import numpy as np
 import xgboost as xgb
 from hypothesis import given, strategies, assume, settings, note
 
-sys.path.append("tests/python")
-import testing as tm
+from xgboost import testing as tm
 
 rng = np.random.RandomState(1994)
 
@@ -35,25 +34,24 @@ class TestOneAPIPredict(unittest.TestCase):
                 watchlist = [(dtrain, 'train'), (dval, 'validation')]
                 res = {}
                 param = {
-                    "objective": "binary:logistic_oneapi",
-                    "predictor": "oneapi_predictor",
+                    "objective": "binary:logistic",
                     'eval_metric': 'logloss',
                     'tree_method': 'hist',
-                    'updater': 'grow_quantile_histmaker_oneapi',
-                    'max_depth': 1
+                    'device': 'cpu',
+                    'max_depth': 1,
+                    'verbosity': 0
                 }
                 bst = xgb.train(param, dtrain, iterations, evals=watchlist,
                                 evals_result=res)
                 assert self.non_increasing(res["train"]["logloss"])
+                cpu_pred_train = bst.predict(dtrain, output_margin=True)
+                cpu_pred_test = bst.predict(dtest, output_margin=True)
+                cpu_pred_val = bst.predict(dval, output_margin=True)
+
+                bst.set_param({"device": "sycl:gpu"})
                 oneapi_pred_train = bst.predict(dtrain, output_margin=True)
                 oneapi_pred_test = bst.predict(dtest, output_margin=True)
                 oneapi_pred_val = bst.predict(dval, output_margin=True)
-
-                param["predictor"] = "cpu_predictor"
-                bst_cpu = xgb.train(param, dtrain, iterations, evals=watchlist)
-                cpu_pred_train = bst_cpu.predict(dtrain, output_margin=True)
-                cpu_pred_test = bst_cpu.predict(dtest, output_margin=True)
-                cpu_pred_val = bst_cpu.predict(dval, output_margin=True)
 
                 np.testing.assert_allclose(cpu_pred_train, oneapi_pred_train,
                                            rtol=1e-6)
@@ -79,17 +77,15 @@ class TestOneAPIPredict(unittest.TestCase):
 
         params = {}
         params["tree_method"] = "hist"
-        params["updater"] = "grow_quantile_histmaker_oneapi"
+        params["device"] = "cpu"
 
-        params['predictor'] = "oneapi_predictor"
-        bst_oneapi_predict = xgb.train(params, dtrain)
+        bst = xgb.train(params, dtrain)
+        cpu_predict = bst.predict(dtest)
 
-        params['predictor'] = "cpu_predictor"
-        bst_cpu_predict = xgb.train(params, dtrain)
+        bst.set_param({"device": "sycl:gpu"})
 
-        predict0 = bst_oneapi_predict.predict(dtest)
-        predict1 = bst_oneapi_predict.predict(dtest)
-        cpu_predict = bst_cpu_predict.predict(dtest)
+        predict0 = bst.predict(dtest)
+        predict1 = bst.predict(dtest)
 
         assert np.allclose(predict0, predict1)
         assert np.allclose(predict0, cpu_predict)
@@ -105,29 +101,31 @@ class TestOneAPIPredict(unittest.TestCase):
 
         # First with cpu_predictor
         params = {'tree_method': 'hist',
-                  'predictor': 'cpu_predictor',
+                  'device': 'cpu',
                   'n_jobs': -1,
+                  'verbosity' : 0,
                   'seed': 123}
         m = xgb.XGBRegressor(**params).fit(X_train, y_train)
         cpu_train_score = m.score(X_train, y_train)
         cpu_test_score = m.score(X_test, y_test)
 
         # Now with oneapi_predictor
-        params['predictor'] = 'oneapi_predictor'
+        params['device'] = 'sycl:gpu'
+        m.set_params(**params)
 
-        m = xgb.XGBRegressor(**params).fit(X_train, y_train)
+        # m = xgb.XGBRegressor(**params).fit(X_train, y_train)
         oneapi_train_score = m.score(X_train, y_train)
-        m = xgb.XGBRegressor(**params).fit(X_train, y_train)
+        # m = xgb.XGBRegressor(**params).fit(X_train, y_train)
         oneapi_test_score = m.score(X_test, y_test)
 
         assert np.allclose(cpu_train_score, oneapi_train_score)
         assert np.allclose(cpu_test_score, oneapi_test_score)
 
     @given(strategies.integers(1, 10),
-           tm.dataset_strategy.filter(lambda x: x.name != "empty"), shap_parameter_strategy)
+           tm.make_dataset_strategy(), shap_parameter_strategy)
     @settings(deadline=None)
     def test_shap(self, num_rounds, dataset, param):
-        param.update({"predictor": "oneapi_predictor"})
+        param.update({"device": "sycl:gpu"})
         param = dataset.set_params(param)
         dmat = dataset.get_dmat()
         bst = xgb.train(param, dmat, num_rounds)
@@ -138,10 +136,10 @@ class TestOneAPIPredict(unittest.TestCase):
         assert np.allclose(np.sum(shap, axis=len(shap.shape) - 1), margin, 1e-3, 1e-3)
 
     @given(strategies.integers(1, 10),
-           tm.dataset_strategy.filter(lambda x: x.name != "empty"), shap_parameter_strategy)
+           tm.make_dataset_strategy(), shap_parameter_strategy)
     @settings(deadline=None, max_examples=20)
     def test_shap_interactions(self, num_rounds, dataset, param):
-        param.update({"predictor": "oneapi_predictor"})
+        param.update({"device": "sycl:gpu"})
         param = dataset.set_params(param)
         dmat = dataset.get_dmat()
         bst = xgb.train(param, dmat, num_rounds)

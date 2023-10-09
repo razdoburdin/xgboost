@@ -30,8 +30,10 @@ DMLC_REGISTRY_FILE_TAG(predictor_oneapi);
 class PredictorOneAPI : public Predictor {
  public:
   explicit PredictorOneAPI(Context const* context) :
-      Predictor::Predictor{context} {
-    const DeviceOrd device_spec = context->Device();
+      Predictor::Predictor{context} {}
+
+  void Configure(const std::vector<std::pair<std::string, std::string>>& args) override {
+    const DeviceOrd device_spec = ctx_->Device();
 
     bool is_cpu;
     if (device_spec.IsSycl()) {
@@ -44,16 +46,11 @@ class PredictorOneAPI : public Predictor {
     LOG(INFO) << "device = " << device_spec.Name() << ", is_cpu = " << int(is_cpu);
 
     if (is_cpu) {
-      predictor_backend_.reset(Predictor::Create("cpu_predictor", context));
+      predictor_backend_.reset(Predictor::Create("cpu_predictor", ctx_));
     } else{
-      predictor_backend_.reset(Predictor::Create("oneapi_predictor_backend", context));
+      predictor_backend_.reset(Predictor::Create("oneapi_predictor_backend", ctx_));
     }
-  }
-
-  void Configure(const std::vector<std::pair<std::string, std::string>>& args) override {
-    if (predictor_backend_) {
-      predictor_backend_->Configure(args);
-    }
+    predictor_backend_->Configure(args);
   }
 
   void PredictBatch(DMatrix *dmat, PredictionCacheEntry *predts,

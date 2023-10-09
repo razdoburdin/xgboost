@@ -278,7 +278,7 @@ LearnerModelParam::LearnerModelParam(Context const* ctx, LearnerModelParamLegacy
   std::swap(base_score_, base_margin);
   // Make sure read access everywhere for thread-safe prediction.
   std::as_const(base_score_).HostView();
-  if (!ctx->IsCPU()) {
+  if (ctx->IsCUDA()) {
     std::as_const(base_score_).View(ctx->gpu_id);
   }
   CHECK(std::as_const(base_score_).Data()->HostCanRead());
