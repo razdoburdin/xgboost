@@ -571,9 +571,11 @@ void GBTree::InplacePredict(std::shared_ptr<DMatrix> p_m, float missing,
       CHECK(gpu_predictor_);
       return gpu_predictor_;
     } else {
+#if defined(XGBOOST_USE_ONEAPI)
       common::AssertOneAPISupport();
       CHECK(oneapi_predictor_);
       return oneapi_predictor_;
+#endif  // defined(XGBOOST_USE_ONEAPI)
     }
 
   }
@@ -614,9 +616,11 @@ void GBTree::InplacePredict(std::shared_ptr<DMatrix> p_m, float missing,
     CHECK(gpu_predictor_);
     return gpu_predictor_;
   } else {
-    common::AssertOneAPISupport();
-    CHECK(oneapi_predictor_);
-    return oneapi_predictor_;
+#if defined(XGBOOST_USE_ONEAPI)
+      common::AssertOneAPISupport();
+      CHECK(oneapi_predictor_);
+      return oneapi_predictor_;
+#endif  // defined(XGBOOST_USE_ONEAPI)
   }
 
   return cpu_predictor_;
