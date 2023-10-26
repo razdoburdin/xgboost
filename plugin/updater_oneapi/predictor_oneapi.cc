@@ -28,11 +28,7 @@ namespace predictor {
 DMLC_REGISTRY_FILE_TAG(predictor_oneapi);
 
 class PredictorOneAPI : public Predictor {
- public:
-  explicit PredictorOneAPI(Context const* context) :
-      Predictor::Predictor{context} {}
-
-  void Configure(const std::vector<std::pair<std::string, std::string>>& args) override {
+ void ConfigureBackend(Context const* context) {
     const DeviceOrd device_spec = ctx_->Device();
 
     bool is_cpu;
@@ -50,6 +46,16 @@ class PredictorOneAPI : public Predictor {
     } else{
       predictor_backend_.reset(Predictor::Create("oneapi_predictor_backend", ctx_));
     }
+ }
+
+ public:
+  explicit PredictorOneAPI(Context const* context) :
+      Predictor::Predictor{context} {
+    ConfigureBackend(context);
+  }
+
+  void Configure(const std::vector<std::pair<std::string, std::string>>& args) override {
+    ConfigureBackend(ctx_);
     predictor_backend_->Configure(args);
   }
 
