@@ -82,6 +82,12 @@ class USMVector {
     qu->fill(data_.get(), v, size_).wait();
   }
 
+  USMVector(::sycl::queue* qu, size_t size, T v,
+            ::sycl::event* event) : size_(size), capacity_(size) {
+    data_ = allocate_memory_(qu, size_);
+    *event = qu->fill(data_.get(), v, size_, *event);
+  }
+
   USMVector(::sycl::queue* qu, const std::vector<T> &vec) {
     size_ = vec.size();
     capacity_ = size_;
@@ -92,12 +98,9 @@ class USMVector {
   ~USMVector() {
   }
 
-  USMVector<T>& operator=(const USMVector<T>& other) {
-    size_ = other.size_;
-    capacity_ = other.capacity_;
-    data_ = other.data_;
-    return *this;
-  }
+  USMVector(const USMVector&) = delete;
+
+  USMVector<T>& operator=(const USMVector<T>& other) = delete;
 
   T* Data() { return data_.get(); }
   const T* DataConst() const { return data_.get(); }
@@ -154,25 +157,22 @@ class USMVector {
     }
   }
 
-  ::sycl::event ResizeAsync(::sycl::queue* qu, size_t size_new, T v) {
+  void Resize(::sycl::queue* qu, size_t size_new, T v, ::sycl::event* event) {
     if (size_new <= size_) {
       size_ = size_new;
-      return ::sycl::event();
     } else if (size_new <= capacity_) {
-      auto event = qu->fill(data_.get() + size_, v, size_new - size_);
+      *event = qu->fill(data_.get() + size_, v, size_new - size_, *event);
       size_ = size_new;
-      return event;
     } else {
       size_t size_old = size_;
       auto data_old = data_;
       size_ = size_new;
       capacity_ = size_new;
       data_ = allocate_memory_(qu, size_);
-      ::sycl::event event;
       if (size_old > 0) {
-        event = qu->memcpy(data_.get(), data_old.get(), sizeof(T) * size_old);
+        *event = qu->memcpy(data_.get(), data_old.get(), sizeof(T) * size_old, *event);
       }
-      return qu->fill(data_.get() + size_old, v, size_new - size_old, event);
+       *event = qu->fill(data_.get() + size_old, v, size_new - size_old, *event);
     }
   }
 
@@ -214,13 +214,36 @@ class USMVector {
 
 /* Wrapper for DMatrix which stores all batches in a single USM buffer */
 struct DeviceMatrix {
-  DMatrix* p_mat;  // Pointer to the original matrix on the host
+  DMatrix* p_mat = nullptr;  // Pointer to the original matrix on the host
   ::sycl::queue qu_;
   USMVector<size_t, MemoryType::on_device> row_ptr;
   USMVector<Entry, MemoryType::on_device> data;
   size_t total_offset;
+  bool is_from_cache = false;
 
-  DeviceMatrix(::sycl::queue qu, DMatrix* dmat) : p_mat(dmat), qu_(qu) {
+  DeviceMatrix() = default;
+
+  DeviceMatrix(const DeviceMatrix& other) = delete;
+
+  DeviceMatrix& operator= (const DeviceMatrix& other) = delete;
+
+  // During training the same dmatrix is used, so we don't need reload it on device
+  bool ReinitializationRequired(DMatrix* dmat, bool training) {
+    if (!training) return true;
+    if (p_mat != dmat) return true;
+    return false;
+  }
+
+  void Init(::sycl::queue qu, DMatrix* dmat, bool training = false) {
+    qu_ = qu;
+    if (!ReinitializationRequired(dmat, training)) {
+      is_from_cache = true;
+      return;
+    }
+
+    is_from_cache = false;
+    p_mat = dmat;
+
     size_t num_row = 0;
     size_t num_nonzero = 0;
     for (auto &batch : dmat->GetBatches<SparsePage>()) {
@@ -235,14 +258,15 @@ struct DeviceMatrix {
     data.Resize(&qu_, num_nonzero);
 
     size_t data_offset = 0;
+    ::sycl::event event;
     for (auto &batch : dmat->GetBatches<SparsePage>()) {
       const auto& data_vec = batch.data.HostVector();
       const auto& offset_vec = batch.offset.HostVector();
       size_t batch_size = batch.Size();
       if (batch_size > 0) {
         const auto base_rowid = batch.base_rowid;
-        auto event = qu.memcpy(row_ptr.Data() + base_rowid, offset_vec.data(),
-                               sizeof(size_t) * batch_size);
+        event = qu.memcpy(row_ptr.Data() + base_rowid, offset_vec.data(),
+                          sizeof(size_t) * batch_size, event);
         if (base_rowid > 0) {
           qu.submit([&](::sycl::handler& cgh) {
             cgh.depends_on(event);
@@ -252,23 +276,23 @@ struct DeviceMatrix {
             });
           });
         }
-        qu.memcpy(data.Data() + data_offset, data_vec.data(),
-                  sizeof(Entry) * offset_vec[batch_size]);
+        event = qu.memcpy(data.Data() + data_offset, data_vec.data(),
+                          sizeof(Entry) * offset_vec[batch_size], event);
         data_offset += offset_vec[batch_size];
+        qu.wait();
       }
     }
     qu.submit([&](::sycl::handler& cgh) {
+      cgh.depends_on(event);
       cgh.single_task<>([=] {
         rows[num_row] = data_offset;
       });
     });
     qu.wait();
-
     total_offset = data_offset;
   }
 
-  ~DeviceMatrix() {
-  }
+  ~DeviceMatrix() {}
 };
 }  // namespace sycl
 }  // namespace xgboost
