@@ -13,6 +13,7 @@
 #include "row_set.h"
 
 #include "../../src/common/hist_util.h"
+#include "../data/gradient_index.h"
 
 #include <CL/sycl.hpp>
 
@@ -164,7 +165,8 @@ class GHistBuilder {
                           GHistRowT<MemoryType::on_device>* HistCollection,
                           bool isDense,
                           GHistRowT<MemoryType::on_device>* hist_buffer,
-                          ::sycl::event evens);
+                          ::sycl::event evens,
+                          bool force_atomic_use = false);
 
   // Construct a histogram via subtraction trick
   void SubtractionTrick(GHistRowT<MemoryType::on_device>* self,
