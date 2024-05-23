@@ -197,9 +197,9 @@ class SoftmaxMultiClassObj : public ObjFunction {
         events_[4] = qu_.memcpy(out_gpair->HostPointer() + begin * nclass, out_gpair_ptr,
                                 batch_size * nclass * sizeof(GradientPair), events_[3]);
       }
+      qu_.wait_and_throw();
     }
     // flag_buf is destroyed, content is copyed to the "flag"
-    qu_.wait_and_throw();
 
     if (flag == 0) {
       LOG(FATAL) << "SYCL::SoftmaxMultiClassObj: label must be in [0, num_class).";

@@ -47,6 +47,19 @@ template<typename Loss>
 class RegLossObj : public ObjFunction {
  protected:
   static constexpr size_t kBatchSize = 1u << 22;
+  mutable bool are_buffs_init = false;
+
+  void InitBuffers() const {
+    if (!are_buffs_init) {
+      events_.resize(5);
+      preds_.Resize(&qu_, kBatchSize);
+      labels_.Resize(&qu_, kBatchSize);
+      weights_.Resize(&qu_, kBatchSize);
+      out_gpair_.Resize(&qu_, kBatchSize);
+      are_buffs_init = true;
+    }
+  }
+
 
  public:
   RegLossObj() = default;
@@ -54,18 +67,13 @@ class RegLossObj : public ObjFunction {
   void Configure(const std::vector<std::pair<std::string, std::string> >& args) override {
     param_.UpdateAllowUnknown(args);
     qu_ = device_manager.GetQueue(ctx_->Device());
-
-    events_.resize(5);
-    preds_.Resize(&qu_, kBatchSize);
-    labels_.Resize(&qu_, kBatchSize);
-    weights_.Resize(&qu_, kBatchSize);
-    out_gpair_.Resize(&qu_, kBatchSize);
   }
 
   void GetGradient(const HostDeviceVector<bst_float>& preds,
                    const MetaInfo &info,
                    int iter,
                    HostDeviceVector<GradientPair>* out_gpair) override {
+    InitBuffers();
     if (info.labels.Size() == 0) return;
     CHECK_EQ(preds.Size(), info.labels.Size())
         << " " << "labels are not correctly provided"
@@ -102,7 +110,7 @@ class RegLossObj : public ObjFunction {
         int nwgs = (batch_size / wg_size + (batch_size % wg_size > 0));
 
         events_[0] = qu_.memcpy(preds_ptr, preds.HostPointer() + begin,
-                               batch_size * sizeof(bst_float), events_[3]);
+                                batch_size * sizeof(bst_float), events_[3]);
         events_[1] = qu_.memcpy(labels_ptr, info.labels.Data()->HostPointer() + begin,
                                batch_size * sizeof(bst_float), events_[3]);
         if (!is_null_weight) {
@@ -136,9 +144,9 @@ class RegLossObj : public ObjFunction {
         events_[4] = qu_.memcpy(out_gpair->HostPointer() + begin, out_gpair_ptr,
                                batch_size * sizeof(GradientPair), events_[3]);
       }
+      qu_.wait_and_throw();
     }
   // flag_buf is destroyed, content is copyed to the "flag"
-    qu_.wait_and_throw();
 
     if (flag == 0) {
       LOG(FATAL) << Loss::LabelErrorMsg();
@@ -151,6 +159,7 @@ class RegLossObj : public ObjFunction {
   }
 
   void PredTransform(HostDeviceVector<bst_float> *io_preds) const override {
+    InitBuffers();
     size_t const ndata = io_preds->Size();
     if (ndata == 0) return;
 
