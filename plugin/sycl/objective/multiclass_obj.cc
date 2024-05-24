@@ -95,9 +95,9 @@ class SoftmaxMultiClassObj : public ObjFunction {
   void InitBuffers() const {
     if (!are_buffs_init) {
       events_.resize(5);
-      preds_.Resize(&qu_, kBatchSize);
-      labels_.Resize(&qu_, kBatchSize);
-      weights_.Resize(&qu_, kBatchSize);
+      in_buff1_.Resize(&qu_, kBatchSize);
+      in_buff2_.Resize(&qu_, kBatchSize);
+      in_buff3_.Resize(&qu_, kBatchSize);
       out_gpair_.Resize(&qu_, kBatchSize);
       are_buffs_init = true;
     }
