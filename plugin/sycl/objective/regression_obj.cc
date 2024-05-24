@@ -60,7 +60,6 @@ class RegLossObj : public ObjFunction {
     }
   }
 
-
  public:
   RegLossObj() = default;
 

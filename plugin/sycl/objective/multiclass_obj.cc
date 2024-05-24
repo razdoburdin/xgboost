@@ -90,6 +90,19 @@ struct SoftmaxMultiClassParam : public XGBoostParameter<SoftmaxMultiClassParam> 
 
 class SoftmaxMultiClassObj : public ObjFunction {
   static constexpr size_t kBatchSize = 1u << 22;
+  mutable bool are_buffs_init = false;
+
+  void InitBuffers() const {
+    if (!are_buffs_init) {
+      events_.resize(5);
+      preds_.Resize(&qu_, kBatchSize);
+      labels_.Resize(&qu_, kBatchSize);
+      weights_.Resize(&qu_, kBatchSize);
+      out_gpair_.Resize(&qu_, kBatchSize);
+      are_buffs_init = true;
+    }
+  }
+
  public:
   explicit SoftmaxMultiClassObj(bool output_prob)
   : output_prob_(output_prob) {}
@@ -98,13 +111,6 @@ class SoftmaxMultiClassObj : public ObjFunction {
   void Configure(Args const& args) override {
     param_.UpdateAllowUnknown(args);
     qu_ = device_manager.GetQueue(ctx_->Device());
-
-    events_.resize(5);
-    const int num_class = param_.num_class;
-    in_buff1_.Resize(&qu_, kBatchSize * num_class);
-    in_buff2_.Resize(&qu_, kBatchSize);
-    in_buff3_.Resize(&qu_, kBatchSize);
-    out_gpair_.Resize(&qu_, kBatchSize * num_class);
   }
 
 
@@ -112,6 +118,7 @@ class SoftmaxMultiClassObj : public ObjFunction {
                    const MetaInfo& info,
                    int iter,
                    HostDeviceVector<GradientPair>* out_gpair) override {
+    InitBuffers();
     if (preds.Size() == 0) return;
     if (info.labels.Size() == 0) return;
 
@@ -218,6 +225,7 @@ class SoftmaxMultiClassObj : public ObjFunction {
 
 
   inline void Transform(HostDeviceVector<bst_float> *io_preds, bool prob) const {
+    InitBuffers();
     if (io_preds->Size() == 0) return;
     const int nclass = param_.num_class;
     const auto ndata = static_cast<int64_t>(io_preds->Size() / nclass);
