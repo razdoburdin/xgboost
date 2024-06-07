@@ -12,15 +12,18 @@
 #pragma GCC diagnostic pop
 
 #include <utility>
+#include <queue>
 #include <vector>
 #include <memory>
 
+#include "../common/row_set.h"
 #include "../common/partition_builder.h"
+#include "param.h"
 #include "split_evaluator.h"
 #include "hist_synchronizer.h"
 #include "hist_row_adder.h"
 
-#include "../data.h"
+#include "../../src/common/random.h"
 
 namespace xgboost {
 namespace sycl {
@@ -59,7 +62,8 @@ class HistUpdater {
       tree_evaluator_(qu, param, fmat->Info().num_col_),
       pruner_(std::move(pruner)),
       interaction_constraints_{std::move(int_constraints_)},
-      p_last_tree_(nullptr), p_last_fmat_(fmat) {
+      p_last_tree_(nullptr), p_last_fmat_(fmat),
+      column_sampler_(seed_) {
     builder_monitor_.Init("SYCL::Quantile::HistUpdater");
     kernel_monitor_.Init("SYCL::Quantile::HistUpdater");
     const auto sub_group_sizes =
@@ -67,16 +71,65 @@ class HistUpdater {
     sub_group_size_ = sub_group_sizes.back();
   }
 
+  // update one tree, growing
+  void Update(Context const * ctx,
+              xgboost::tree::TrainParam const *param,
+              const common::GHistIndexMatrix &gmat,
+              linalg::Matrix<GradientPair> *gpair,
+              const USMVector<GradientPair, MemoryType::on_device>& gpair_device,
+              DMatrix *p_fmat,
+              xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
+              RegTree *p_tree);
+
+  bool UpdatePredictionCache(const DMatrix* data,
+                              linalg::MatrixView<float> p_out_preds);
+
   void SetHistSynchronizer(HistSynchronizer<GradientSumT>* sync);
   void SetHistRowsAdder(HistRowsAdder<GradientSumT>* adder);
 
  protected:
   friend class BatchHistSynchronizer<GradientSumT>;
+  friend class DistributedHistSynchronizer<GradientSumT>;
+
   friend class BatchHistRowsAdder<GradientSumT>;
+  friend class DistributedHistRowsAdder<GradientSumT>;
+
+  struct SplitQuery {
+    int nid;
+    int fid;
+    SplitEntry<GradientSumT> best;
+    const GradientPairT* hist;
+  };
 
   void InitSampling(const USMVector<GradientPair, MemoryType::on_device> &gpair,
                     USMVector<size_t, MemoryType::on_device>* row_indices);
 
+  void EvaluateSplits(const std::vector<ExpandEntry>& nodes_set,
+                      const common::GHistIndexMatrix& gmat,
+                      const common::HistCollection<GradientSumT, MemoryType::on_device>& hist,
+                      const RegTree& tree);
+
+  // Enumerate the split values of specific feature
+  // Returns the sum of gradients corresponding to the data points that contains a non-missing
+  // value for the particular feature fid.
+  static void EnumerateSplit(const ::sycl::sub_group& sg,
+      const uint32_t* cut_ptr, const bst_float* cut_val, const GradientPairT* hist_data,
+      const NodeEntry<GradientSumT> &snode, SplitEntry<GradientSumT>* p_best, bst_uint fid,
+      bst_uint nodeID,
+      typename TreeEvaluator<GradientSumT>::SplitEvaluator const &evaluator,
+      float min_child_weight);
+
+  void ApplySplit(std::vector<ExpandEntry> nodes,
+                      const common::GHistIndexMatrix& gmat,
+                      const common::HistCollection<GradientSumT, MemoryType::on_device>& hist,
+                      RegTree* p_tree);
+
+  void AddSplitsToRowSet(const std::vector<ExpandEntry>& nodes, RegTree* p_tree);
+
+
+  void FindSplitConditions(const std::vector<ExpandEntry>& nodes, const RegTree& tree,
+                           const common::GHistIndexMatrix& gmat,
+                           std::vector<int32_t>* split_conditions);
 
   void InitData(const common::GHistIndexMatrix& gmat,
                 const USMVector<GradientPair, MemoryType::on_device> &gpair,
@@ -100,6 +153,11 @@ class HistUpdater {
                    const DMatrix& fmat,
                    const RegTree& tree);
 
+  void ExpandWithDepthWise(const common::GHistIndexMatrix &gmat,
+                            DMatrix *p_fmat,
+                            RegTree *p_tree,
+                            const USMVector<GradientPair, MemoryType::on_device> &gpair);
+
   void BuildLocalHistograms(const common::GHistIndexMatrix &gmat,
                             RegTree *p_tree,
                             const USMVector<GradientPair, MemoryType::on_device> &gpair);
@@ -110,12 +168,56 @@ class HistUpdater {
                       RegTree *p_tree,
                       const USMVector<GradientPair, MemoryType::on_device> &gpair);
 
+  // Split nodes to 2 sets depending on amount of rows in each node
+  // Histograms for small nodes will be built explicitly
+  // Histograms for big nodes will be built by 'Subtraction Trick'
+  void SplitSiblings(const std::vector<ExpandEntry>& nodes,
+                  std::vector<ExpandEntry>* small_siblings,
+                  std::vector<ExpandEntry>* big_siblings,
+                  RegTree *p_tree);
+
+  void BuildNodeStats(const common::GHistIndexMatrix &gmat,
+                      DMatrix *p_fmat,
+                      RegTree *p_tree,
+                      const USMVector<GradientPair, MemoryType::on_device> &gpair);
+
+  void ExpandWithLossGuide(const common::GHistIndexMatrix& gmat,
+                           DMatrix* p_fmat,
+                           RegTree* p_tree,
+                           const USMVector<GradientPair, MemoryType::on_device>& gpair);
+
+  void EvaluateAndApplySplits(const common::GHistIndexMatrix &gmat,
+                              RegTree *p_tree,
+                              int *num_leaves,
+                              int depth,
+                              std::vector<ExpandEntry> *temp_qexpand_depth);
+
+  void AddSplitsToTree(
+            const common::GHistIndexMatrix &gmat,
+            RegTree *p_tree,
+            int *num_leaves,
+            int depth,
+            std::vector<ExpandEntry>* nodes_for_apply_split,
+            std::vector<ExpandEntry>* temp_qexpand_depth);
+
+  void ReduceHists(const std::vector<int>& sync_ids, size_t nbins);
+
+  inline static bool LossGuide(ExpandEntry lhs, ExpandEntry rhs) {
+    if (lhs.GetLossChange() == rhs.GetLossChange()) {
+      return lhs.GetNodeId() > rhs.GetNodeId();  // favor small timestamp
+    } else {
+      return lhs.GetLossChange() < rhs.GetLossChange();  // favor large loss_chg
+    }
+  }
+
   //  --data fields--
   const Context* ctx_;
   size_t sub_group_size_;
 
   // the internal row sets
   common::RowSetCollection row_set_collection_;
+  std::vector<SplitQuery> split_queries_host_;
+  USMVector<SplitQuery, MemoryType::on_device> split_queries_device_;
 
   const xgboost::tree::TrainParam& param_;
   TreeEvaluator<GradientSumT> tree_evaluator_;
@@ -126,6 +228,13 @@ class HistUpdater {
   const RegTree* p_last_tree_;
   DMatrix const* const p_last_fmat_;
 
+  using ExpandQueue =
+      std::priority_queue<ExpandEntry, std::vector<ExpandEntry>,
+                          std::function<bool(ExpandEntry, ExpandEntry)>>;
+
+  std::unique_ptr<ExpandQueue> qexpand_loss_guided_;
+  std::vector<ExpandEntry> qexpand_depth_wise_;
+
   enum DataLayout { kDenseDataZeroBased, kDenseDataOneBased, kSparseData };
   DataLayout data_layout_;
 
@@ -134,9 +243,12 @@ class HistUpdater {
   common::ParallelGHistBuilder<GradientSumT> hist_buffer_;
   /*! \brief culmulative histogram of gradients. */
   common::HistCollection<GradientSumT, MemoryType::on_device> hist_;
+  /*! \brief culmulative local parent histogram of gradients. */
+  common::HistCollection<GradientSumT, MemoryType::on_device> hist_local_worker_;
 
   /*! \brief TreeNode Data: statistics for each constructed node */
   std::vector<NodeEntry<GradientSumT>> snode_host_;
+  USMVector<NodeEntry<GradientSumT>, MemoryType::on_device> snode_device_;
 
   xgboost::common::Monitor builder_monitor_;
   xgboost::common::Monitor kernel_monitor_;
@@ -146,6 +258,9 @@ class HistUpdater {
   uint32_t fid_least_bins_;
 
   uint64_t seed_ = 0;
+  xgboost::common::ColumnSampler column_sampler_;
+
+  common::PartitionBuilder partition_builder_;
 
   // key is the node id which should be calculated by Subtraction Trick, value is the node which
   // provides the evidence for substracts
@@ -155,6 +270,9 @@ class HistUpdater {
 
   std::unique_ptr<HistSynchronizer<GradientSumT>> hist_synchronizer_;
   std::unique_ptr<HistRowsAdder<GradientSumT>> hist_rows_adder_;
+
+  USMVector<bst_float, MemoryType::on_device> out_preds_buf_;
+  bst_float* out_pred_ptr = nullptr;
 
   ::sycl::queue qu_;
 };
