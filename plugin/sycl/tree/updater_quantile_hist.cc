@@ -10,6 +10,9 @@
 #include "xgboost/tree_updater.h"
 #pragma GCC diagnostic pop
 
+#include <utility>
+#include <memory>
+
 #include "xgboost/logging.h"
 
 #include "updater_quantile_hist.h"

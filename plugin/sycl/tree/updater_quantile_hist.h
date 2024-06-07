@@ -9,6 +9,7 @@
 #include <xgboost/tree_updater.h>
 
 #include <vector>
+#include <memory>
 
 #include "hist_updater.h"
 #include "../device_manager.h"

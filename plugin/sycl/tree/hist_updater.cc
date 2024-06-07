@@ -572,6 +572,11 @@ void HistUpdater<GradientSumT>::InitData(
     }
   }
 
+  // store a pointer to the tree
+  p_last_tree_ = &tree;
+  column_sampler_.Init(ctx, info.num_col_, info.feature_weights.ConstHostVector(),
+                       param_.colsample_bynode, param_.colsample_bylevel,
+                       param_.colsample_bytree);
   if (data_layout_ == kDenseDataZeroBased || data_layout_ == kDenseDataOneBased) {
     /* specialized code for dense data:
        choose the column that has a least positive number of discrete bins.
