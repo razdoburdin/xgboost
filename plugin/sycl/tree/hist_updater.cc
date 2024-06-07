@@ -492,6 +492,7 @@ void HistUpdater<GradientSumT>::InitData(
     // initialize histogram collection
     uint32_t nbins = gmat.cut.Ptrs().back();
     hist_.Init(qu_, nbins);
+    hist_local_worker_.Init(qu_, nbins);
 
     hist_buffer_.Init(qu_, nbins);
     size_t buffer_size = kBufferSize;
