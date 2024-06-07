@@ -3,15 +3,14 @@
  * \file updater_quantile_hist.cc
  */
 #include <vector>
+#include <utility>
+#include <memory>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wtautological-constant-compare"
 #pragma GCC diagnostic ignored "-W#pragma-messages"
 #include "xgboost/tree_updater.h"
 #pragma GCC diagnostic pop
-
-#include <utility>
-#include <memory>
 
 #include "xgboost/logging.h"
 
