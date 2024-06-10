@@ -29,6 +29,12 @@ void QuantileHistMaker::Configure(const Args& args) {
   const DeviceOrd device_spec = ctx_->Device();
   qu_ = device_manager.GetQueue(device_spec);
 
+  // initialize pruner
+  if (!pruner_) {
+    pruner_.reset(TreeUpdater::Create("prune", ctx_, task_));
+  }
+  pruner_->Configure(args);
+
   param_.UpdateAllowUnknown(args);
   hist_maker_param_.UpdateAllowUnknown(args);
 }
