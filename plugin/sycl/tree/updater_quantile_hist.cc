@@ -28,7 +28,6 @@ DMLC_REGISTER_PARAMETER(HistMakerTrainParam);
 void QuantileHistMaker::Configure(const Args& args) {
   const DeviceOrd device_spec = ctx_->Device();
   qu_ = device_manager.GetQueue(device_spec);
-
   // initialize pruner
   if (!pruner_) {
     pruner_.reset(TreeUpdater::Create("prune", ctx_, task_));
@@ -37,6 +36,16 @@ void QuantileHistMaker::Configure(const Args& args) {
 
   param_.UpdateAllowUnknown(args);
   hist_maker_param_.UpdateAllowUnknown(args);
+
+  bool has_fp64_support = qu_.get_device().has(::sycl::aspect::fp64);
+  if (hist_maker_param_.single_precision_histogram || !has_fp64_support) {
+    if (!hist_maker_param_.single_precision_histogram) {
+      LOG(WARNING) << "Target device doesn't support fp64, using single_precision_histogram=True";
+    }
+    hist_precision_ = HistPrecision::fp32;
+  } else {
+    hist_precision_ = HistPrecision::fp64;
+  }
 }
 
 template<typename GradientSumT>
