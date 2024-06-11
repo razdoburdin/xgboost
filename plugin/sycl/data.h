@@ -96,12 +96,9 @@ class USMVector {
   ~USMVector() {
   }
 
-  USMVector<T>& operator=(const USMVector<T>& other) {
-    size_ = other.size_;
-    capacity_ = other.capacity_;
-    data_ = other.data_;
-    return *this;
-  }
+  USMVector(const USMVector&) = delete;
+
+  USMVector<T>& operator=(const USMVector<T>& other) = delete;
 
   T* Data() { return data_.get(); }
   const T* DataConst() const { return data_.get(); }
@@ -139,6 +136,17 @@ class USMVector {
     }
   }
 
+  /* Resize without keeping the data*/
+  void ResizeNoCopy(::sycl::queue* qu, size_t size_new) {
+    if (size_new <= capacity_) {
+      size_ = size_new;
+    } else {
+      size_ = size_new;
+      capacity_ = size_new;
+      data_ = allocate_memory_(qu, size_);
+    }
+  }
+
   void Resize(::sycl::queue* qu, size_t size_new, T v) {
     if (size_new <= size_) {
       size_ = size_new;
@@ -162,7 +170,7 @@ class USMVector {
     if (size_new <= size_) {
       size_ = size_new;
     } else if (size_new <= capacity_) {
-      auto event = qu->fill(data_.get() + size_, v, size_new - size_);
+      *event = qu->fill(data_.get() + size_, v, size_new - size_, *event);
       size_ = size_new;
     } else {
       size_t size_old = size_;
@@ -215,16 +223,35 @@ class USMVector {
 
 /* Wrapper for DMatrix which stores all batches in a single USM buffer */
 struct DeviceMatrix {
-  DMatrix* p_mat;  // Pointer to the original matrix on the host
+  DMatrix* p_mat = nullptr;  // Pointer to the original matrix on the host
   ::sycl::queue qu_;
   USMVector<size_t, MemoryType::on_device> row_ptr;
   USMVector<Entry, MemoryType::on_device> data;
   size_t total_offset;
+  bool is_from_cache = false;
 
   DeviceMatrix() = default;
 
-  void Init(::sycl::queue qu, DMatrix* dmat) {
+  DeviceMatrix(const DeviceMatrix& other) = delete;
+
+  DeviceMatrix& operator= (const DeviceMatrix& other) = delete;
+
+  // During training the same dmatrix is used, so we don't need reload it on device
+  bool ReinitializationRequired(DMatrix* dmat, bool training) {
+    if (!training) return true;
+    if (p_mat != dmat) return true;
+    return false;
+  }
+
+  void Init(::sycl::queue qu, DMatrix* dmat, bool training = false) {
     qu_ = qu;
+    if (!ReinitializationRequired(dmat, training)) {
+      is_from_cache = true;
+      return;
+    }
+
+    is_from_cache = false;
+
     p_mat = dmat;
 
     size_t num_row = 0;
