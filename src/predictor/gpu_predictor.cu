@@ -961,7 +961,7 @@ class GPUPredictor : public xgboost::Predictor {
 
   void PredictBatch(DMatrix* dmat, PredictionCacheEntry* predts,
                     const gbm::GBTreeModel& model, uint32_t tree_begin,
-                    uint32_t tree_end = 0) const override {
+                    uint32_t tree_end = 0, bool training = false) const override {
     CHECK(ctx_->Device().IsCUDA()) << "Set `device' to `cuda` for processing GPU data.";
     auto* out_preds = &predts->predictions;
     if (tree_end == 0) {

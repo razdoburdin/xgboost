@@ -1,10 +1,11 @@
 /*!
- * Copyright by Contributors 2017-2023
+ * Copyright by Contributors 2017-2024
  */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wtautological-constant-compare"
-#pragma GCC diagnostic ignored "-W#pragma-messages"
-#pragma GCC diagnostic pop
+#include <dmlc/timer.h>
+// #pragma GCC diagnostic push
+// #pragma GCC diagnostic ignored "-Wtautological-constant-compare"
+// #pragma GCC diagnostic ignored "-W#pragma-messages"
+// #pragma GCC diagnostic pop
 
 #include <cstddef>
 #include <limits>
@@ -158,6 +159,8 @@ float GetLeafWeight(const Node* nodes, const float* fval_buff) {
 
 template <bool any_missing>
 void DevicePredictInternal(::sycl::queue* qu,
+                           USMVector<float,   MemoryType::on_device>* fval_buff,
+                           USMVector<uint8_t, MemoryType::on_device>* miss_buff,
                            const sycl::DeviceMatrix& dmat,
                            HostDeviceVector<float>* out_preds,
                            const gbm::GBTreeModel& model,
@@ -178,15 +181,17 @@ void DevicePredictInternal(::sycl::queue* qu,
   int num_rows = dmat.row_ptr.Size() - 1;
   int num_group = model.learner_model_param->num_output_group;
 
-  USMVector<float,   MemoryType::on_device> fval_buff(qu, num_features * num_rows);
-  USMVector<uint8_t, MemoryType::on_device> miss_buff;
-  auto* fval_buff_ptr = fval_buff.Data();
+  bool update_buffs = !dmat.is_from_cache;
 
   std::vector<::sycl::event> events(1);
-  if constexpr (any_missing) {
-    miss_buff.Resize(qu, num_features * num_rows, 1, &events[0]);
+  if (update_buffs) {
+    fval_buff->Resize(qu, num_features * num_rows);
+    if constexpr (any_missing) {
+      miss_buff->Resize(qu, num_features * num_rows, 1, &events[0]);
+    }
   }
-  auto* miss_buff_ptr = miss_buff.Data();
+  auto* fval_buff_ptr = fval_buff->Data();
+  auto* miss_buff_ptr = miss_buff->Data();
 
   auto& out_preds_vec = out_preds->HostVector();
   ::sycl::buffer<float, 1> out_preds_buf(out_preds_vec.data(), out_preds_vec.size());
@@ -198,12 +203,14 @@ void DevicePredictInternal(::sycl::queue* qu,
       auto* fval_buff_row_ptr = fval_buff_ptr + num_features * row_idx;
       auto* miss_buff_row_ptr = miss_buff_ptr + num_features * row_idx;
 
-      const Entry* first_entry = data + row_ptr[row_idx];
-      const Entry* last_entry = data + row_ptr[row_idx + 1];
-      for (const Entry* entry = first_entry; entry < last_entry; entry += 1) {
-        fval_buff_row_ptr[entry->index] = entry->fvalue;
-        if constexpr (any_missing) {
-          miss_buff_row_ptr[entry->index] = 0;
+      if (update_buffs) {
+        const Entry* first_entry = data + row_ptr[row_idx];
+        const Entry* last_entry = data + row_ptr[row_idx + 1];
+        for (const Entry* entry = first_entry; entry < last_entry; entry += 1) {
+          fval_buff_row_ptr[entry->index] = entry->fvalue;
+          if constexpr (any_missing) {
+            miss_buff_row_ptr[entry->index] = 0;
+          }
         }
       }
 
@@ -241,6 +248,7 @@ class Predictor : public xgboost::Predictor {
   void InitOutPredictions(const MetaInfo& info,
                           HostDeviceVector<bst_float>* out_preds,
                           const gbm::GBTreeModel& model) const override {
+    predictor_monitor_.Start("InitOutPredictions");
     CHECK_NE(model.learner_model_param->num_output_group, 0);
     size_t n = model.learner_model_param->num_output_group * info.num_row_;
     const auto& base_margin = info.base_margin_.Data()->HostVector();
@@ -268,33 +276,40 @@ class Predictor : public xgboost::Predictor {
       }
       std::fill(out_preds_h.begin(), out_preds_h.end(), base_score);
     }
+    predictor_monitor_.Stop("InitOutPredictions");
   }
 
   explicit Predictor(Context const* context) :
       xgboost::Predictor::Predictor{context},
-      cpu_predictor(xgboost::Predictor::Create("cpu_predictor", context)) {}
+      cpu_predictor(xgboost::Predictor::Create("cpu_predictor", context)) {
+        predictor_monitor_.Init("SyclPredictor");
+      }
 
   void PredictBatch(DMatrix *dmat, PredictionCacheEntry *predts,
                     const gbm::GBTreeModel &model, uint32_t tree_begin,
-                    uint32_t tree_end = 0) const override {
+                    uint32_t tree_end = 0, bool training = false) const override {
     ::sycl::queue qu = device_manager.GetQueue(ctx_->Device());
-    // TODO(razdoburdin): remove temporary workaround after cache fix
-    sycl::DeviceMatrix device_matrix;
-    device_matrix.Init(qu, dmat);
+    predictor_monitor_.Start("InitDeviceMatrix");
+    device_matrix.Init(qu, dmat, training);
+    predictor_monitor_.Stop("InitDeviceMatrix");
 
     auto* out_preds = &predts->predictions;
     if (tree_end == 0) {
       tree_end = model.trees.size();
     }
 
+    predictor_monitor_.Start("DevicePredictInternal");
     if (tree_begin < tree_end) {
       const bool any_missing = !(dmat->IsDense());
       if (any_missing) {
-        DevicePredictInternal<true>(&qu, device_matrix, out_preds, model, tree_begin, tree_end);
+        DevicePredictInternal<true>(&qu, &fval_buff, &miss_buff, device_matrix,
+                                    out_preds, model, tree_begin, tree_end);
       } else {
-        DevicePredictInternal<false>(&qu, device_matrix, out_preds, model, tree_begin, tree_end);
+        DevicePredictInternal<false>(&qu, &fval_buff, &miss_buff, device_matrix,
+                                    out_preds, model, tree_begin, tree_end);
       }
     }
+    predictor_monitor_.Stop("DevicePredictInternal");
   }
 
   bool InplacePredict(std::shared_ptr<DMatrix> p_m,
@@ -341,7 +356,11 @@ class Predictor : public xgboost::Predictor {
 
  private:
   DeviceManager device_manager;
+  mutable sycl::DeviceMatrix device_matrix;
+  mutable USMVector<float,   MemoryType::on_device> fval_buff;
+  mutable USMVector<uint8_t, MemoryType::on_device> miss_buff;
 
+  mutable xgboost::common::Monitor predictor_monitor_;
   std::unique_ptr<xgboost::Predictor> cpu_predictor;
 };
 
