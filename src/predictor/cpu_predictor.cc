@@ -770,7 +770,7 @@ class CPUPredictor : public Predictor {
 
   void PredictBatch(DMatrix *dmat, PredictionCacheEntry *predts, const gbm::GBTreeModel &model,
                     uint32_t tree_begin, uint32_t tree_end = 0,
-                    bool training = false) const override {
+                    bool = false) const override {
     auto *out_preds = &predts->predictions;
     // This is actually already handled in gbm, but large amount of tests rely on the
     // behaviour.
