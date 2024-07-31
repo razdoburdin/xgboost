@@ -7,13 +7,13 @@ build-backend = "packager.pep517"
 
 [project]
 name = "xgboost"
-version = "2.1.0"
+description = "XGBoost Python Package"
+readme = { file = "README.rst", content-type = "text/x-rst" }
 authors = [
     { name = "Hyunsu Cho", email = "chohyu01@cs.washington.edu" },
     { name = "Jiaming Yuan", email = "jm.yuan@outlook.com" }
 ]
-description = "XGBoost Python Package"
-readme = { file = "README.rst", content-type = "text/x-rst" }
+version = "2.1.1"
 requires-python = ">=3.8"
 license = { text = "Apache-2.0" }
 classifiers = [
@@ -38,7 +38,7 @@ documentation = "https://xgboost.readthedocs.io/en/stable/"
 repository = "https://github.com/dmlc/xgboost"
 
 [project.optional-dependencies]
-pandas = ["pandas"]
+pandas = ["pandas>=1.2"]
 scikit-learn = ["scikit-learn"]
 dask = ["dask", "pandas", "distributed"]
 datatable = ["datatable"]
