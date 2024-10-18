@@ -251,6 +251,54 @@ template<typename FPType, typename BinIdxType, bool isDense>
   return event_main;
 }
 
+// Kernel with inverce_index
+template<typename FPType, typename BinIdxType, bool isDense>
+::sycl::event BuildHistKernelInverce(::sycl::queue* qu,
+                            const USMVector<GradientPair, MemoryType::on_device>& gpair_device,
+                            const RowSetCollection::Elem& row_indices,
+                            const GHistIndexMatrix& gmat,
+                            GHistRow<FPType, MemoryType::on_device>* hist,
+                            ::sycl::event event_priv) {
+  const size_t size = row_indices.Size();
+  const size_t* rid = row_indices.begin;
+  const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
+  const GradientPair::ValueT* pgh =
+    reinterpret_cast<const GradientPair::ValueT*>(gpair_device.DataConst());
+  const size_t* inverse_index = gmat.inverse_index.Data();
+  const size_t* inverse_index_offset = gmat.inverse_index.Offsets();
+
+  const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
+  FPType* hist_data = reinterpret_cast<FPType*>(hist->Data());
+  const size_t nbins = gmat.nbins;
+
+  auto event_main = qu->submit([&](::sycl::handler& cgh) {
+    cgh.depends_on(event_priv);
+    cgh.parallel_for<>(::sycl::range<1>(nbins),
+                       [=](::sycl::item<1> pid) {
+      const int idx_bin = pid.get_id(0);
+      FPType grad = 0;
+      FPType hess = 0;
+
+      size_t first_elem = inverse_index_offset[idx_bin];
+      size_t last_elem = inverse_index_offset[idx_bin + 1];
+      for (size_t elem_idx = first_elem; elem_idx < last_elem; ++elem_idx) {
+        size_t row_idx = inverse_index[elem_idx];
+        // row_index is not sorted; need to re-implement for correct usage
+        const size_t* it = std::lower_bound(rid, rid + size, row_idx);
+        if (it < rid + size) {
+          grad += pgh[2*row_idx];
+          hess += pgh[2*row_idx+1];
+        }
+      }
+      // size_t bin = isDense ? idx_bin + offsets[col_idx] : idx_bin;
+      size_t bin = idx_bin;
+      hist_data[2*bin] = grad;
+      hist_data[2*bin+1] = hess;
+    });
+  });
+  return event_main;
+}
+
 template<typename FPType, typename BinIdxType>
 ::sycl::event BuildHistDispatchKernel(
                 ::sycl::queue* qu,
@@ -262,34 +310,43 @@ template<typename FPType, typename BinIdxType>
                 GHistRow<FPType, MemoryType::on_device>* hist_buffer,
                 ::sycl::event events_priv,
                 bool force_atomic_use) {
-  const size_t size = row_indices.Size();
-  const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
-  const size_t nbins = gmat.nbins;
 
-  // TODO(razdoburdin): replace the add-hock dispatching criteria by more sutable one
-  bool use_atomic = (size < nbins) || (gmat.max_num_bins == gmat.nbins / n_columns);
-
-  // force_atomic_use flag is used only for testing
-  use_atomic = use_atomic || force_atomic_use;
-  if (!use_atomic) {
-    if (isDense) {
-      return BuildHistKernel<FPType, BinIdxType, true>(qu, gpair_device, row_indices,
-                                                       gmat, hist, hist_buffer,
-                                                       events_priv);
-    } else {
-      return BuildHistKernel<FPType, uint32_t, false>(qu, gpair_device, row_indices,
-                                                      gmat, hist, hist_buffer,
-                                                      events_priv);
-    }
+  if (isDense) {
+    return BuildHistKernelInverce<FPType, BinIdxType, true>(qu, gpair_device, row_indices,
+                                                            gmat, hist, events_priv);
   } else {
-    if (isDense) {
-      return BuildHistKernel<FPType, BinIdxType, true>(qu, gpair_device, row_indices,
-                                                       gmat, hist, events_priv);
-    } else {
-      return BuildHistKernel<FPType, uint32_t, false>(qu, gpair_device, row_indices,
-                                                      gmat, hist, events_priv);
-    }
+    return BuildHistKernelInverce<FPType, uint32_t, false>(qu, gpair_device, row_indices,
+                                                            gmat, hist, events_priv);
   }
+
+  // const size_t size = row_indices.Size();
+  // const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
+  // const size_t nbins = gmat.nbins;
+
+  // // TODO(razdoburdin): replace the add-hock dispatching criteria by more sutable one
+  // bool use_atomic = (size < nbins) || (gmat.max_num_bins == gmat.nbins / n_columns);
+
+  // // force_atomic_use flag is used only for testing
+  // use_atomic = use_atomic || force_atomic_use;
+  // if (!use_atomic) {
+  //   if (isDense) {
+  //     return BuildHistKernel<FPType, BinIdxType, true>(qu, gpair_device, row_indices,
+  //                                                      gmat, hist, hist_buffer,
+  //                                                      events_priv);
+  //   } else {
+  //     return BuildHistKernel<FPType, uint32_t, false>(qu, gpair_device, row_indices,
+  //                                                     gmat, hist, hist_buffer,
+  //                                                     events_priv);
+  //   }
+  // } else {
+  //   if (isDense) {
+  //     return BuildHistKernel<FPType, BinIdxType, true>(qu, gpair_device, row_indices,
+  //                                                      gmat, hist, events_priv);
+  //   } else {
+  //     return BuildHistKernel<FPType, uint32_t, false>(qu, gpair_device, row_indices,
+  //                                                     gmat, hist, events_priv);
+  //   }
+  // }
 }
 
 template<typename FPType>

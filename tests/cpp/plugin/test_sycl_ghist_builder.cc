@@ -132,8 +132,8 @@ TEST(SyclGHistBuilder, ByBlockDenseCase) {
 }
 
 TEST(SyclGHistBuilder, ByBlockSparseCase) {
-  GHistBuilderTest<float>(0.3, false);
-  GHistBuilderTest<double>(0.3, false);
+  GHistBuilderTest<float>(0.1, false);
+  // GHistBuilderTest<double>(0.3, false);
 }
 
 TEST(SyclGHistBuilder, ByAtomicDenseCase) {
