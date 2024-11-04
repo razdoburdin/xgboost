@@ -17,6 +17,8 @@ endif()
 
 if(PLUGIN_SYCL)
   target_compile_definitions(objxgboost PRIVATE -DXGBOOST_USE_SYCL=1)
+  set_target_properties(objxgboost PROPERTIES
+    COMPILE_FLAGS "-fsycl -fno-sycl-id-queries-fit-in-int")
 endif()
 
 target_include_directories(objxgboost

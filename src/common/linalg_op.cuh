@@ -58,8 +58,13 @@ void ElementWiseTransformDevice(TensorView<T, D> t, Fn&& fn, cudaStream_t s = nu
 
 template <typename T, int32_t D, typename Fn>
 void ElementWiseKernel(Context const* ctx, TensorView<T, D> t, Fn&& fn) {
-  ctx->IsCUDA() ? cuda_impl::ElementWiseKernel(t, fn)
-                : ElementWiseKernelHost(t, ctx->Threads(), fn);
+  if (ctx->IsCUDA()) {
+    cuda_impl::ElementWiseKernel(t, fn);
+  } else if (ctx->IsSycl()) {
+    sycl::linalg::ElementWiseKernel(t, fn);
+  } else {
+    ElementWiseKernelHost(t, ctx->Threads(), fn);
+  }
 }
 
 namespace detail {

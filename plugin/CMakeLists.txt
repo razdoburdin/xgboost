@@ -1,5 +1,4 @@
 if(PLUGIN_SYCL)
-  set(CMAKE_CXX_COMPILER "icpx")
   file(GLOB_RECURSE SYCL_SOURCES "sycl/*.cc")
   add_library(plugin_sycl OBJECT ${SYCL_SOURCES})
   target_include_directories(plugin_sycl
@@ -17,7 +16,7 @@ if(PLUGIN_SYCL)
   if(USE_OPENMP)
     find_package(OpenMP REQUIRED)
     set_target_properties(plugin_sycl PROPERTIES
-    COMPILE_FLAGS "-fsycl -fno-sycl-id-queries-fit-in-int -qopenmp")
+    COMPILE_FLAGS "-fsycl -fno-sycl-id-queries-fit-in-int -fiopenmp")
   endif()
   # Get compilation and link flags of plugin_sycl and propagate to objxgboost
   target_link_libraries(objxgboost PUBLIC plugin_sycl)
