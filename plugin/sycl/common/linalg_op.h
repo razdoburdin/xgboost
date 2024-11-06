@@ -47,27 +47,6 @@ template <typename Fn>
   return event;
 }
 
-// // Use template specialization to dispatch, Windows + CUDA 11.8 doesn't support extended
-// // lambda inside constexpr if
-// template <typename T, std::int32_t D>
-// struct ElementWiseImpl {
-//   template <typename Fn>
-//   void operator()(TensorView<T, D> t, Fn&& fn, cudaStream_t s) {
-//     static_assert(D > 1);
-//     dh::LaunchN(t.Size(), s, [=] __device__(std::size_t i) mutable {
-//       std::apply(fn, linalg::UnravelIndex(i, t.Shape()));
-//     });
-//   }
-// };
-
-// template <typename T>
-// struct ElementWiseImpl<T, 1> {
-//   template <typename Fn>
-//   void operator()(TensorView<T, 1> t, Fn&& fn, cudaStream_t s) {
-//     dh::LaunchN(t.Size(), s, [=] __device__(std::size_t i) { fn(i); });
-//   }
-// };
-
 template<typename Fn, typename TupleType, size_t ... I>
 auto call(Fn&& fn, TupleType t, std::index_sequence<I ...>) {
      return fn(std::get<I>(t) ...);
