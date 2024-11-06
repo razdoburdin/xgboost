@@ -13,7 +13,7 @@
 #include "../data.h"
 #include "../device_manager.h"
 
-#include <CL/sycl.hpp>
+#include <sycl/sycl.hpp>
 
 namespace xgboost {
 namespace sycl {
