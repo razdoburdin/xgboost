@@ -45,7 +45,7 @@ std::string ObjFunction::GetSyclImplementationName(const std::string& name) {
   auto *e = ::dmlc::Registry< ::xgboost::ObjFunctionReg>::Get()->Find(name + sycl_postfix);
   if (e != nullptr) {
     // Function has specific sycl implementation
-    return name + sycl_postfix;
+    return name; // + sycl_postfix;
   } else {
     // Function hasn't specific sycl implementation
     LOG(FATAL) << "`" << name << "` doesn't have sycl implementation yet\n";

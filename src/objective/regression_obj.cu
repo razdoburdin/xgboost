@@ -43,6 +43,10 @@
 #include "../common/linalg_op.cuh"
 #endif  // defined(XGBOOST_USE_CUDA)
 
+#if defined(XGBOOST_USE_SYCL) 
+#include "../../plugin/sycl/common/linalg_op.h"
+#endif
+
 namespace xgboost::obj {
 namespace {
 void CheckRegInputs(MetaInfo const& info, HostDeviceVector<bst_float> const& preds) {

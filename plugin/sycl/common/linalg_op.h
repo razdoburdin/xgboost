@@ -87,12 +87,24 @@ void ElementWiseKernel(TensorView<T, D> t, Fn&& fn) {
     cgh.parallel_for<>(::sycl::range<1>(t.Size()),
                        [=](::sycl::id<1> pid) {
       const size_t idx = pid[0];
-      // call(fn, xgboost::linalg::UnravelIndex(idx, t.Shape()));
+      call(const_cast<Fn&&>(fn), xgboost::linalg::UnravelIndex(idx, t.Shape()));
     });
   }).wait_and_throw();
 }
 
 }  // namespace linalg
 }  // namespace sycl
+
+namespace linalg {
+template <typename T, int32_t D, typename Fn>
+void ElementWiseKernel(Context const* ctx, TensorView<T, D> t, Fn&& fn) {
+  if (ctx->IsSycl()) {
+    sycl::linalg::ElementWiseKernel(t, fn);
+  } else {
+    ElementWiseKernelHost(t, ctx->Threads(), fn);
+  }
+}
+
+}  // namespace linalg
 }  // namespace xgboost
 #endif  // PLUGIN_SYCL_COMMON_LINALG_OP_H_

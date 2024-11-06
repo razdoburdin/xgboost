@@ -25,6 +25,7 @@ file(GLOB_RECURSE SYCL_TEST_SOURCES "plugin/test_sycl_*.cc")
 list(REMOVE_ITEM TEST_SOURCES ${SYCL_TEST_SOURCES})
 
 if(PLUGIN_SYCL)
+  set(CMAKE_CXX_COMPILER "icpx")
   file(GLOB_RECURSE SYCL_TEST_SOURCES "plugin/test_sycl_*.cc")
   add_library(plugin_sycl_test OBJECT ${SYCL_TEST_SOURCES})
 
@@ -46,7 +47,7 @@ if(PLUGIN_SYCL)
   if(USE_OPENMP)
     find_package(OpenMP REQUIRED)
     set_target_properties(plugin_sycl_test PROPERTIES
-    COMPILE_FLAGS "-fsycl -fiopenmp")
+    COMPILE_FLAGS "-fsycl -qopenmp")
   endif()
   # Get compilation and link flags of plugin_sycl and propagate to testxgboost
   target_link_libraries(testxgboost PUBLIC plugin_sycl_test)

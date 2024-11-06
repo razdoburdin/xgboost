@@ -1,5 +1,10 @@
 if(PLUGIN_SYCL)
+  set(CMAKE_CXX_COMPILER "icpx")
   file(GLOB_RECURSE SYCL_SOURCES "sycl/*.cc")
+  list(APPEND SYCL_SOURCES
+    ${xgboost_SOURCE_DIR}/src/objective/regression_obj.cc
+    ${xgboost_SOURCE_DIR}/src/objective/hinge.cc
+    ${xgboost_SOURCE_DIR}/src/objective/quantile_obj.cc)
   add_library(plugin_sycl OBJECT ${SYCL_SOURCES})
   target_include_directories(plugin_sycl
     PRIVATE
@@ -16,7 +21,7 @@ if(PLUGIN_SYCL)
   if(USE_OPENMP)
     find_package(OpenMP REQUIRED)
     set_target_properties(plugin_sycl PROPERTIES
-    COMPILE_FLAGS "-fsycl -fno-sycl-id-queries-fit-in-int -fiopenmp")
+    COMPILE_FLAGS "-fsycl -fno-sycl-id-queries-fit-in-int -qopenmp")
   endif()
   # Get compilation and link flags of plugin_sycl and propagate to objxgboost
   target_link_libraries(objxgboost PUBLIC plugin_sycl)

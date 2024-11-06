@@ -27,6 +27,10 @@
 
 #endif                              // defined(XGBOOST_USE_CUDA)
 
+#if defined(XGBOOST_USE_SYCL) 
+#include "../../plugin/sycl/common/linalg_op.h"
+#endif
+
 namespace xgboost::obj {
 class QuantileRegression : public ObjFunction {
   common::QuantileLossParam param_;
