@@ -596,6 +596,13 @@ void GBTree::InplacePredict(std::shared_ptr<DMatrix> p_m, float missing,
     CHECK(gpu_predictor_);
     return gpu_predictor_;
   }
+  if (on_device && ctx_->IsSycl()) {
+#if defined(XGBOOST_USE_SYCL)
+    common::AssertSYCLSupport();
+    CHECK(sycl_predictor_);
+    return sycl_predictor_;
+#endif  // defined(XGBOOST_USE_SYCL)
+  }
 
   // GPU_Hist by default has prediction cache calculated from quantile values,
   // so GPU Predictor is not used for training dataset.  But when XGBoost
