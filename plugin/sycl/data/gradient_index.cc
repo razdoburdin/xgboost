@@ -159,7 +159,7 @@ void GHistIndexMatrix::Init(::sycl::queue* qu,
       SetIndexData<uint16_t, true>(qu, ctx, index.data<uint16_t>(), dmat);
     } else {
       CHECK_EQ(curent_bin_size, BinTypeSize::kUint32BinsTypeSize);
-      SetIndexData<uint16_t, true>(qu, ctx, index.data<uint16_t>(), dmat);
+      SetIndexData<uint32_t, true>(qu, ctx, index.data<uint32_t>(), dmat);
     }
   /* For sparse DMatrix we have to store index of feature for each bin
      in index field to chose right offset. So offset is nullptr and index is not reduced */
