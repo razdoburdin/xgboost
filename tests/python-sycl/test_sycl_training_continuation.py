@@ -13,7 +13,7 @@ class TestSYCLTrainingContinuation:
         y = rng.randn(kRows)
         dtrain = xgb.DMatrix(X, y)
         params = {
-            "device": "sycl:cpu",
+            "device": "sycl",
             "max_depth": "2",
             "gamma": "0.1",
             "alpha": "0.01",
