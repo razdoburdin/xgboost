@@ -9,11 +9,11 @@ class TestSYCLTrainingContinuation:
     def run_training_continuation(self, use_json):
         kRows = 64
         kCols = 32
-        X = np.random.randn(kRows, kCols)
-        y = np.random.randn(kRows)
+        X = rng.randn(kRows, kCols)
+        y = rng.randn(kRows)
         dtrain = xgb.DMatrix(X, y)
         params = {
-            "device": "sycl",
+            "device": "sycl:cpu",
             "max_depth": "2",
             "gamma": "0.1",
             "alpha": "0.01",
