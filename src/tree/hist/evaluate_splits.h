@@ -85,6 +85,8 @@ class HistEvaluator {
   bool is_col_split_{false};
   FeatureInteractionConstraintHost interaction_constraints_;
   std::vector<NodeEntry> snode_;
+  std::vector<CPUExpandEntry> tloc_candidates_;
+  std::vector<std::shared_ptr<HostDeviceVector<bst_feature_t>>> features_;
 
   // if sum of statistics for non-missing values in the node
   // is equal to sum of statistics for all values:
@@ -331,24 +333,26 @@ class HistEvaluator {
   void EvaluateSplits(const BoundedHistCollection &hist, common::HistogramCuts const &cut,
                       common::Span<FeatureType const> feature_types, const RegTree &tree,
                       std::vector<CPUExpandEntry> *p_entries) {
-    auto n_threads = ctx_->Threads();
     auto &entries = *p_entries;
+    auto n_threads = ctx_->Threads();
     // All nodes are on the same level, so we can store the shared ptr.
-    std::vector<std::shared_ptr<HostDeviceVector<bst_feature_t>>> features(entries.size());
+    if (features_.size() < entries.size()) {
+      features_.resize(entries.size());
+      tloc_candidates_.resize(n_threads * entries.size());
+    }
     for (size_t nidx_in_set = 0; nidx_in_set < entries.size(); ++nidx_in_set) {
       auto nidx = entries[nidx_in_set].nid;
-      features[nidx_in_set] = column_sampler_->GetFeatureSet(tree.GetDepth(nidx));
+      features_[nidx_in_set] = column_sampler_->GetFeatureSet(tree.GetDepth(nidx));
     }
-    CHECK(!features.empty());
-    const size_t grain_size = std::max<size_t>(1, features.front()->Size() / n_threads);
+    CHECK(!features_.empty());
+    const size_t grain_size = std::max<size_t>(1, features_.front()->Size() / n_threads);
     common::BlockedSpace2d space(
-        entries.size(), [&](size_t nidx_in_set) { return features[nidx_in_set]->Size(); },
+        entries.size(), [&](size_t nidx_in_set) { return features_[nidx_in_set]->Size(); },
         grain_size);
 
-    std::vector<CPUExpandEntry> tloc_candidates(n_threads * entries.size());
     for (size_t i = 0; i < entries.size(); ++i) {
       for (decltype(n_threads) j = 0; j < n_threads; ++j) {
-        tloc_candidates[i * n_threads + j] = entries[i];
+        tloc_candidates_[i * n_threads + j] = entries[i];
       }
     }
     auto evaluator = tree_evaluator_.GetEvaluator();
@@ -356,11 +360,11 @@ class HistEvaluator {
 
     common::ParallelFor2d(space, n_threads, [&](size_t nidx_in_set, common::Range1d r) {
       auto tidx = omp_get_thread_num();
-      auto entry = &tloc_candidates[n_threads * nidx_in_set + tidx];
+      auto entry = &tloc_candidates_[n_threads * nidx_in_set + tidx];
       auto best = &entry->split;
       auto nidx = entry->nid;
       auto histogram = hist[nidx];
-      auto features_set = features[nidx_in_set]->ConstHostSpan();
+      auto features_set = features_[nidx_in_set]->ConstHostSpan();
       for (auto fidx_in_set = r.begin(); fidx_in_set < r.end(); fidx_in_set++) {
         auto fidx = features_set[fidx_in_set];
         bool is_cat = common::IsCat(feature_types, fidx);
@@ -395,7 +399,7 @@ class HistEvaluator {
 
     for (unsigned nidx_in_set = 0; nidx_in_set < entries.size(); ++nidx_in_set) {
       for (auto tidx = 0; tidx < n_threads; ++tidx) {
-        entries[nidx_in_set].split.Update(tloc_candidates[n_threads * nidx_in_set + tidx].split);
+        entries[nidx_in_set].split.Update(tloc_candidates_[n_threads * nidx_in_set + tidx].split);
       }
     }
 

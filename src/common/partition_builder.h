@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+#include <immintrin.h>
+
 #include "../tree/sample_position.h"  // for SamplePosition
 #include "categorical.h"
 #include "column_matrix.h"
@@ -30,9 +32,14 @@ namespace xgboost::common {
 // BlockSize is template to enable memory alignment easily with C++11 'alignas()' feature
 template<size_t BlockSize>
 class PartitionBuilder {
+  common::Monitor monitor_;
   using BitVector = RBitField8;
 
  public:
+  PartitionBuilder() {
+    monitor_.Init("PartitionBuilder");
+  }
+
   template<typename Func>
   void Init(const size_t n_tasks, size_t n_nodes, Func funcNTask) {
     left_right_nodes_sizes_.resize(n_nodes);
@@ -45,6 +52,9 @@ class PartitionBuilder {
 
     if (n_tasks > max_n_tasks_) {
       mem_blocks_.resize(n_tasks);
+      for (size_t task = max_n_tasks_; task < n_tasks; ++task) {
+        AllocateForTask(task);
+      }
       max_n_tasks_ = n_tasks;
     }
   }
@@ -53,17 +63,17 @@ class PartitionBuilder {
   // on comparison of indexes values (idx_span) and split point (split_cond)
   // Handle dense columns
   // Analog of std::stable_partition, but in no-inplace manner
-  template <bool default_left, bool any_missing, typename ColumnType, typename Predicate>
-  std::pair<size_t, size_t> PartitionKernel(ColumnType* p_column,
+  template <bool default_left, bool any_missing, typename ColumnType>
+  int PartitionKernel(ColumnType* p_column,
                                             common::Span<bst_idx_t const> row_indices,
                                             common::Span<bst_idx_t> left_part,
                                             common::Span<bst_idx_t> right_part,
-                                            bst_idx_t base_rowid, Predicate&& pred) {
+                                            bst_idx_t base_rowid, bst_bin_t split_cond) {
     auto& column = *p_column;
     bst_idx_t* p_left_part = left_part.data();
     bst_idx_t* p_right_part = right_part.data();
-    bst_idx_t nleft_elems = 0;
-    bst_idx_t nright_elems = 0;
+    int nleft_elems = 0;
+    int nright_elems = 0;
 
     auto p_row_indices = row_indices.data();
     auto n_samples = row_indices.size();
@@ -78,7 +88,7 @@ class PartitionBuilder {
           p_right_part[nright_elems++] = rid;
         }
       } else {
-        if (pred(rid, bin_id)) {
+        if (bin_id <= split_cond) {
           p_left_part[nleft_elems++] = rid;
         } else {
           p_right_part[nright_elems++] = rid;
@@ -86,18 +96,66 @@ class PartitionBuilder {
       }
     }
 
-    return {nleft_elems, nright_elems};
+    return nleft_elems;
+  }
+
+  template <bool default_left, bool any_missing, typename ColumnType>
+  int PartitionKernel2(ColumnType* p_column,
+                                            common::Span<bst_idx_t const> row_indices,
+                                            common::Span<bst_idx_t> left_part,
+                                            common::Span<bst_idx_t> right_part,
+                                            bst_idx_t base_rowid, bst_bin_t split_cond) {
+    auto& column = *p_column;
+    bst_idx_t* p_left_part = left_part.data();
+    bst_idx_t* p_right_part = right_part.data();
+    int nleft_elems = 0;
+    int nright_elems = 0;
+
+    auto p_row_indices = row_indices.data();
+                                
+    constexpr int kAwx512VectorWidth = 512;
+    constexpr int kNumElements = kAwx512VectorWidth / (8 * sizeof(bst_idx_t));
+    static_assert(kNumElements == 8);
+
+    const auto* bin_idx = column.GetIndex();
+    const bst_bin_t index_base = column.GetIndexBase();
+
+    __m512i base_rowid_512 = _mm512_set1_epi64(base_rowid);
+    __m256i index_base_256 = _mm256_set1_epi32(index_base);
+    __m256i split_cond_256 = _mm256_set1_epi32(split_cond);
+    __m256i missing_id_256 = _mm256_set1_epi32(ColumnType::kMissingId);
+    __m256i extraction_mask_256 = sizeof(decltype(*bin_idx)) == 1 ? _mm256_set1_epi32(0xFF)     // Mask to keep the lower 8 bits
+                                                                  : _mm256_set1_epi32(0xFFFF);  // Mask to keep the lower 16 bits
+    for (size_t i = 0; i + kNumElements <= row_indices.size(); i += kNumElements) {
+      __m512i rid_512 = _mm512_sub_epi64(_mm512_loadu_si512(p_row_indices+i), base_rowid_512);
+
+      __m256i bin_id_256 = _mm512_i64gather_epi32(rid_512, bin_idx, sizeof(decltype(*bin_idx)));
+      if (sizeof(decltype(*bin_idx)) != sizeof(int32_t)) bin_id_256 = _mm256_and_si256(bin_id_256, extraction_mask_256);  // Apply mask to extract lower bits
+      bin_id_256 = _mm256_add_epi32(bin_id_256, index_base_256);
+
+      __mmask8 mask = _mm256_cmp_epi32_mask(bin_id_256, split_cond_256, _MM_CMPINT_LE);
+      int nleft_in_block = _mm_popcnt_u32(mask);
+      int nright_in_block = kNumElements - nleft_in_block;
+
+      _mm512_mask_compressstoreu_epi64(p_left_part + nleft_elems, mask, rid_512);
+      _mm512_mask_compressstoreu_epi64(p_right_part + nright_elems, ~mask, rid_512);
+
+      nleft_elems += nleft_in_block;
+      nright_elems += nright_in_block;
+    }
+
+    return nleft_elems;
   }
 
   template <typename Pred>
-  inline std::pair<size_t, size_t> PartitionRangeKernel(common::Span<const bst_idx_t> ridx,
+  inline int PartitionRangeKernel(common::Span<const bst_idx_t> ridx,
                                                         common::Span<bst_idx_t> left_part,
                                                         common::Span<bst_idx_t> right_part,
                                                         Pred pred) {
     bst_idx_t* p_left_part = left_part.data();
     bst_idx_t* p_right_part = right_part.data();
-    bst_idx_t nleft_elems = 0;
-    bst_idx_t nright_elems = 0;
+    int nleft_elems = 0;
+    int nright_elems = 0;
     for (auto row_id : ridx) {
       if (pred(row_id)) {
         p_left_part[nleft_elems++] = row_id;
@@ -105,7 +163,7 @@ class PartitionBuilder {
         p_right_part[nright_elems++] = row_id;
       }
     }
-    return {nleft_elems, nright_elems};
+    return nleft_elems;
   }
 
   template <typename BinIdxType, bool any_missing, bool any_cat, typename ExpandEntry>
@@ -123,64 +181,77 @@ class PartitionBuilder {
     auto node_cats = tree.NodeCats(nid);
     auto const& cut_values = gmat.cut.Values();
 
-    auto pred_hist = [&](auto ridx, auto bin_id) {
-      if (any_cat && is_cat) {
-        auto gidx = gmat.GetGindex(ridx, fid);
-        bool go_left = default_left;
-        if (gidx > -1) {
-          go_left = Decision(node_cats, cut_values[gidx]);
-        }
-        return go_left;
-      } else {
-        return bin_id <= split_cond;
-      }
-    };
+    // auto pred_hist = [&](auto ridx, auto bin_id) {
+    //   // if (any_cat && is_cat) {
+    //   //   auto gidx = gmat.GetGindex(ridx, fid);
+    //   //   bool go_left = default_left;
+    //   //   if (gidx > -1) {
+    //   //     go_left = Decision(node_cats, cut_values[gidx]);
+    //   //   }
+    //   //   return go_left;
+    //   // } else {
+    //     return bin_id <= split_cond;
+    //   // }
+    // };
 
-    auto pred_approx = [&](auto ridx) {
-      auto gidx = gmat.GetGindex(ridx, fid);
-      bool go_left = default_left;
-      if (gidx > -1) {
-        if (is_cat) {
-          go_left = Decision(node_cats, cut_values[gidx]);
-        } else {
-          go_left = cut_values[gidx] <= nodes[node_in_set].split.split_value;
-        }
-      }
-      return go_left;
-    };
+    // auto pred_approx = [&](auto ridx) {
+    //   auto gidx = gmat.GetGindex(ridx, fid);
+    //   bool go_left = default_left;
+    //   if (gidx > -1) {
+    //     if (is_cat) {
+    //       go_left = Decision(node_cats, cut_values[gidx]);
+    //     } else {
+    //       go_left = cut_values[gidx] <= nodes[node_in_set].split.split_value;
+    //     }
+    //   }
+    //   return go_left;
+    // };
 
-    std::pair<size_t, size_t> child_nodes_sizes;
+    int n_left;
+    monitor_.Start("Total");
     if (!column_matrix.IsInitialized()) {
-      child_nodes_sizes = PartitionRangeKernel(rid_span, left, right, pred_approx);
+      // n_left = PartitionRangeKernel(rid_span, left, right, pred_approx);
     } else {
       if (column_matrix.GetColumnType(fid) == xgboost::common::kDenseColumn) {
         auto column = column_matrix.DenseColumn<BinIdxType, any_missing>(fid);
         if (default_left) {
-          child_nodes_sizes = PartitionKernel<true, any_missing>(&column, rid_span, left, right,
-                                                                 gmat.base_rowid, pred_hist);
+          if (rid_span.size() % 8) {
+            n_left = PartitionKernel<true, any_missing>(&column, rid_span, left, right,
+                                                                  gmat.base_rowid, split_cond);
+            } else {
+              n_left = PartitionKernel2<true, any_missing>(&column, rid_span, left, right,
+                gmat.base_rowid, split_cond);
+            }
         } else {
-          child_nodes_sizes = PartitionKernel<false, any_missing>(&column, rid_span, left, right,
-                                                                  gmat.base_rowid, pred_hist);
+          if (rid_span.size() % 8) {
+            monitor_.Start("PartitionKernel");
+            n_left = PartitionKernel<false, any_missing>(&column, rid_span, left, right,
+                                                                  gmat.base_rowid, split_cond);
+            monitor_.Stop("PartitionKernel");
+            } else {
+              monitor_.Start("PartitionKernel2");
+              n_left = PartitionKernel2<false, any_missing>(&column, rid_span, left, right,
+                gmat.base_rowid, split_cond);
+              monitor_.Stop("PartitionKernel2");
+            }
         }
       } else {
         CHECK_EQ(any_missing, true);
         auto column =
             column_matrix.SparseColumn<BinIdxType>(fid, rid_span.front() - gmat.base_rowid);
         if (default_left) {
-          child_nodes_sizes = PartitionKernel<true, any_missing>(&column, rid_span, left, right,
-                                                                 gmat.base_rowid, pred_hist);
+          n_left = PartitionKernel<true, any_missing>(&column, rid_span, left, right,
+                                                                 gmat.base_rowid, split_cond);
         } else {
-          child_nodes_sizes = PartitionKernel<false, any_missing>(&column, rid_span, left, right,
-                                                                  gmat.base_rowid, pred_hist);
+          n_left = PartitionKernel<false, any_missing>(&column, rid_span, left, right,
+                                                                  gmat.base_rowid, split_cond);
         }
       }
     }
-
-    const size_t n_left  = child_nodes_sizes.first;
-    const size_t n_right = child_nodes_sizes.second;
+    monitor_.Stop("Total");
 
     SetNLeftElems(node_in_set, range.begin(), n_left);
-    SetNRightElems(node_in_set, range.begin(), n_right);
+    SetNRightElems(node_in_set, range.begin(), rid_span.size() - n_left);
   }
 
   template <bool any_missing, typename ColumnType, typename Predicate>
@@ -281,14 +352,11 @@ class PartitionBuilder {
       return go_left;
     };
 
-    std::pair<size_t, size_t> child_nodes_sizes;
-    child_nodes_sizes = PartitionRangeKernel(rid_span, left, right, pred);
-
-    const size_t n_left  = child_nodes_sizes.first;
-    const size_t n_right = child_nodes_sizes.second;
+    int n_left;
+    n_left = PartitionRangeKernel(rid_span, left, right, pred);
 
     SetNLeftElems(node_in_set, range.begin(), n_left);
-    SetNRightElems(node_in_set, range.begin(), n_right);
+    SetNRightElems(node_in_set, range.begin(), rid_span.size() - n_left);
   }
 
   // allocate thread local memory, should be called for each specific task

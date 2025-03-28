@@ -51,7 +51,7 @@ class Column {
   /* returns number of elements in column */
   [[nodiscard]] size_t Size() const { return index_.size(); }
 
- private:
+ protected:
   /* bin indexes in range [0, max_bins - 1] */
   common::Span<BinIdxType const> index_;
   /* bin index offset for specific feature */
@@ -125,6 +125,14 @@ class DenseColumnIter : public Column<BinIdxT> {
 
   [[nodiscard]] bool IsMissing(size_t ridx) const {
     return missing_flags_.Check(feature_offset_ + ridx);
+  }
+
+  const BinIdxT* GetIndex() const {
+    return this->index_.data();
+  }
+
+  bst_bin_t GetIndexBase() const {
+    return this->index_base_;
   }
 
   bst_bin_t operator[](size_t ridx) const {

@@ -124,6 +124,7 @@ class ColumnSplitHelper {
 };
 
 class CommonRowPartitioner {
+common::Monitor monitor_;
  public:
   bst_idx_t base_rowid = 0;
 
@@ -131,6 +132,7 @@ class CommonRowPartitioner {
   CommonRowPartitioner(Context const* ctx, bst_idx_t num_row, bst_idx_t _base_rowid,
                        bool is_col_split)
       : base_rowid{_base_rowid}, is_col_split_{is_col_split} {
+    monitor_.Init("CommonRowPartitioner");
     Reset(ctx, num_row, _base_rowid, is_col_split);
   }
 
@@ -242,11 +244,13 @@ class CommonRowPartitioner {
     // 1. Find split condition for each split
     size_t n_nodes = nodes.size();
 
+    monitor_.Start("FindSplitConditions");
     std::vector<bst_bin_t> split_conditions;
     if (column_matrix.IsInitialized()) {
       split_conditions.resize(n_nodes);
       FindSplitConditions(nodes, *p_tree, gmat, &split_conditions);
     }
+    monitor_.Stop("FindSplitConditions");
 
     // 2.1 Create a blocked space of size SUM(samples in each node)
     common::BlockedSpace2d space(
@@ -259,6 +263,7 @@ class CommonRowPartitioner {
 
     // 2.2 Initialize the partition builder
     // allocate buffers for storage intermediate results by each thread
+    monitor_.Start("Init");
     partition_builder_.Init(space.Size(), n_nodes, [&](size_t node_in_set) {
       const int32_t nid = nodes[node_in_set].nid;
       const size_t size = row_set_collection_[nid].Size();
@@ -266,38 +271,48 @@ class CommonRowPartitioner {
       return n_tasks;
     });
     CHECK_EQ(base_rowid, gmat.base_rowid);
+    monitor_.Stop("Init");
 
     // 2.3 Split elements of row_set_collection_ to left and right child-nodes for each node
     // Store results in intermediate buffers from partition_builder_
+    monitor_.Start("Partition");
     if (is_col_split_) {
       column_split_helper_.Partition<BinIdxType, any_missing, any_cat>(
           ctx, space, ctx->Threads(), gmat, column_matrix, nodes, split_conditions, p_tree);
     } else {
+      // fprintf(stderr, "n_nodes = %d\tsize = %d\n", n_nodes, int(space.Size()));
       common::ParallelFor2d(space, ctx->Threads(), [&](size_t node_in_set, common::Range1d r) {
         size_t begin = r.begin();
         const int32_t nid = nodes[node_in_set].nid;
         const size_t task_id = partition_builder_.GetTaskIdx(node_in_set, begin);
-        partition_builder_.AllocateForTask(task_id);
+        // partition_builder_.AllocateForTask(task_id);
         bst_bin_t split_cond = column_matrix.IsInitialized() ? split_conditions[node_in_set] : 0;
         partition_builder_.template Partition<BinIdxType, any_missing, any_cat>(
             node_in_set, nodes, r, split_cond, gmat, column_matrix, *p_tree,
             row_set_collection_[nid].begin());
       });
     }
+    monitor_.Stop("Partition");
 
     // 3. Compute offsets to copy blocks of row-indexes
     // from partition_builder_ to row_set_collection_
+    monitor_.Start("CalculateRowOffsets");
     partition_builder_.CalculateRowOffsets();
+    monitor_.Stop("CalculateRowOffsets");
 
     // 4. Copy elements from partition_builder_ to row_set_collection_ back
     // with updated row-indexes for each tree-node
+    monitor_.Start("MergeToArray");
     common::ParallelFor2d(space, ctx->Threads(), [&](size_t node_in_set, common::Range1d r) {
       const int32_t nid = nodes[node_in_set].nid;
       partition_builder_.MergeToArray(node_in_set, r.begin(), row_set_collection_[nid].begin());
     });
+    monitor_.Stop("MergeToArray");
 
     // 5. Add info about splits into row_set_collection_
+    monitor_.Start("AddSplitsToRowSet");
     AddSplitsToRowSet(nodes, p_tree);
+    monitor_.Stop("AddSplitsToRowSet");
   }
 
   [[nodiscard]] auto const& Partitions() const { return row_set_collection_; }
