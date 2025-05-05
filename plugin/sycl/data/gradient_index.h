@@ -101,6 +101,42 @@ struct Index {
   ::sycl::queue* qu_;
 };
 
+class InverseIndex {
+  public:
+   InverseIndex() = default;
+   InverseIndex(const InverseIndex& i) = delete;
+   InverseIndex& operator=(InverseIndex i) = delete;
+   InverseIndex(InverseIndex&& i) = delete;
+   InverseIndex& operator=(InverseIndex&& i) = delete;
+ 
+   template <bool isDense>
+   void Init(::sycl::queue* qu, DMatrix *dmat, const xgboost::common::HistogramCuts& cut, size_t nbins, size_t n_elems);
+ 
+   size_t* Data() {
+     return data_.Data();
+   }
+ 
+   const size_t* Data() const {
+     return data_.DataConst();
+   }
+ 
+   size_t* Offsets() {
+     return offsets_.Data();
+   }
+ 
+   const size_t* Offsets() const {
+     return offsets_.DataConst();
+   }
+ 
+   size_t Size() const {
+     return data_.Size() / 2;
+   }
+ 
+  private:
+   USMVector<size_t, MemoryType::on_device> data_;
+   USMVector<size_t, MemoryType::on_device> offsets_;
+ };
+
 /*!
  * \brief Preprocessed global index matrix, in CSR format, stored in USM buffers
  *
@@ -110,6 +146,7 @@ struct GHistIndexMatrix {
   /*! \brief row pointer to rows by element position */
   /*! \brief The index data */
   Index index;
+  InverseIndex inverse_index;
   /*! \brief hit count of each index */
   HostDeviceVector<size_t> hit_count;
 

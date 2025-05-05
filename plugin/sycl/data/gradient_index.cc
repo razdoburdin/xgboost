@@ -25,6 +25,113 @@ uint32_t SearchBin(const bst_float* cut_values, const uint32_t* cut_ptrs, Entry 
   return idx;
 }
 
+
+template <bool isDense>
+void InverseIndex::Init(::sycl::queue* qu, DMatrix *dmat,
+                        const xgboost::common::HistogramCuts& cut,
+                        size_t nbins, size_t n_elems) {
+    if (nbins == 0) return;
+    const bst_float* cut_values = cut.cut_values_.ConstDevicePointer();
+    const uint32_t* cut_ptrs = cut.cut_ptrs_.ConstDevicePointer();
+
+    USMVector<size_t, MemoryType::on_device> buff(qu, nbins, 0);
+    data_.Resize(qu, n_elems);
+    offsets_.Resize(qu, nbins+1, 0);
+
+    size_t* offsets_ptr = offsets_.Data();
+    ::sycl::event event;
+    for (auto &batch : dmat->GetBatches<SparsePage>()) {
+      const xgboost::Entry *data_ptr = batch.data.ConstDevicePointer();
+      const bst_idx_t *offset_vec = batch.offset.ConstDevicePointer();
+      size_t batch_size = batch.Size();
+      if (batch_size > 0) {
+        const auto base_rowid = batch.base_rowid;
+
+        event = qu->submit([&](::sycl::handler& cgh) {
+          cgh.depends_on(event);
+          // ::sycl::stream out(1024, 256, cgh); //output buffer
+          cgh.parallel_for<>(::sycl::range<1>(batch_size), [=](::sycl::item<1> pid) {
+            const size_t i = pid.get_id(0);
+            const size_t ibegin = offset_vec[i];
+            const size_t iend = offset_vec[i + 1];
+            const size_t size = iend - ibegin;
+
+            for (bst_uint j = 0; j < size; ++j) {
+              uint32_t idx_bin = SearchBin(cut_values, cut_ptrs, data_ptr[ibegin + j]);
+              AtomicRef<size_t> offset(offsets_ptr[idx_bin]);
+              offset += 1;
+            }
+          });
+        });
+      }
+    }
+
+    event = qu->submit([&](::sycl::handler& cgh) {
+      cgh.depends_on(event);
+      cgh.single_task<>([=]() {
+        size_t num_elements = 0;
+        for (size_t idx_bin = 0; idx_bin < nbins; ++idx_bin) {
+          size_t tmp = offsets_ptr[idx_bin];
+          offsets_ptr[idx_bin] = num_elements;
+          num_elements += tmp;
+        }
+        offsets_ptr[nbins] = num_elements;
+      });
+    });
+
+    size_t* element_idx_ptr = data_.Data();
+    size_t* buff_ptr = buff.Data();
+    for (auto &batch : dmat->GetBatches<SparsePage>()) {
+      const xgboost::Entry *data_ptr = batch.data.ConstDevicePointer();
+      const bst_idx_t *offset_vec = batch.offset.ConstDevicePointer();
+      size_t batch_size = batch.Size();
+      if (batch_size > 0) {
+        const auto base_rowid = batch.base_rowid;
+
+        event = qu->submit([&](::sycl::handler& cgh) {
+          cgh.depends_on(event);
+          cgh.parallel_for<>(::sycl::range<1>(batch_size), [=](::sycl::item<1> pid) {
+            const size_t i = pid.get_id(0);
+            const size_t ibegin = offset_vec[i];
+            const size_t iend = offset_vec[i + 1];
+            const size_t size = iend - ibegin;
+
+            for (bst_uint j = 0; j < size; ++j) {
+              uint32_t idx_bin = SearchBin(cut_values, cut_ptrs, data_ptr[ibegin + j]);
+              // if constexpr (isDense) idx_bin -= cut_ptrs[j];
+
+              size_t bin_offest = offsets_ptr[idx_bin];
+              AtomicRef<size_t> elem_in_bin(buff_ptr[idx_bin]); 
+              element_idx_ptr[bin_offest + elem_in_bin++] = i + base_rowid;
+            }
+          });
+        });
+        // event = qu->submit([&](::sycl::handler& cgh) {
+        //   cgh.depends_on(event);
+        //   cgh.single_task<>([=]() {
+        //     for (size_t i = 0; i < batch_size; ++i) {
+        //       const size_t ibegin = offset_vec[i];
+        //       const size_t iend = offset_vec[i + 1];
+        //       const size_t size = iend - ibegin;
+
+        //       for (bst_uint j = 0; j < size; ++j) {
+        //         uint32_t idx_bin = SearchBin(cut_values, cut_ptrs, data_ptr[ibegin + j]);
+        //         if constexpr (isDense) idx_bin -= cut_ptrs[j];
+
+        //         size_t& elem_in_bin = buff_ptr[idx_bin];
+        //         size_t bin_offest = offsets_ptr[idx_bin];
+        //         size_t elem_idx = bin_offest + elem_in_bin;
+        //         element_idx_ptr[elem_idx] = i + base_rowid;
+        //         elem_in_bin += 1;
+        //       }
+        //     }
+        //   });
+        // });
+      }
+    }
+    qu->wait();
+}
+
 template <typename BinIdxType>
 void mergeSort(BinIdxType* begin, BinIdxType* end, BinIdxType* buf) {
   const size_t total_len = end - begin;
@@ -136,6 +243,7 @@ void GHistIndexMatrix::Init(::sycl::queue* qu,
 
   row_stride = 0;
   size_t n_rows = 0;
+  size_t n_elems = 0;
   for (const auto& batch : dmat->GetBatches<SparsePage>()) {
     const auto& row_offset = batch.offset.ConstHostVector();
     batch.data.SetDevice(ctx->Device());
@@ -143,7 +251,14 @@ void GHistIndexMatrix::Init(::sycl::queue* qu,
     n_rows += batch.Size();
     for (auto i = 1ull; i < row_offset.size(); i++) {
       row_stride = std::max(row_stride, static_cast<size_t>(row_offset[i] - row_offset[i - 1]));
+      n_elems += row_offset[i] - row_offset[i - 1];
     }
+  }
+
+  if (isDense) {
+    inverse_index.Init<true>(qu, dmat, cut, nbins, n_elems);
+  } else {
+    inverse_index.Init<false>(qu, dmat, cut, nbins, n_elems);
   }
 
   const size_t n_offsets = cut.cut_ptrs_.Size() - 1;
@@ -169,6 +284,38 @@ void GHistIndexMatrix::Init(::sycl::queue* qu,
     sort_buff.Resize(qu, n_rows * row_stride * sizeof(uint32_t));
     SetIndexData<uint32_t, false>(qu, index.data<uint32_t>(), dmat, nbins, row_stride);
   }
+
+  // Test inverce index
+  // {
+  //   const bst_float* cut_values = cut.cut_values_.ConstDevicePointer();
+  //   const uint32_t* cut_ptrs = cut.cut_ptrs_.ConstDevicePointer();
+  //     size_t* offsets_ptr = offsets_.Data();
+
+  //   for (auto &batch : dmat->GetBatches<SparsePage>()) {
+  //     const xgboost::Entry *data_ptr = batch.data.ConstDevicePointer();
+  //     const bst_idx_t *offset_vec = batch.offset.ConstDevicePointer();
+  //     size_t batch_size = batch.Size();
+  //     if (batch_size > 0) {
+  //       const auto base_rowid = batch.base_rowid;
+  //       qu->submit([&](::sycl::handler& cgh) {
+  //         // ::sycl::stream out(1024, 256, cgh); //output buffer
+  //         cgh.parallel_for<>(::sycl::range<1>(batch_size), [=](::sycl::item<1> pid) {
+  //           const size_t i = pid.get_id(0);
+  //           const size_t ibegin = offset_vec[i];
+  //           const size_t iend = offset_vec[i + 1];
+  //           const size_t size = iend - ibegin;
+
+  //           for (bst_uint j = 0; j < size; ++j) {
+  //             uint32_t idx_bin = SearchBin(cut_values, cut_ptrs, data_ptr[ibegin + j]);
+  //             AtomicRef<size_t> offset(offsets_ptr[idx_bin]);
+  //             offset += 1;
+  //           }
+  //         });
+  //       });
+  //     }
+  //   } 
+  // }
+
 }
 
 }  // namespace common
