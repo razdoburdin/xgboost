@@ -52,7 +52,7 @@ class QuantileHistMaker: public TreeUpdater {
               linalg::Matrix<GradientPair>* gpair,
               DMatrix* dmat,
               xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
-              const std::vector<RegTree*>& trees) override;
+              const std::vector<xgboost::RegTree*>& trees) override;
 
   bool UpdatePredictionCache(const DMatrix* data,
                              linalg::MatrixView<float> out_preds) override;
@@ -95,7 +95,7 @@ class QuantileHistMaker: public TreeUpdater {
                   linalg::Matrix<GradientPair> *gpair,
                   DMatrix *dmat,
                   xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
-                  const std::vector<RegTree *> &trees);
+                  const std::vector<xgboost::RegTree *> &trees);
 
   enum class HistPrecision {fp32, fp64};
   HistPrecision hist_precision_;

@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "../common/partition_builder.h"
+#include "../tree_model.h"
 #include "split_evaluator.h"
 #include "hist_synchronizer.h"
 #include "hist_row_adder.h"
@@ -63,12 +64,21 @@ class HistUpdater {
     builder_monitor_.Init("SYCL::Quantile::HistUpdater");
     kernel_monitor_.Init("SYCL::Quantile::HistUpdater");
     if (param.max_depth > 0) {
-      snode_device_.Resize(qu, 1u << (param.max_depth + 1));
+      int max_n_nodes = 1u << (param.max_depth + 1);
+      snode_device_.Resize(qu, max_n_nodes);
+      tree_.PreAllocate(qu, max_n_nodes);
+      nid_expand_depth_wise_device_.Resize(qu, max_n_nodes/2);
+      // nid_expand_depth_wise_temp_device_.Resize(qu, max_n_nodes/2);
+      // nid_for_apply_split_device_.Resize(qu, max_n_nodes/2);
+      split_queries_device_.Resize(qu, (max_n_nodes/2) * fmat->Info().num_col_);
+      best_splits_device_.Resize(qu, (max_n_nodes/2) * fmat->Info().num_col_);
     }
     has_fp64_support_ = qu_->get_device().has(::sycl::aspect::fp64);
     const auto sub_group_sizes =
       qu_->get_device().get_info<::sycl::info::device::sub_group_sizes>();
     sub_group_size_ = sub_group_sizes.back();
+    max_work_group_size_ = qu_->get_device().get_info<::sycl::info::device::max_work_group_size>();
+    grad_stat_ = std::make_shared <GradStats<GradientSumT>>();;
   }
 
   // update one tree, growing
@@ -77,7 +87,7 @@ class HistUpdater {
               const HostDeviceVector<GradientPair>& gpair,
               DMatrix *p_fmat,
               xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
-              RegTree *p_tree);
+              xgboost::RegTree *p_tree);
 
   bool UpdatePredictionCache(const DMatrix* data,
                              linalg::MatrixView<float> p_out_preds);
@@ -101,9 +111,11 @@ class HistUpdater {
   void InitSampling(const HostDeviceVector<GradientPair>& gpair,
                     USMVector<size_t, MemoryType::on_device>* row_indices);
 
-  void EvaluateSplits(const std::vector<ExpandEntry>& nodes_set,
+::sycl::event EvaluateSplits(const std::vector<int>& nodes_set,
+                      const USMVector<int, MemoryType::on_device> nodes_set_device,
                       const common::GHistIndexMatrix& gmat,
-                      const RegTree& tree);
+                      const xgboost::RegTree& tree,
+                      const ::sycl::event& event_in);
 
   // Enumerate the split values of specific feature
   // Returns the sum of gradients corresponding to the data points that contains a non-missing
@@ -117,14 +129,14 @@ class HistUpdater {
 
   void ApplySplit(std::vector<ExpandEntry> nodes,
                       const common::GHistIndexMatrix& gmat,
-                      RegTree* p_tree);
+                      xgboost::RegTree* p_tree);
 
-  void AddSplitsToRowSet(const std::vector<ExpandEntry>& nodes, RegTree* p_tree);
+  void AddSplitsToRowSet(const std::vector<ExpandEntry>& nodes, xgboost::RegTree* p_tree);
 
   void InitData(const common::GHistIndexMatrix& gmat,
                 const HostDeviceVector<GradientPair>& gpair,
                 const DMatrix& fmat,
-                const RegTree& tree);
+                const xgboost::RegTree& tree);
 
   inline ::sycl::event BuildHist(
                         const HostDeviceVector<GradientPair>& gpair,
@@ -132,58 +144,70 @@ class HistUpdater {
                         const common::GHistIndexMatrix& gmat,
                         GHistRowT<MemoryType::on_device>* hist,
                         GHistRowT<MemoryType::on_device>* hist_buffer,
-                        ::sycl::event event_priv) {
-    return hist_builder_.BuildHist(gpair, row_indices, gmat, hist,
-                                   data_layout_ != kSparseData, hist_buffer, event_priv);
+                        ::sycl::event event_in,
+                        std::vector<::sycl::event>* events_buffer) {
+    return hist_builder_.BuildHist(gpair, row_indices, gmat, hist, data_layout_ != kSparseData,
+                                   hist_buffer, event_in, events_buffer);
   }
 
-  void InitNewNode(int nid,
-                   const common::GHistIndexMatrix& gmat,
-                   const HostDeviceVector<GradientPair>& gpair,
-                   const RegTree& tree);
+::sycl::event InitNewRootNode(int nid,
+                     const common::GHistIndexMatrix& gmat,
+                     const HostDeviceVector<GradientPair>& gpair,
+                     const std::vector<::sycl::event>& events_in);
+
+  // void InitNewNode(int nid,
+  //                  const common::GHistIndexMatrix& gmat,
+  //                  const HostDeviceVector<GradientPair>& gpair,
+  //                  const xgboost::RegTree& tree,
+  //                  const std::vector<::sycl::event>& events_in,
+  //                  ::sycl::event* event);
 
   // Split nodes to 2 sets depending on amount of rows in each node
   // Histograms for small nodes will be built explicitly
   // Histograms for big nodes will be built by 'Subtraction Trick'
-  void SplitSiblings(const std::vector<ExpandEntry>& nodes,
-                  std::vector<ExpandEntry>* small_siblings,
-                  std::vector<ExpandEntry>* big_siblings,
-                  RegTree *p_tree);
+  void SplitSiblings(const std::vector<int>& nodes,
+                     std::vector<ExpandEntry>* small_siblings,
+                     std::vector<ExpandEntry>* big_siblings,
+                     const xgboost::RegTree& p_tree);
 
-  void BuildNodeStats(const common::GHistIndexMatrix &gmat,
-                      RegTree *p_tree,
-                      const HostDeviceVector<GradientPair>& gpair);
+  ::sycl::event BuildNodeStats(const common::GHistIndexMatrix &gmat,
+                               const xgboost::RegTree &tree,
+                               const HostDeviceVector<GradientPair>& gpair,
+                               const std::vector<::sycl::event>& events_in);
 
-  void EvaluateAndApplySplits(const common::GHistIndexMatrix &gmat,
-                              RegTree *p_tree,
-                              int *num_leaves,
-                              int depth,
-                              std::vector<ExpandEntry> *temp_qexpand_depth);
+  ::sycl::event  EvaluateAndApplySplits(const common::GHistIndexMatrix &gmat,
+                                         xgboost::RegTree *p_tree,
+                                         int *num_leaves,
+                                         int depth,
+                                         std::vector<int> *temp_qexpand_depth,
+                                         const ::sycl::event& event_in);
 
-  void AddSplitsToTree(
-            const common::GHistIndexMatrix &gmat,
-            RegTree *p_tree,
-            int *num_leaves,
-            int depth,
-            std::vector<ExpandEntry>* nodes_for_apply_split,
-            std::vector<ExpandEntry>* temp_qexpand_depth);
+  ::sycl::event AddSplitsToTree(
+                                const common::GHistIndexMatrix &gmat,
+                                xgboost::RegTree *p_tree,
+                                int *num_leaves,
+                                int depth,
+                                std::vector<ExpandEntry>* nodes_for_apply_split,
+                                std::vector<int>* temp_qexpand_depth,
+                                const ::sycl::event& event_in);
 
   void ExpandWithDepthWise(const common::GHistIndexMatrix &gmat,
-                            RegTree *p_tree,
+                            xgboost::RegTree *p_tree,
                             const HostDeviceVector<GradientPair>& gpair);
 
   void BuildLocalHistograms(const common::GHistIndexMatrix &gmat,
-                            RegTree *p_tree,
-                            const HostDeviceVector<GradientPair>& gpair);
+                            const HostDeviceVector<GradientPair>& gpair,
+                            const std::vector<::sycl::event>& events_in,
+                            std::vector<::sycl::event>* events_out);
 
   void BuildHistogramsLossGuide(
                       ExpandEntry entry,
                       const common::GHistIndexMatrix &gmat,
-                      RegTree *p_tree,
+                      const xgboost::RegTree& tree,
                       const HostDeviceVector<GradientPair>& gpair);
 
   void ExpandWithLossGuide(const common::GHistIndexMatrix& gmat,
-                           RegTree* p_tree,
+                           xgboost::RegTree* p_tree,
                            const HostDeviceVector<GradientPair>& gpair);
 
   void ReduceHists(const std::vector<int>& sync_ids, size_t nbins);
@@ -200,6 +224,7 @@ class HistUpdater {
   const Context* ctx_;
   bool has_fp64_support_;
   size_t sub_group_size_;
+  size_t max_work_group_size_;
 
   // the internal row sets
   common::RowSetCollection row_set_collection_;
@@ -211,13 +236,12 @@ class HistUpdater {
   USMVector<SplitQuery, MemoryType::on_device> split_queries_device_;
 
   USMVector<SplitEntry<GradientSumT>, MemoryType::on_device> best_splits_device_;
-  std::vector<SplitEntry<GradientSumT>> best_splits_host_;
 
   TreeEvaluator<GradientSumT> tree_evaluator_;
   FeatureInteractionConstraintHost interaction_constraints_;
 
   // back pointers to tree and data matrix
-  const RegTree* p_last_tree_;
+  const xgboost::RegTree* p_last_tree_;
   DMatrix const* const p_last_fmat_;
 
   using ExpandQueue =
@@ -225,7 +249,13 @@ class HistUpdater {
                           std::function<bool(ExpandEntry, ExpandEntry)>>;
 
   std::unique_ptr<ExpandQueue> qexpand_loss_guided_;
-  std::vector<ExpandEntry> qexpand_depth_wise_;
+  std::vector<int> nid_expand_depth_wise_;
+  USMVector<int, MemoryType::on_device> nid_expand_depth_wise_device_;
+  USMVector<int, MemoryType::on_device> nid_expand_depth_wise_temp_device_;
+
+  std::vector<ExpandEntry> nodes_for_apply_split_;
+  USMVector<int, MemoryType::on_device> nid_for_apply_split_device_;
+
 
   enum DataLayout { kDenseDataZeroBased, kDenseDataOneBased, kSparseData };
   DataLayout data_layout_;
@@ -241,6 +271,7 @@ class HistUpdater {
   /*! \brief TreeNode Data: statistics for each constructed node */
   std::vector<NodeEntry<GradientSumT>> snode_host_;
   USMVector<NodeEntry<GradientSumT>, MemoryType::on_device> snode_device_;
+  RegTree tree_;
 
   xgboost::common::Monitor builder_monitor_;
   xgboost::common::Monitor kernel_monitor_;
@@ -263,6 +294,7 @@ class HistUpdater {
   std::unique_ptr<HistRowsAdder<GradientSumT>> hist_rows_adder_;
 
   std::vector<GradientPairT> reduce_buffer_;
+  std::shared_ptr <GradStats<GradientSumT>> grad_stat_;
   ::sycl::queue* qu_;
 };
 

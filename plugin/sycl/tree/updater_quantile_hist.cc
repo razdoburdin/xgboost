@@ -66,7 +66,7 @@ void QuantileHistMaker::CallUpdate(
         linalg::Matrix<GradientPair> *gpair,
         DMatrix *dmat,
         xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
-        const std::vector<RegTree *> &trees) {
+        const std::vector<xgboost::RegTree *> &trees) {
   for (auto tree : trees) {
     pimpl->Update(param, gmat_, *(gpair->Data()), dmat, out_position, tree);
   }
@@ -76,7 +76,7 @@ void QuantileHistMaker::Update(xgboost::tree::TrainParam const *param,
                                linalg::Matrix<GradientPair>* gpair,
                                DMatrix *dmat,
                                xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
-                               const std::vector<RegTree *> &trees) {
+                               const std::vector<xgboost::RegTree *> &trees) {
   gpair->Data()->SetDevice(ctx_->Device());
   if (dmat != p_last_dmat_ || is_gmat_initialized_ == false) {
     updater_monitor_.Start("GmatInitialization");

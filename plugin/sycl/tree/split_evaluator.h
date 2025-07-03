@@ -168,6 +168,36 @@ class TreeEvaluator {
     }
   };
 
+  struct SplitAdder {
+    int* constraints;
+    GradType* lower;
+    GradType* upper;
+    bool has_constraint;
+
+    void AddSplit(bst_node_t nodeid, bst_node_t leftid, bst_node_t rightid,
+                  bst_feature_t f, GradType left_weight, GradType right_weight) const {
+      if (!has_constraint) {
+        return;
+      }
+
+      lower[leftid] = lower[nodeid];
+      upper[leftid] = upper[nodeid];
+
+      lower[rightid] = lower[nodeid];
+      upper[rightid] = upper[nodeid];
+      int32_t c = constraints[f];
+      GradType mid = (left_weight + right_weight) / 2;
+
+      if (c < 0) {
+        lower[leftid] = mid;
+        upper[rightid] = mid;
+      } else if (c > 0) {
+        upper[leftid] = mid;
+        lower[rightid] = mid;
+      }
+    }
+  };
+
  public:
   /* Get a view to the evaluator that can be passed down to device. */
   auto GetEvaluator() const {
@@ -176,6 +206,15 @@ class TreeEvaluator {
                           upper_bounds_.DataConst(),
                           has_constraint_,
                           param_};
+  }
+
+  auto GetAdder() {
+    CHECK(!has_constraint_);
+    return SplitAdder{monotone_.Data(),
+                      lower_bounds_.Data(),
+                      upper_bounds_.Data(),
+                      has_constraint_,
+                     };
   }
 
   void AddSplit(bst_node_t nodeid, bst_node_t leftid, bst_node_t rightid,

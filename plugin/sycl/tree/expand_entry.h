@@ -22,15 +22,15 @@ struct ExpandEntry : public xgboost::tree::ExpandEntryImpl<ExpandEntry> {
 
   ExpandEntry(int nid, int depth) : ExpandEntryImpl{nid, depth} {}
 
-  inline bst_node_t GetSiblingId(const xgboost::RegTree* p_tree) const {
-    CHECK_EQ((*p_tree)[nid].IsRoot(), false);
-    const size_t parent_id = (*p_tree)[nid].Parent();
-    return GetSiblingId(p_tree, parent_id);
+  inline bst_node_t GetSiblingId(const xgboost::RegTree& tree) const {
+    CHECK_EQ(tree[nid].IsRoot(), false);
+    const size_t parent_id = tree[nid].Parent();
+    return GetSiblingId(tree, parent_id);
   }
 
-  inline bst_node_t GetSiblingId(const xgboost::RegTree* p_tree, size_t parent_id) const {
-    return p_tree->IsLeftChild(nid) ? p_tree->RightChild(parent_id)
-                                    : p_tree->LeftChild(parent_id);
+  inline bst_node_t GetSiblingId(const xgboost::RegTree& tree, size_t parent_id) const {
+    return tree.IsLeftChild(nid) ? tree.RightChild(parent_id)
+                                 : tree.LeftChild(parent_id);
   }
 
   bool IsValidImpl(xgboost::tree::TrainParam const &param, int32_t num_leaves) const {

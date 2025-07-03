@@ -82,6 +82,19 @@ struct SplitEntryContainer {
   bst_feature_t SplitIndex() const { return sindex & ((1U << 31) - 1U); }
   /*!\return whether missing value goes to left branch */
   bool DefaultLeft() const { return (sindex >> 31) != 0; }
+
+  inline static SplitEntryContainer GetBestSplit(const SplitEntryContainer& lhs,
+                                                 const SplitEntryContainer& rhs) {
+    if (::sycl::isinf(lhs.loss_chg)) return rhs;
+    if (::sycl::isinf(rhs.loss_chg)) return lhs;
+
+    if (rhs.loss_chg > lhs.loss_chg) return rhs;
+    if (lhs.loss_chg > rhs.loss_chg) return lhs;
+
+    return lhs.SplitIndex() < rhs.SplitIndex() ? lhs : rhs;
+  }
+
+
   /*!
    * \brief decides whether we can replace current entry with the given statistics
    *

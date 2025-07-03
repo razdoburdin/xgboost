@@ -32,9 +32,9 @@ class ColumnMatrix;
  * \brief Fill histogram with zeroes
  */
 template<typename GradientSumT>
-void InitHist(::sycl::queue* qu,
-              GHistRow<GradientSumT, MemoryType::on_device>* hist,
-              size_t size, ::sycl::event* event);
+::sycl::event InitHist(::sycl::queue* qu,
+                       GHistRow<GradientSumT, MemoryType::on_device>* hist,
+                       size_t size, ::sycl::event event_in);
 
 /*!
  * \brief Copy histogram from src to dst
@@ -53,7 +53,7 @@ template<typename GradientSumT>
                               GHistRow<GradientSumT, MemoryType::on_device>* dst,
                               const GHistRow<GradientSumT, MemoryType::on_device>& src1,
                               const GHistRow<GradientSumT, MemoryType::on_device>& src2,
-                              size_t size, ::sycl::event event_priv);
+                              size_t size, const std::vector<::sycl::event>& events_in);
 
 /*!
  * \brief Histograms of gradient statistics for multiple nodes
@@ -161,13 +161,9 @@ class GHistBuilder {
                           GHistRowT<MemoryType::on_device>* HistCollection,
                           bool isDense,
                           GHistRowT<MemoryType::on_device>* hist_buffer,
-                          ::sycl::event event,
+                          ::sycl::event event_in,
+                          std::vector<::sycl::event>* events_buffer,
                           bool force_atomic_use = false);
-
-  // Construct a histogram via subtraction trick
-  void SubtractionTrick(GHistRowT<MemoryType::on_device>* self,
-                        const GHistRowT<MemoryType::on_device>& sibling,
-                        const GHistRowT<MemoryType::on_device>& parent);
 
   uint32_t GetNumBins() const {
       return nbins_;

@@ -13,6 +13,7 @@
 #pragma GCC diagnostic ignored "-Wtautological-constant-compare"
 #include "xgboost/host_device_vector.h"
 #pragma GCC diagnostic pop
+#include "xgboost/tree_model.h"  // for RegTree
 
 #include "../device_manager.h"
 #include "../data.h"

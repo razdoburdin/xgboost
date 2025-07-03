@@ -62,92 +62,233 @@ template <typename GradientSumT>
 void HistUpdater<GradientSumT>::BuildHistogramsLossGuide(
     ExpandEntry entry,
     const common::GHistIndexMatrix &gmat,
-    RegTree *p_tree,
+    const xgboost::RegTree& tree,
     const HostDeviceVector<GradientPair>& gpair) {
   nodes_for_explicit_hist_build_.clear();
   nodes_for_subtraction_trick_.clear();
   nodes_for_explicit_hist_build_.push_back(entry);
 
-  if (!(*p_tree)[entry.nid].IsRoot()) {
-    auto sibling_id = entry.GetSiblingId(p_tree);
-    nodes_for_subtraction_trick_.emplace_back(sibling_id, p_tree->GetDepth(sibling_id));
+  if (!tree[entry.nid].IsRoot()) {
+    auto sibling_id = entry.GetSiblingId(tree);
+    nodes_for_subtraction_trick_.emplace_back(sibling_id, tree.GetDepth(sibling_id));
   }
 
   std::vector<int> sync_ids;
-  hist_rows_adder_->AddHistRows(this, &sync_ids, p_tree);
+  std::vector<::sycl::event> events_explicit, events_subtraction, events_build, events_sync;
+  hist_rows_adder_->AddHistRows(this, &sync_ids, tree, &events_explicit, &events_subtraction);
+  BuildLocalHistograms(gmat, gpair, events_explicit, &events_build);
+  hist_synchronizer_->SyncHistograms(this, sync_ids, tree,
+                                     events_subtraction, events_build, &events_sync);
   qu_->wait_and_throw();
-  BuildLocalHistograms(gmat, p_tree, gpair);
-  hist_synchronizer_->SyncHistograms(this, sync_ids, p_tree);
 }
 
 template<typename GradientSumT>
 void HistUpdater<GradientSumT>::BuildLocalHistograms(
     const common::GHistIndexMatrix &gmat,
-    RegTree *p_tree,
-    const HostDeviceVector<GradientPair>& gpair) {
-  builder_monitor_.Start("BuildLocalHistograms");
+    const HostDeviceVector<GradientPair>& gpair,
+    const std::vector<::sycl::event>& events_in,
+    std::vector<::sycl::event>* events_out) {
   const size_t n_nodes = nodes_for_explicit_hist_build_.size();
-  ::sycl::event event;
+
+  events_out->resize(n_nodes);
+  std::vector<::sycl::event> events_buffer;
 
   for (size_t i = 0; i < n_nodes; i++) {
     const int32_t nid = nodes_for_explicit_hist_build_[i].nid;
 
     if (row_set_collection_[nid].Size() > 0) {
-      event = BuildHist(gpair, row_set_collection_[nid], gmat, &(hist_[nid]),
-                        &(hist_buffer_.GetDeviceBuffer()), event);
+      (*events_out)[i] = BuildHist(gpair, row_set_collection_[nid], gmat, &(hist_[nid]),
+                                   &(hist_buffer_.GetDeviceBuffer()),
+                                   events_in[i], &events_buffer);
     } else {
-      common::InitHist(qu_, &(hist_[nid]), hist_[nid].Size(), &event);
+      (*events_out)[i] = common::InitHist(qu_, &(hist_[nid]), hist_[nid].Size(), events_in[i]);
     }
   }
-  qu_->wait_and_throw();
-  builder_monitor_.Stop("BuildLocalHistograms");
 }
 
 template<typename GradientSumT>
-void HistUpdater<GradientSumT>::BuildNodeStats(
+::sycl::event HistUpdater<GradientSumT>::BuildNodeStats(
     const common::GHistIndexMatrix &gmat,
-    RegTree *p_tree,
-    const HostDeviceVector<GradientPair>& gpair) {
-  builder_monitor_.Start("BuildNodeStats");
-  for (auto const& entry : qexpand_depth_wise_) {
-    int nid = entry.nid;
-    this->InitNewNode(nid, gmat, gpair, *p_tree);
-    // add constraints
-    if (!(*p_tree)[nid].IsLeftChild() && !(*p_tree)[nid].IsRoot()) {
-      // it's a right child
-      auto parent_id = (*p_tree)[nid].Parent();
-      auto left_sibling_id = (*p_tree)[parent_id].LeftChild();
-      auto parent_split_feature_id = snode_host_[parent_id].best.SplitIndex();
-      tree_evaluator_.AddSplit(
+    const xgboost::RegTree& tree,
+    const HostDeviceVector<GradientPair>& gpair,
+    const std::vector<::sycl::event>& events_in) {
+
+  snode_device_.ResizeNoCopy(qu_, tree.NumNodes());
+
+  size_t n_expand_nodes = nid_expand_depth_wise_.size();
+  nid_expand_depth_wise_device_.ResizeNoCopy(qu_, n_expand_nodes);
+  int* nid_expand_ptr = nid_expand_depth_wise_device_.Data();
+
+  std::vector<::sycl::event> events_copy(2);
+  // events_copy[0] = tree_.SetNodes(qu_, tree.GetNodes(), events_in);
+  events_copy[1] = qu_->memcpy(nid_expand_ptr, nid_expand_depth_wise_.data(),
+                               n_expand_nodes * sizeof(int), events_in);
+
+  auto* snode_ptr = snode_device_.Data();
+  const auto& nodes_ptr = tree_.GetNodesPtr();
+
+  bool is_root = tree[nid_expand_depth_wise_[0]].IsRoot();
+  ::sycl::event event_init;
+  if (is_root) {
+    CHECK_EQ(n_expand_nodes, 1);
+    event_init = InitNewRootNode(nid_expand_depth_wise_[0], gmat, gpair, events_copy);
+  } else {
+    CHECK_GT(n_expand_nodes, 1);
+    event_init = qu_->submit([&](::sycl::handler& cgh) {
+      cgh.depends_on(events_copy);
+      cgh.parallel_for<>(::sycl::range<1>(n_expand_nodes), [=](::sycl::item<1> pid) {
+        int nid = nid_expand_ptr[pid.get_id(0)];
+        int parent_id = nodes_ptr[nid].Parent();
+        int is_left_child = nodes_ptr[nid].IsLeftChild();
+
+        snode_ptr[nid].stats = is_left_child ? snode_ptr[parent_id].best.left_sum
+                                             : snode_ptr[parent_id].best.right_sum;
+      });
+    });
+  }
+
+  auto evaluator = tree_evaluator_.GetEvaluator();
+  auto adder = tree_evaluator_.GetAdder();
+  ::sycl::event event = qu_->submit([&](::sycl::handler& cgh) {
+    cgh.depends_on(event_init);
+
+    cgh.parallel_for<>(::sycl::range<1>(n_expand_nodes), [=](::sycl::item<1> pid) {
+      int nid = nid_expand_ptr[pid.get_id(0)];
+      int parent_id = nodes_ptr[nid].Parent();
+
+      snode_ptr[nid].weight = evaluator.CalcWeight(parent_id, snode_ptr[nid].stats);
+      snode_ptr[nid].root_gain = evaluator.CalcGain(parent_id, snode_ptr[nid].stats);
+
+      int is_right_child = !nodes_ptr[nid].IsLeftChild() && !nodes_ptr[nid].IsRoot();
+      if (is_right_child) {
+        auto left_sibling_id = nodes_ptr[parent_id].LeftChild();
+        auto parent_split_feature_id = snode_ptr[parent_id].best.SplitIndex();
+        adder.AddSplit(
           parent_id, left_sibling_id, nid, parent_split_feature_id,
-          snode_host_[left_sibling_id].weight, snode_host_[nid].weight);
-      interaction_constraints_.Split(parent_id, parent_split_feature_id,
-                                     left_sibling_id, nid);
-    }
-  }
-  builder_monitor_.Stop("BuildNodeStats");
+          snode_ptr[left_sibling_id].weight, snode_ptr[nid].weight);
+      }
+    });
+  });
+
+  return event;
+
+    // add constraints
+  // for (auto const& nid : nid_expand_depth_wise_) {
+  //   if (!tree[nid].IsLeftChild() && !tree[nid].IsRoot()) {
+  //     // it's a right child
+  //     auto parent_id = tree[nid].Parent();
+  //     auto left_sibling_id = tree[parent_id].LeftChild();
+  //     auto parent_split_feature_id = snode_host_[parent_id].best.SplitIndex();
+  //     tree_evaluator_.AddSplit(
+  //         parent_id, left_sibling_id, nid, parent_split_feature_id,
+  //         snode_host_[left_sibling_id].weight, snode_host_[nid].weight);
+  //     interaction_constraints_.Split(parent_id, parent_split_feature_id,
+  //                                    left_sibling_id, nid);
+  //   }
+  // }
 }
 
 template<typename GradientSumT>
-void HistUpdater<GradientSumT>::AddSplitsToTree(
+::sycl::event HistUpdater<GradientSumT>::AddSplitsToTree(
     const common::GHistIndexMatrix &gmat,
-    RegTree *p_tree,
-    int *num_leaves,
+    xgboost::RegTree *p_tree,
+    int *num_leaves_ptr,
     int depth,
     std::vector<ExpandEntry>* nodes_for_apply_split,
-    std::vector<ExpandEntry>* temp_qexpand_depth) {
+    std::vector<int>* temp_qexpand_depth,
+    const ::sycl::event& event_in) {
   builder_monitor_.Start("AddSplitsToTree");
   auto evaluator = tree_evaluator_.GetEvaluator();
-  for (auto const& entry : qexpand_depth_wise_) {
+
+  // size_t n_nodes = nid_expand_depth_wise_device_.Size();
+  // const int* nodes_id = nid_expand_depth_wise_device_.DataConst();
+  // RegTree::Node* nodes = tree_.GetNodesPtr();
+  // const auto* snode = snode_device_.DataConst();
+  // int max_depth = param_.max_depth;
+  // int max_leaves = param_.max_leaves;
+  // const auto lr = param_.learning_rate;
+
+  // nid_for_apply_split_device_.ResizeNoCopy(qu_, n_nodes);
+  // auto*nid_for_apply_split_ptr = nid_for_apply_split_device_.Data();
+
+  // nid_expand_depth_wise_temp_device_.ResizeNoCopy(qu_, n_nodes);
+  // int* nid_expand_depth_wise_temp_ptr = nid_expand_depth_wise_temp_device_.Data();
+
+  // int apply_idx = 0;
+  // int expand_temp_idx = 0;
+
+  // auto expander = tree_.GetNodeExpander();
+  // ::sycl::buffer<int, 1> num_leaves_buf(num_leaves_ptr, 1);
+  // ::sycl::buffer<int, 1> apply_idx_buf(&apply_idx, 1);
+  // ::sycl::buffer<int, 1> expand_temp_idx_buf(&expand_temp_idx, 1);
+
+  // ::sycl::event event = qu_->submit([&](::sycl::handler& cgh) {
+  //   cgh.depends_on(event_in);
+  //   auto num_leaves          = num_leaves_buf.get_access<::sycl::access::mode::read_write>(cgh);
+  //   auto apply_idx_acc       = num_leaves_buf.get_access<::sycl::access::mode::read_write>(cgh);
+  //   auto expand_temp_idx_acc = num_leaves_buf.get_access<::sycl::access::mode::read_write>(cgh);
+  //   cgh.single_task<>([=]() {
+  //     for (size_t i = 0; i < n_nodes; ++i) {
+  //       auto nid = nodes_id[i];
+  //       bool is_leaf = snode[nid].best.loss_chg < kRtEps ||
+  //                      (max_depth > 0 && depth == max_depth) ||
+  //                      (max_leaves > 0 && num_leaves[0] == max_leaves);
+  //       if (is_leaf) {
+  //         nodes[nid].SetLeaf(snode[nid].weight * lr);
+  //       } else {
+  //         nid_for_apply_split_ptr[apply_idx_acc[0]++] = nid;
+
+  //         const NodeEntry<GradientSumT>& e = snode[nid];
+  //         bst_float left_leaf_weight  = evaluator.CalcWeight(nid, e.best.left_sum) * lr;
+  //         bst_float right_leaf_weight = evaluator.CalcWeight(nid, e.best.right_sum) * lr;
+  //         const_cast<RegTree::NodeExpander*>(&expander)->ExpandNode(
+  //                             nid, e.best.SplitIndex(), e.best.split_value,
+  //                             e.best.DefaultLeft(), e.weight, left_leaf_weight,
+  //                             right_leaf_weight, e.best.loss_chg, e.stats.GetHess(),
+  //                             e.best.left_sum.GetHess(), e.best.right_sum.GetHess());
+
+  //         int left_id = nodes[nid].LeftChild();
+  //         int right_id = nodes[nid].RightChild();
+  //         nid_expand_depth_wise_temp_ptr[expand_temp_idx_acc[0]++] = left_id;
+  //         nid_expand_depth_wise_temp_ptr[expand_temp_idx_acc[0]++] = right_id;
+
+  //         num_leaves[0]++;
+  //       }
+  //     }
+  //   });
+  // });
+
+  // temp_qexpand_depth->resize(expand_temp_idx);
+  // event = qu_->memcpy(temp_qexpand_depth->data(), nid_expand_depth_wise_temp_ptr,
+  //                     expand_temp_idx * sizeof(int), event);
+  // event = tree_.CopyToHost(qu_, {event});
+  // qu_->wait();
+
+  // {
+  //   std::vector<int> nid_for_apply_split(apply_idx);
+  //   event = qu_->memcpy(nid_for_apply_split.data(), nid_for_apply_split_ptr,
+  //                       apply_idx * sizeof(int), event);
+  //   for (int i = 0; i < apply_idx; ++i) {
+  //     CHECK_EQ(depth, p_tree->GetDepth(nid_for_apply_split[i]));
+  //     nodes_for_apply_split[i].emplace_back(nid_for_apply_split[i], depth);
+  //   }
+  // }
+
+  // builder_monitor_.Stop("AddSplitsToTree");
+  // return event;
+  snode_host_.resize(snode_device_.Size(), NodeEntry<GradientSumT>(param_));
+  auto event = qu_->memcpy(snode_host_.data(), snode_device_.DataConst(),
+                      snode_host_.size() * sizeof(NodeEntry<GradientSumT>), event_in);
+  qu_->wait();
+  for (auto const& nid : nid_expand_depth_wise_) {
     const auto lr = param_.learning_rate;
-    int nid = entry.nid;
 
     if (snode_host_[nid].best.loss_chg < kRtEps ||
         (param_.max_depth > 0 && depth == param_.max_depth) ||
-        (param_.max_leaves > 0 && (*num_leaves) == param_.max_leaves)) {
+        (param_.max_leaves > 0 && (*num_leaves_ptr) == param_.max_leaves)) {
       (*p_tree)[nid].SetLeaf(snode_host_[nid].weight * lr);
     } else {
-      nodes_for_apply_split->push_back(entry);
+      nodes_for_apply_split->push_back(ExpandEntry(nid,  p_tree->GetDepth(nid)));
 
       NodeEntry<GradientSumT>& e = snode_host_[nid];
       bst_float left_leaf_weight =
@@ -161,29 +302,28 @@ void HistUpdater<GradientSumT>::AddSplitsToTree(
 
       int left_id = (*p_tree)[nid].LeftChild();
       int right_id = (*p_tree)[nid].RightChild();
-      temp_qexpand_depth->push_back(ExpandEntry(left_id,  p_tree->GetDepth(left_id)));
-      temp_qexpand_depth->push_back(ExpandEntry(right_id, p_tree->GetDepth(right_id)));
+      temp_qexpand_depth->push_back(left_id);
+      temp_qexpand_depth->push_back(right_id);
       // - 1 parent + 2 new children
-      (*num_leaves)++;
+      (*num_leaves_ptr)++;
     }
   }
   builder_monitor_.Stop("AddSplitsToTree");
+  return ::sycl::event();
 }
 
 
 template<typename GradientSumT>
-void HistUpdater<GradientSumT>::EvaluateAndApplySplits(
-    const common::GHistIndexMatrix &gmat,
-    RegTree *p_tree,
-    int *num_leaves,
-    int depth,
-    std::vector<ExpandEntry> *temp_qexpand_depth) {
-  EvaluateSplits(qexpand_depth_wise_, gmat, *p_tree);
-
+::sycl::event HistUpdater<GradientSumT>::EvaluateAndApplySplits(
+    const common::GHistIndexMatrix &gmat, xgboost::RegTree *p_tree, int *num_leaves, int depth,
+    std::vector<int> *temp_qexpand_depth, const ::sycl::event& event_in) {
+  auto event_evaluate = EvaluateSplits(nid_expand_depth_wise_, nid_expand_depth_wise_device_,
+                                       gmat, *p_tree, event_in);
   std::vector<ExpandEntry> nodes_for_apply_split;
   AddSplitsToTree(gmat, p_tree, num_leaves, depth,
-                  &nodes_for_apply_split, temp_qexpand_depth);
+                  &nodes_for_apply_split, temp_qexpand_depth, event_evaluate);
   ApplySplit(nodes_for_apply_split, gmat, p_tree);
+  return ::sycl::event();
 }
 
 // Split nodes to 2 sets depending on amount of rows in each node
@@ -194,28 +334,27 @@ void HistUpdater<GradientSumT>::EvaluateAndApplySplits(
 //    This ensures that the workers operate on the same set of tree nodes.
 template <typename GradientSumT>
 void HistUpdater<GradientSumT>::SplitSiblings(
-    const std::vector<ExpandEntry> &nodes,
+    const std::vector<int> &nodes,
     std::vector<ExpandEntry> *small_siblings,
     std::vector<ExpandEntry> *big_siblings,
-    RegTree *p_tree) {
+    const xgboost::RegTree& tree) {
   builder_monitor_.Start("SplitSiblings");
-  for (auto const& entry : nodes) {
-    int nid = entry.nid;
-    RegTree::Node &node = (*p_tree)[nid];
+  for (auto const& nid : nodes) {
+    const xgboost::RegTree::Node &node = tree[nid];
     if (node.IsRoot()) {
-      small_siblings->push_back(entry);
+      small_siblings->emplace_back(nid, tree.GetDepth(nid));
     } else {
-      const int32_t left_id = (*p_tree)[node.Parent()].LeftChild();
-      const int32_t right_id = (*p_tree)[node.Parent()].RightChild();
+      const int32_t left_id = tree[node.Parent()].LeftChild();
+      const int32_t right_id = tree[node.Parent()].RightChild();
 
       if (nid == left_id && row_set_collection_[left_id ].Size() <
                             row_set_collection_[right_id].Size()) {
-        small_siblings->push_back(entry);
+        small_siblings->emplace_back(nid, tree.GetDepth(nid));
       } else if (nid == right_id && row_set_collection_[right_id].Size() <=
                                     row_set_collection_[left_id ].Size()) {
-        small_siblings->push_back(entry);
+        small_siblings->emplace_back(nid, tree.GetDepth(nid));
       } else {
-        big_siblings->push_back(entry);
+        big_siblings->emplace_back(nid, tree.GetDepth(nid));
       }
     }
   }
@@ -225,109 +364,115 @@ void HistUpdater<GradientSumT>::SplitSiblings(
 template<typename GradientSumT>
 void HistUpdater<GradientSumT>::ExpandWithDepthWise(
     const common::GHistIndexMatrix &gmat,
-    RegTree *p_tree,
+    xgboost::RegTree *p_tree,
     const HostDeviceVector<GradientPair>& gpair) {
+  builder_monitor_.Start("ExpandWithDepthWise");
   int num_leaves = 0;
 
   // in depth_wise growing, we feed loss_chg with 0.0 since it is not used anyway
-  qexpand_depth_wise_.emplace_back(ExpandEntry::kRootNid,
-                                   p_tree->GetDepth(ExpandEntry::kRootNid));
+  nid_expand_depth_wise_.emplace_back(ExpandEntry::kRootNid);
   ++num_leaves;
   for (int depth = 0; depth < param_.max_depth + 1; depth++) {
     std::vector<int> sync_ids;
-    std::vector<ExpandEntry> temp_qexpand_depth;
-    SplitSiblings(qexpand_depth_wise_, &nodes_for_explicit_hist_build_,
-                  &nodes_for_subtraction_trick_, p_tree);
-    hist_rows_adder_->AddHistRows(this, &sync_ids, p_tree);
-    BuildLocalHistograms(gmat, p_tree, gpair);
-    hist_synchronizer_->SyncHistograms(this, sync_ids, p_tree);
-    BuildNodeStats(gmat, p_tree, gpair);
+    std::vector<int> temp_qexpand_depth;
+    SplitSiblings(nid_expand_depth_wise_, &nodes_for_explicit_hist_build_,
+                  &nodes_for_subtraction_trick_, *p_tree);
 
-    EvaluateAndApplySplits(gmat, p_tree, &num_leaves, depth,
-                   &temp_qexpand_depth);
+    std::vector<::sycl::event> events_explicit, events_subtraction, events_build, events_sync;
+    hist_rows_adder_->AddHistRows(this, &sync_ids, *p_tree, &events_explicit, &events_subtraction);
+    BuildLocalHistograms(gmat, gpair, events_explicit, &events_build);
+    hist_synchronizer_->SyncHistograms(this, sync_ids, *p_tree,
+                                       events_subtraction, events_build, &events_sync);
+    auto event = tree_.Set(qu_, p_tree, events_sync);
+    auto event_stats = BuildNodeStats(gmat, *p_tree, gpair, {event});
+    auto event_evaluate = EvaluateAndApplySplits(gmat, p_tree, &num_leaves, depth,
+                                                  &temp_qexpand_depth, event_stats);
+    qu_->wait();
 
     // clean up
-    qexpand_depth_wise_.clear();
+    nid_expand_depth_wise_.clear();
     nodes_for_subtraction_trick_.clear();
     nodes_for_explicit_hist_build_.clear();
     if (temp_qexpand_depth.empty()) {
       break;
     } else {
-      qexpand_depth_wise_ = temp_qexpand_depth;
+      nid_expand_depth_wise_ = temp_qexpand_depth;
       temp_qexpand_depth.clear();
     }
   }
+  builder_monitor_.Stop("ExpandWithDepthWise");
 }
 
 template<typename GradientSumT>
 void HistUpdater<GradientSumT>::ExpandWithLossGuide(
     const common::GHistIndexMatrix& gmat,
-    RegTree* p_tree,
+    xgboost::RegTree* p_tree,
     const HostDeviceVector<GradientPair>& gpair) {
   builder_monitor_.Start("ExpandWithLossGuide");
   int num_leaves = 0;
   const auto lr = param_.learning_rate;
 
   ExpandEntry node(ExpandEntry::kRootNid, p_tree->GetDepth(ExpandEntry::kRootNid));
-  BuildHistogramsLossGuide(node, gmat, p_tree, gpair);
+  BuildHistogramsLossGuide(node, gmat, *p_tree, gpair);
 
-  this->InitNewNode(ExpandEntry::kRootNid, gmat, gpair, *p_tree);
+  LOG(FATAL) << "Broken";
+  // this->InitNewNode(ExpandEntry::kRootNid, gmat, gpair, *p_tree);
 
-  this->EvaluateSplits({node}, gmat, *p_tree);
-  node.split.loss_chg = snode_host_[ExpandEntry::kRootNid].best.loss_chg;
+  // this->EvaluateSplits({node}, gmat, *p_tree);
+  // node.split.loss_chg = snode_host_[ExpandEntry::kRootNid].best.loss_chg;
 
-  qexpand_loss_guided_->push(node);
-  ++num_leaves;
+  // qexpand_loss_guided_->push(node);
+  // ++num_leaves;
 
-  while (!qexpand_loss_guided_->empty()) {
-    const ExpandEntry candidate = qexpand_loss_guided_->top();
-    const int nid = candidate.nid;
-    qexpand_loss_guided_->pop();
-    if (!candidate.IsValid(param_, num_leaves)) {
-      (*p_tree)[nid].SetLeaf(snode_host_[nid].weight * lr);
-    } else {
-      auto evaluator = tree_evaluator_.GetEvaluator();
-      NodeEntry<GradientSumT>& e = snode_host_[nid];
-      bst_float left_leaf_weight =
-          evaluator.CalcWeight(nid, GradStats<GradientSumT>{e.best.left_sum}) * lr;
-      bst_float right_leaf_weight =
-          evaluator.CalcWeight(nid, GradStats<GradientSumT>{e.best.right_sum}) * lr;
-      p_tree->ExpandNode(nid, e.best.SplitIndex(), e.best.split_value,
-                         e.best.DefaultLeft(), e.weight, left_leaf_weight,
-                         right_leaf_weight, e.best.loss_chg, e.stats.GetHess(),
-                         e.best.left_sum.GetHess(), e.best.right_sum.GetHess());
+  // while (!qexpand_loss_guided_->empty()) {
+  //   const ExpandEntry candidate = qexpand_loss_guided_->top();
+  //   const int nid = candidate.nid;
+  //   qexpand_loss_guided_->pop();
+  //   if (!candidate.IsValid(param_, num_leaves)) {
+  //     (*p_tree)[nid].SetLeaf(snode_host_[nid].weight * lr);
+  //   } else {
+  //     auto evaluator = tree_evaluator_.GetEvaluator();
+  //     NodeEntry<GradientSumT>& e = snode_host_[nid];
+  //     bst_float left_leaf_weight =
+  //         evaluator.CalcWeight(nid, GradStats<GradientSumT>{e.best.left_sum}) * lr;
+  //     bst_float right_leaf_weight =
+  //         evaluator.CalcWeight(nid, GradStats<GradientSumT>{e.best.right_sum}) * lr;
+  //     p_tree->ExpandNode(nid, e.best.SplitIndex(), e.best.split_value,
+  //                        e.best.DefaultLeft(), e.weight, left_leaf_weight,
+  //                        right_leaf_weight, e.best.loss_chg, e.stats.GetHess(),
+  //                        e.best.left_sum.GetHess(), e.best.right_sum.GetHess());
 
-      this->ApplySplit({candidate}, gmat, p_tree);
+  //     this->ApplySplit({candidate}, gmat, p_tree);
 
-      const int cleft = (*p_tree)[nid].LeftChild();
-      const int cright = (*p_tree)[nid].RightChild();
+  //     const int cleft = (*p_tree)[nid].LeftChild();
+  //     const int cright = (*p_tree)[nid].RightChild();
 
-      ExpandEntry left_node(cleft, p_tree->GetDepth(cleft));
-      ExpandEntry right_node(cright, p_tree->GetDepth(cright));
+  //     ExpandEntry left_node(cleft, p_tree->GetDepth(cleft));
+  //     ExpandEntry right_node(cright, p_tree->GetDepth(cright));
 
-      if (row_set_collection_[cleft].Size() < row_set_collection_[cright].Size()) {
-        BuildHistogramsLossGuide(left_node, gmat, p_tree, gpair);
-      } else {
-        BuildHistogramsLossGuide(right_node, gmat, p_tree, gpair);
-      }
+  //     if (row_set_collection_[cleft].Size() < row_set_collection_[cright].Size()) {
+  //       BuildHistogramsLossGuide(left_node, gmat, p_tree, gpair);
+  //     } else {
+  //       BuildHistogramsLossGuide(right_node, gmat, p_tree, gpair);
+  //     }
 
-      this->InitNewNode(cleft, gmat, gpair, *p_tree);
-      this->InitNewNode(cright, gmat, gpair, *p_tree);
-      bst_uint featureid = snode_host_[nid].best.SplitIndex();
-      tree_evaluator_.AddSplit(nid, cleft, cright, featureid,
-                               snode_host_[cleft].weight, snode_host_[cright].weight);
-      interaction_constraints_.Split(nid, featureid, cleft, cright);
+  //     this->InitNewNode(cleft, gmat, gpair, *p_tree);
+  //     this->InitNewNode(cright, gmat, gpair, *p_tree);
+  //     bst_uint featureid = snode_host_[nid].best.SplitIndex();
+  //     tree_evaluator_.AddSplit(nid, cleft, cright, featureid,
+  //                              snode_host_[cleft].weight, snode_host_[cright].weight);
+  //     interaction_constraints_.Split(nid, featureid, cleft, cright);
 
-      this->EvaluateSplits({left_node, right_node}, gmat, *p_tree);
-      left_node.split.loss_chg = snode_host_[cleft].best.loss_chg;
-      right_node.split.loss_chg = snode_host_[cright].best.loss_chg;
+  //     this->EvaluateSplits({left_node, right_node}, gmat, *p_tree);
+  //     left_node.split.loss_chg = snode_host_[cleft].best.loss_chg;
+  //     right_node.split.loss_chg = snode_host_[cright].best.loss_chg;
 
-      qexpand_loss_guided_->push(left_node);
-      qexpand_loss_guided_->push(right_node);
+  //     qexpand_loss_guided_->push(left_node);
+  //     qexpand_loss_guided_->push(right_node);
 
-      ++num_leaves;  // give two and take one, as parent is no longer a leaf
-    }
-  }
+  //     ++num_leaves;  // give two and take one, as parent is no longer a leaf
+  //   }
+  // }
   builder_monitor_.Stop("ExpandWithLossGuide");
 }
 
@@ -338,7 +483,7 @@ void HistUpdater<GradientSumT>::Update(
     const HostDeviceVector<GradientPair>& gpair,
     DMatrix *p_fmat,
     xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
-    RegTree *p_tree) {
+    xgboost::RegTree *p_tree) {
   builder_monitor_.Start("Update");
 
   tree_evaluator_.Reset(qu_, param_, p_fmat->Info().num_col_);
@@ -476,7 +621,7 @@ void HistUpdater<GradientSumT>::InitData(
                                 const common::GHistIndexMatrix& gmat,
                                 const HostDeviceVector<GradientPair>& gpair,
                                 const DMatrix& fmat,
-                                const RegTree& tree) {
+                                const xgboost::RegTree& tree) {
   CHECK((param_.max_depth > 0 || param_.max_leaves > 0))
       << "max_depth or max_leaves cannot be both 0 (unlimited); "
       << "at least one should be a positive quantity.";
@@ -604,13 +749,13 @@ void HistUpdater<GradientSumT>::InitData(
     CHECK_GT(min_nbins_per_feature, 0U);
   }
 
-  std::fill(snode_host_.begin(), snode_host_.end(),  NodeEntry<GradientSumT>(param_));
+  snode_device_.Fill(qu_, NodeEntry<GradientSumT>(param_));
 
   {
     if (param_.grow_policy == xgboost::tree::TrainParam::kLossGuide) {
       qexpand_loss_guided_.reset(new ExpandQueue(LossGuide));
     } else {
-      qexpand_depth_wise_.clear();
+      nid_expand_depth_wise_.clear();
     }
   }
   builder_monitor_.Stop("InitData");
@@ -619,7 +764,7 @@ void HistUpdater<GradientSumT>::InitData(
 template <typename GradientSumT>
 void HistUpdater<GradientSumT>::AddSplitsToRowSet(
                                                 const std::vector<ExpandEntry>& nodes,
-                                                RegTree* p_tree) {
+                                                xgboost::RegTree* p_tree) {
   const size_t n_nodes = nodes.size();
   for (size_t i = 0; i < n_nodes; ++i) {
     const int32_t nid = nodes[i].nid;
@@ -635,7 +780,7 @@ template <typename GradientSumT>
 void HistUpdater<GradientSumT>::ApplySplit(
                       const std::vector<ExpandEntry> nodes,
                       const common::GHistIndexMatrix& gmat,
-                      RegTree* p_tree) {
+                      xgboost::RegTree* p_tree) {
   using CommonRowPartitioner = xgboost::tree::CommonRowPartitioner;
   builder_monitor_.Start("ApplySplit");
 
@@ -665,82 +810,193 @@ void HistUpdater<GradientSumT>::ApplySplit(
   builder_monitor_.Stop("ApplySplit");
 }
 
+// template <typename GradientSumT>
+// void HistUpdater<GradientSumT>::InitNewNode(int nid,
+//                                             const common::GHistIndexMatrix& gmat,
+//                                             const HostDeviceVector<GradientPair>& gpair,
+//                                             const xgboost::RegTree& tree,
+//                                             const std::vector<::sycl::event>& events_in,
+//                                             ::sycl::event* event) {
+//   ::sycl::event event_stats;
+//   if (tree[nid].IsRoot()) {
+//     auto grad_stat = std::make_shared <GradStats<GradientSumT>>();
+//     auto buff = std::make_shared<::sycl::buffer<GradStats<GradientSumT>>>(grad_stat.get(), 1);
+//     ::sycl::event event_add;
+//     if (data_layout_ == kDenseDataZeroBased || data_layout_ == kDenseDataOneBased) {
+//       const std::vector<uint32_t>& row_ptr = gmat.cut.Ptrs();
+//       const uint32_t ibegin = row_ptr[fid_least_bins_];
+//       const uint32_t iend = row_ptr[fid_least_bins_ + 1];
+//       const auto* hist = reinterpret_cast<GradStats<GradientSumT>*>(hist_[nid].Data());
+
+//       event_add = qu_->submit([&, buff](::sycl::handler& cgh) {
+//         cgh.depends_on(events_in);
+//         auto reduction = ::sycl::reduction(*buff, cgh, ::sycl::plus<>());
+//         cgh.parallel_for<>(::sycl::range<1>(iend - ibegin), reduction,
+//                           [=](::sycl::item<1> pid, auto& sum) {
+//           size_t i = pid.get_id(0);
+//           sum += hist[ibegin + i];
+//         });
+//       });
+//     } else {
+//       const common::RowSetCollection::Elem e = row_set_collection_[nid];
+//       const size_t* row_idxs = e.begin;
+//       const size_t size = e.Size();
+//       const GradientPair* gpair_ptr = gpair.ConstDevicePointer();
+
+//       event_add = qu_->submit([&, buff](::sycl::handler& cgh) {
+//         cgh.depends_on(events_in);
+//         auto reduction = ::sycl::reduction(*buff, cgh, ::sycl::plus<>());
+//         cgh.parallel_for<>(::sycl::range<1>(size), reduction,
+//                           [=](::sycl::item<1> pid, auto& sum) {
+//           size_t i = pid.get_id(0);
+//           size_t row_idx = row_idxs[i];
+//           if constexpr (std::is_same<GradientPair::ValueT, GradientSumT>::value) {
+//             sum += gpair_ptr[row_idx];
+//           } else {
+//             sum += GradStats<GradientSumT>(gpair_ptr[row_idx].GetGrad(),
+//                                             gpair_ptr[row_idx].GetHess());
+//           }
+//         });
+//       });
+//     }
+//     event_stats = qu_->submit([&, nid, grad_stat, buff, event_add](::sycl::handler &cgh) {
+//       cgh.depends_on(event_add);
+//       cgh.depends_on(*event);
+//       cgh.host_task([&, nid, grad_stat, buff]() {
+//         ::sycl::host_accessor acc(*buff);
+//         *grad_stat = acc[0];
+
+//         auto rc = collective::Allreduce(
+//                     ctx_, linalg::MakeVec(reinterpret_cast<GradientSumT*>(grad_stat.get()), 2),
+//                     collective::Op::kSum);
+//         SafeColl(rc);
+//         snode_host_[nid].stats = *grad_stat;
+//       });
+//     });
+//   } else {
+//     event_stats = qu_->submit([&, nid](::sycl::handler &cgh) {
+//       cgh.depends_on(*event);
+//       cgh.host_task([&, nid]() {
+//         int parent_id = tree[nid].Parent();
+//         if (tree[nid].IsLeftChild()) {
+//           snode_host_[nid].stats = snode_host_[parent_id].best.left_sum;
+//         } else {
+//           snode_host_[nid].stats = snode_host_[parent_id].best.right_sum;
+//         }
+//       });
+//     });
+//   }
+
+//   // calculating the weights
+//   *event = qu_->submit([&, nid, event_stats](::sycl::handler &cgh) {
+//     cgh.depends_on(event_stats);
+//     cgh.host_task([&, nid]() {
+//       auto evaluator = tree_evaluator_.GetEvaluator();
+//       bst_uint parentid = tree[nid].Parent();
+//       snode_host_[nid].weight = evaluator.CalcWeight(parentid, snode_host_[nid].stats);
+//       snode_host_[nid].root_gain = evaluator.CalcGain(parentid, snode_host_[nid].stats);
+//     });
+//   });
+// }
+
 template <typename GradientSumT>
-void HistUpdater<GradientSumT>::InitNewNode(int nid,
-                                            const common::GHistIndexMatrix& gmat,
-                                            const HostDeviceVector<GradientPair>& gpair,
-                                            const RegTree& tree) {
-  builder_monitor_.Start("InitNewNode");
+::sycl::event HistUpdater<GradientSumT>::InitNewRootNode(
+                                                int nid,
+                                                const common::GHistIndexMatrix& gmat,
+                                                const HostDeviceVector<GradientPair>& gpair,
+                                                const std::vector<::sycl::event>& events_in) {
+  ::sycl::buffer<GradStats<GradientSumT>> buff(&snode_device_[nid].stats, 1);
+  ::sycl::event event;
+  if (data_layout_ == kDenseDataZeroBased || data_layout_ == kDenseDataOneBased) {
+    const std::vector<uint32_t>& row_ptr = gmat.cut.Ptrs();
+    const uint32_t ibegin = row_ptr[fid_least_bins_];
+    const uint32_t iend = row_ptr[fid_least_bins_ + 1];
+    const auto* hist = reinterpret_cast<GradStats<GradientSumT>*>(hist_[nid].Data());
 
-  snode_host_.resize(tree.NumNodes(), NodeEntry<GradientSumT>(param_));
-  {
-    if (tree[nid].IsRoot()) {
-      GradStats<GradientSumT> grad_stat;
-      if (data_layout_ == kDenseDataZeroBased || data_layout_ == kDenseDataOneBased) {
-        const std::vector<uint32_t>& row_ptr = gmat.cut.Ptrs();
-        const uint32_t ibegin = row_ptr[fid_least_bins_];
-        const uint32_t iend = row_ptr[fid_least_bins_ + 1];
-        const auto* hist = reinterpret_cast<GradStats<GradientSumT>*>(hist_[nid].Data());
+     event = qu_->submit([&](::sycl::handler& cgh) {
+      cgh.depends_on(events_in);
+      auto reduction = ::sycl::reduction(buff, cgh, ::sycl::plus<>());
+      cgh.parallel_for<>(::sycl::range<1>(iend - ibegin), reduction,
+                        [=](::sycl::item<1> pid, auto& sum) {
+        size_t i = pid.get_id(0);
+        sum += hist[ibegin + i];
+      });
+    });
+  } else {
+    const common::RowSetCollection::Elem e = row_set_collection_[nid];
+    const size_t* row_idxs = e.begin;
+    const size_t size = e.Size();
+    const GradientPair* gpair_ptr = gpair.ConstDevicePointer();
 
-        std::vector<GradStats<GradientSumT>> ets(iend - ibegin);
-        qu_->memcpy(ets.data(), hist + ibegin,
-                   (iend - ibegin) * sizeof(GradStats<GradientSumT>)).wait_and_throw();
-        for (const auto& et : ets) {
-          grad_stat += et;
+    event = qu_->submit([&](::sycl::handler& cgh) {
+      cgh.depends_on(events_in);
+      auto reduction = ::sycl::reduction(buff, cgh, ::sycl::plus<>());
+      cgh.parallel_for<>(::sycl::range<1>(size), reduction,
+                        [=](::sycl::item<1> pid, auto& sum) {
+        size_t i = pid.get_id(0);
+        size_t row_idx = row_idxs[i];
+        if constexpr (std::is_same<GradientPair::ValueT, GradientSumT>::value) {
+          sum += gpair_ptr[row_idx];
+        } else {
+          sum += GradStats<GradientSumT>(gpair_ptr[row_idx].GetGrad(),
+                                         gpair_ptr[row_idx].GetHess());
         }
-      } else {
-        const common::RowSetCollection::Elem e = row_set_collection_[nid];
-        const size_t* row_idxs = e.begin;
-        const size_t size = e.Size();
-        const GradientPair* gpair_ptr = gpair.ConstDevicePointer();
-
-        ::sycl::buffer<GradStats<GradientSumT>> buff(&grad_stat, 1);
-        qu_->submit([&](::sycl::handler& cgh) {
-          auto reduction = ::sycl::reduction(buff, cgh, ::sycl::plus<>());
-          cgh.parallel_for<>(::sycl::range<1>(size), reduction,
-                            [=](::sycl::item<1> pid, auto& sum) {
-            size_t i = pid.get_id(0);
-            size_t row_idx = row_idxs[i];
-            if constexpr (std::is_same<GradientPair::ValueT, GradientSumT>::value) {
-              sum += gpair_ptr[row_idx];
-            } else {
-              sum += GradStats<GradientSumT>(gpair_ptr[row_idx].GetGrad(),
-                                             gpair_ptr[row_idx].GetHess());
-            }
-          });
-        }).wait_and_throw();
-      }
-      auto rc = collective::Allreduce(
-                      ctx_, linalg::MakeVec(reinterpret_cast<GradientSumT*>(&grad_stat), 2),
-                      collective::Op::kSum);
-      SafeColl(rc);
-      snode_host_[nid].stats = grad_stat;
-    } else {
-      int parent_id = tree[nid].Parent();
-      if (tree[nid].IsLeftChild()) {
-        snode_host_[nid].stats = snode_host_[parent_id].best.left_sum;
-      } else {
-        snode_host_[nid].stats = snode_host_[parent_id].best.right_sum;
-      }
-    }
+      });
+    });
   }
 
-  // calculating the weights
-  {
-    auto evaluator = tree_evaluator_.GetEvaluator();
-    bst_uint parentid = tree[nid].Parent();
-    snode_host_[nid].weight = evaluator.CalcWeight(parentid, snode_host_[nid].stats);
-    snode_host_[nid].root_gain = evaluator.CalcGain(parentid, snode_host_[nid].stats);
+  if (collective::IsDistributed()) {
+    ::sycl::host_accessor host_acc(buff, ::sycl::read_write);
+    auto rc = collective::Allreduce(
+                ctx_, linalg::MakeVec(reinterpret_cast<GradientSumT*>(&host_acc[0]), 2),
+                collective::Op::kSum);
+    SafeColl(rc);
   }
-  builder_monitor_.Stop("InitNewNode");
+  return event;
 }
+
+
+// template <typename GradientSumT>
+// void HistUpdater<GradientSumT>::InitNewNode(int nid,
+//                                             const common::GHistIndexMatrix& gmat,
+//                                             const HostDeviceVector<GradientPair>& gpair,
+//                                             const xgboost::RegTree& tree,
+//                                             const std::vector<::sycl::event>& events_in,
+//                                             ::sycl::event* event) {
+//   int is_root = tree[nid].IsRoot();
+//   ::sycl::event event_init_root;
+//   if (is_root) {
+//     event_init_root = InitNewRootNode(nid, gmat, gpair, events_in);
+//   }
+  
+//   int parent_id = tree[nid].Parent();
+//   int is_left_child = tree[nid].IsLeftChild();
+//   auto evaluator = tree_evaluator_.GetEvaluator();
+//   auto* snode_ptr = snode_device_.Data();
+//   *event = qu_->submit([&, nid, is_root, is_left_child, event_init_root](::sycl::handler& cgh) {
+//     cgh.depends_on(events_in);
+//     cgh.depends_on(event_init_root);
+//     cgh.single_task<>([=]() {
+//       if (!is_root) {
+//         if (is_left_child) {
+//           snode_ptr[nid].stats = snode_ptr[parent_id].best.left_sum;
+//         } else {
+//           snode_ptr[nid].stats = snode_ptr[parent_id].best.right_sum;
+//         }
+//       }
+//       snode_ptr[nid].weight = evaluator.CalcWeight(parent_id, snode_ptr[nid].stats);
+//       snode_ptr[nid].root_gain = evaluator.CalcGain(parent_id, snode_ptr[nid].stats);
+//     });
+//   });
+// }
 
 // nodes_set - set of nodes to be processed in parallel
 template<typename GradientSumT>
-void HistUpdater<GradientSumT>::EvaluateSplits(
-                        const std::vector<ExpandEntry>& nodes_set,
+::sycl::event HistUpdater<GradientSumT>::EvaluateSplits(
+                        const std::vector<int>& nodes_set,
+                        const USMVector<int, MemoryType::on_device> nodes_set_device,
                         const common::GHistIndexMatrix& gmat,
-                        const RegTree& tree) {
+                        const xgboost::RegTree& tree, const ::sycl::event& event_in) {
   builder_monitor_.Start("EvaluateSplits");
 
   const size_t n_nodes_in_set = nodes_set.size();
@@ -750,7 +1006,7 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
   // Generate feature set for each tree node
   size_t pos = 0;
   for (size_t nid_in_set = 0; nid_in_set < n_nodes_in_set; ++nid_in_set) {
-    const bst_node_t nid = nodes_set[nid_in_set].nid;
+    const bst_node_t nid = nodes_set[nid_in_set];
     FeatureSetType features_set = column_sampler_->GetFeatureSet(tree.GetDepth(nid));
     for (size_t idx = 0; idx < features_set->Size(); idx++) {
       const size_t fid = features_set->ConstHostVector()[idx];
@@ -767,24 +1023,21 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
   }
   const size_t total_features = pos;
 
-  split_queries_device_.Resize(qu_, total_features);
+  split_queries_device_.ResizeNoCopy(qu_, total_features);
   auto event = qu_->memcpy(split_queries_device_.Data(), split_queries_host_.data(),
-                          total_features * sizeof(SplitQuery));
+                          total_features * sizeof(SplitQuery), event_in);
+
 
   auto evaluator = tree_evaluator_.GetEvaluator();
   SplitQuery* split_queries_device = split_queries_device_.Data();
   const uint32_t* cut_ptr = gmat.cut.cut_ptrs_.ConstDevicePointer();
   const bst_float* cut_val = gmat.cut.cut_values_.ConstDevicePointer();
 
-  snode_device_.ResizeNoCopy(qu_, snode_host_.size());
-  event = qu_->memcpy(snode_device_.Data(), snode_host_.data(),
-                     snode_host_.size() * sizeof(NodeEntry<GradientSumT>), event);
-  const NodeEntry<GradientSumT>* snode = snode_device_.Data();
+  NodeEntry<GradientSumT>* snode = snode_device_.Data();
 
   const float min_child_weight = param_.min_child_weight;
 
   best_splits_device_.ResizeNoCopy(qu_, total_features);
-  if (best_splits_host_.size() < total_features) best_splits_host_.resize(total_features);
   SplitEntry<GradientSumT>* best_splits = best_splits_device_.Data();
 
   event = qu_->submit([&](::sycl::handler& cgh) {
@@ -800,19 +1053,47 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
 
       best_splits[i] = snode[nid].best;
       EnumerateSplit(sg, cut_ptr, cut_val, hist_data, snode[nid],
-                     &(best_splits[i]), fid, nid, evaluator, min_child_weight);
+                     best_splits + i, fid, nid, evaluator, min_child_weight);
+
     });
   });
-  event = qu_->memcpy(best_splits_host_.data(), best_splits,
-                     total_features * sizeof(SplitEntry<GradientSumT>), event);
 
-  qu_->wait();
-  for (size_t i = 0; i < total_features; i++) {
-    int nid = split_queries_host_[i].nid;
-    snode_host_[nid].best.Update(best_splits_host_[i]);
-  }
+  const int* nodes_set_device_ptr = nodes_set_device.DataConst();
+  const size_t max_work_group_size =
+    qu_->get_device().get_info<::sycl::info::device::max_work_group_size>();
+  const size_t work_group_size = max_work_group_size;
+
+  event = qu_->submit([&](::sycl::handler& cgh) {
+    cgh.depends_on(event);
+    auto slm = ::sycl::local_accessor<SplitEntry<GradientSumT>, 1>(work_group_size, cgh);
+    cgh.parallel_for<>(::sycl::nd_range<1>(n_nodes_in_set * work_group_size, work_group_size),
+                                       [=](::sycl::nd_item<1> item) {
+      auto group = item.get_group();
+      const int feat = item.get_local_id(0);
+      int nid = nodes_set_device_ptr[group.get_group_id(0)];
+      
+      slm[feat] = snode[nid].best;
+      for (size_t j = feat; j < total_features; j += work_group_size) {
+        if (split_queries_device[j].nid == nid) {
+          slm[feat].Update(best_splits[j]);
+        }
+      }
+
+      item.barrier(::sycl::access::fence_space::local_space);
+      for (int stride = work_group_size / 2; stride > 0; stride /= 2) {
+        if (feat < stride) {
+          slm[feat].Update(slm[feat + stride]);
+        }
+        item.barrier(::sycl::access::fence_space::local_space);
+      }
+      if (feat == 0) {
+        snode[nid].best.Update(slm[0]);
+      }
+    });
+  });
 
   builder_monitor_.Stop("EvaluateSplits");
+  return event;
 }
 
 // Enumerate the split values of specific feature.

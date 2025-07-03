@@ -32,6 +32,12 @@ using AtomicRef = ::sycl::atomic_ref<T,
                                     ::sycl::memory_scope::device,
                                     ::sycl::access::address_space::ext_intel_global_device_space>;
 
+template <typename T>
+using LocalAtomicRef = ::sycl::atomic_ref<T,
+                                    ::sycl::memory_order::relaxed,
+                                    ::sycl::memory_scope::work_group,
+                                    ::sycl::access::address_space::local_space>;
+
 enum class MemoryType { shared, on_device};
 
 template <typename T>
@@ -185,6 +191,22 @@ class USMVector {
         *event = qu->memcpy(data_.get(), data_old.get(), sizeof(T) * size_old, *event);
       }
       *event = qu->fill(data_.get() + size_old, v, size_new - size_old, *event);
+    }
+  }
+
+  void Resize(::sycl::queue* qu, size_t size_new, const std::vector<::sycl::event>& events_in,
+              ::sycl::event* event_out) {
+    if (size_new <= capacity_) {
+      size_ = size_new;
+    } else {
+      size_t size_old = size_;
+      auto data_old = data_;
+      size_ = size_new;
+      capacity_ = size_new;
+      data_ = allocate_memory_(qu, size_);
+      if (size_old > 0) {
+        *event_out = qu->memcpy(data_.get(), data_old.get(), sizeof(T) * size_old, events_in);
+      }
     }
   }
 

@@ -40,9 +40,9 @@ class TestHistUpdater : public HistUpdater<GradientSumT> {
 
   const auto* TestBuildHistogramsLossGuide(ExpandEntry entry,
                                     const common::GHistIndexMatrix &gmat,
-                                    RegTree *p_tree,
+                                    const RegTree& tree,
                                     const HostDeviceVector<GradientPair>& gpair) {
-    HistUpdater<GradientSumT>::BuildHistogramsLossGuide(entry, gmat, p_tree, gpair);
+    HistUpdater<GradientSumT>::BuildHistogramsLossGuide(entry, gmat, tree, gpair);
     return &(HistUpdater<GradientSumT>::hist_);
   }
 
@@ -50,7 +50,8 @@ class TestHistUpdater : public HistUpdater<GradientSumT> {
                        const common::GHistIndexMatrix& gmat,
                        const HostDeviceVector<GradientPair>& gpair,
                        const RegTree& tree) {
-    HistUpdater<GradientSumT>::InitNewNode(nid, gmat, gpair, tree);
+    LOG(FATAL) << "Broken";
+    // HistUpdater<GradientSumT>::InitNewNode(nid, gmat, gpair, tree);
     return HistUpdater<GradientSumT>::snode_host_[nid];
   }
 
@@ -237,8 +238,8 @@ void TestHistUpdaterBuildHistogramsLossGuide(const xgboost::tree::TrainParam& pa
   auto* row_set_collection = updater.TestInitData(gmat, gpair, *p_fmat, tree);
   row_set_collection->AddSplit(0, 1, 2, 42, num_rows - 42);
 
-  updater.TestBuildHistogramsLossGuide(node0, gmat, &tree, gpair);
-  const auto* hist = updater.TestBuildHistogramsLossGuide(node1, gmat, &tree, gpair);
+  updater.TestBuildHistogramsLossGuide(node0, gmat, tree, gpair);
+  const auto* hist = updater.TestBuildHistogramsLossGuide(node1, gmat, tree, gpair);
 
   ASSERT_EQ((*hist)[0].Size(), n_bins);
   ASSERT_EQ((*hist)[1].Size(), n_bins);
@@ -292,7 +293,7 @@ void TestHistUpdaterInitNewNode(const xgboost::tree::TrainParam& param, float sp
   auto* row_set_collection = updater.TestInitData(gmat, gpair, *p_fmat, tree);
   auto& row_idxs = row_set_collection->Data();
   const size_t* row_idxs_ptr = row_idxs.DataConst();
-  updater.TestBuildHistogramsLossGuide(node, gmat, &tree, gpair);
+  updater.TestBuildHistogramsLossGuide(node, gmat, tree, gpair);
   const auto snode = updater.TestInitNewNode(ExpandEntry::kRootNid, gmat, gpair, tree);
 
   GradStats<GradientSumT> grad_stat;
@@ -348,7 +349,7 @@ void TestHistUpdaterEvaluateSplits(const xgboost::tree::TrainParam& param) {
   auto* row_set_collection = updater.TestInitData(gmat, gpair, *p_fmat, tree);
   auto& row_idxs = row_set_collection->Data();
   const size_t* row_idxs_ptr = row_idxs.DataConst();
-  const auto* hist = updater.TestBuildHistogramsLossGuide(node, gmat, &tree, gpair);
+  const auto* hist = updater.TestBuildHistogramsLossGuide(node, gmat, tree, gpair);
   const auto snode_init = updater.TestInitNewNode(ExpandEntry::kRootNid, gmat, gpair, tree);
 
   const auto snode_updated = updater.TestEvaluateSplits({node}, gmat, tree);

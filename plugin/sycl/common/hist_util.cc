@@ -19,17 +19,18 @@ namespace common {
  * \brief Fill histogram with zeroes
  */
 template<typename GradientSumT>
-void InitHist(::sycl::queue* qu, GHistRow<GradientSumT, MemoryType::on_device>* hist,
-              size_t size, ::sycl::event* event) {
-  *event = qu->fill(hist->Begin(),
-                   xgboost::detail::GradientPairInternal<GradientSumT>(), size, *event);
+::sycl::event InitHist(::sycl::queue* qu,
+                       GHistRow<GradientSumT, MemoryType::on_device>* hist,
+                       size_t size, ::sycl::event event_in) {
+  return qu->fill(hist->Begin(),
+                  xgboost::detail::GradientPairInternal<GradientSumT>(), size, event_in);
 }
-template void InitHist(::sycl::queue* qu,
-                       GHistRow<float,  MemoryType::on_device>* hist,
-                       size_t size, ::sycl::event* event);
-template void InitHist(::sycl::queue* qu,
-                       GHistRow<double, MemoryType::on_device>* hist,
-                       size_t size, ::sycl::event* event);
+template ::sycl::event InitHist(::sycl::queue* qu,
+                                GHistRow<float,  MemoryType::on_device>* hist,
+                                size_t size, ::sycl::event event_in);
+template ::sycl::event InitHist(::sycl::queue* qu,
+                                GHistRow<double, MemoryType::on_device>* hist,
+                                size_t size, ::sycl::event event_in);
 
 /*!
  * \brief Copy histogram from src to dst
@@ -66,13 +67,13 @@ template<typename GradientSumT>
                             GHistRow<GradientSumT, MemoryType::on_device>* dst,
                             const GHistRow<GradientSumT, MemoryType::on_device>& src1,
                             const GHistRow<GradientSumT, MemoryType::on_device>& src2,
-                            size_t size, ::sycl::event event_priv) {
+                            size_t size, const std::vector<::sycl::event>& events_in) {
   GradientSumT* pdst = reinterpret_cast<GradientSumT*>(dst->Data());
   const GradientSumT* psrc1 = reinterpret_cast<const GradientSumT*>(src1.DataConst());
   const GradientSumT* psrc2 = reinterpret_cast<const GradientSumT*>(src2.DataConst());
 
   auto event_final = qu->submit([&](::sycl::handler& cgh) {
-    cgh.depends_on(event_priv);
+    cgh.depends_on(events_in);
     cgh.parallel_for<>(::sycl::range<1>(2 * size), [pdst, psrc1, psrc2](::sycl::item<1> pid) {
       const size_t i = pid.get_id(0);
       pdst[i] = psrc1[i] - psrc2[i];
@@ -84,12 +85,12 @@ template ::sycl::event SubtractionHist(::sycl::queue* qu,
                               GHistRow<float, MemoryType::on_device>* dst,
                               const GHistRow<float, MemoryType::on_device>& src1,
                               const GHistRow<float, MemoryType::on_device>& src2,
-                              size_t size, ::sycl::event event_priv);
+                              size_t size, const std::vector<::sycl::event>& events_in);
 template ::sycl::event SubtractionHist(::sycl::queue* qu,
                               GHistRow<double, MemoryType::on_device>* dst,
                               const GHistRow<double, MemoryType::on_device>& src1,
                               const GHistRow<double, MemoryType::on_device>& src2,
-                              size_t size, ::sycl::event event_priv);
+                              size_t size, const std::vector<::sycl::event>& events_in);
 
 inline auto GetBlocksParameters(::sycl::queue* qu, size_t size, size_t max_nblocks) {
   struct _ {
@@ -123,7 +124,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
                             const GHistIndexMatrix& gmat,
                             GHistRow<FPType, MemoryType::on_device>* hist,
                             GHistRow<FPType, MemoryType::on_device>* hist_buffer,
-                            ::sycl::event event_priv) {
+                            const std::vector<::sycl::event>& events_in) {
   using GradientPairT = xgboost::detail::GradientPairInternal<FPType>;
   const size_t size = row_indices.Size();
   const size_t* rid = row_indices.begin;
@@ -144,7 +145,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
 
   GradientPairT* hist_buffer_data = hist_buffer->Data();
   auto event_fill = qu->fill(hist_buffer_data, GradientPairT(0, 0),
-                             nblocks * nbins * 2, event_priv);
+                             nblocks * nbins * 2, events_in);
   auto event_main = qu->submit([&](::sycl::handler& cgh) {
     cgh.depends_on(event_fill);
     cgh.parallel_for<>(::sycl::nd_range<2>(::sycl::range<2>(nblocks, work_group_size),
@@ -203,7 +204,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
                             const RowSetCollection::Elem& row_indices,
                             const GHistIndexMatrix& gmat,
                             GHistRow<FPType, MemoryType::on_device>* hist,
-                            ::sycl::event event_priv) {
+                            ::sycl::event event_in) {
   const size_t size = row_indices.Size();
   const size_t* rid = row_indices.begin;
   const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
@@ -217,7 +218,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
   constexpr size_t work_group_size = 32;
   const size_t n_work_groups = n_columns / work_group_size + (n_columns % work_group_size > 0);
 
-  auto event_fill = qu->fill(hist_data, FPType(0), nbins * 2, event_priv);
+  auto event_fill = qu->fill(hist_data, FPType(0), nbins * 2, event_in);
   auto event_main = qu->submit([&](::sycl::handler& cgh) {
     cgh.depends_on(event_fill);
     cgh.parallel_for<>(::sycl::nd_range<2>(::sycl::range<2>(size, n_work_groups * work_group_size),
@@ -251,6 +252,75 @@ template<typename FPType, typename BinIdxType, bool isDense>
   return event_main;
 }
 
+// Kernel with atomic using
+template<typename FPType, typename BinIdxType, bool isDense>
+::sycl::event BuildHistKernel0(::sycl::queue* qu,
+                            const HostDeviceVector<GradientPair>& gpair,
+                            const RowSetCollection::Elem& row_indices,
+                            const GHistIndexMatrix& gmat,
+                            GHistRow<FPType, MemoryType::on_device>* hist,
+                            ::sycl::event event_in) {
+  const size_t size = row_indices.Size();
+  const size_t* rid = row_indices.begin;
+  const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
+  const GradientPair::ValueT* pgh =
+    reinterpret_cast<const GradientPair::ValueT*>(gpair.ConstDevicePointer());
+  const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
+  const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
+  FPType* hist_data = reinterpret_cast<FPType*>(hist->Data());
+  const size_t nbins = gmat.nbins;
+
+  constexpr size_t work_group_size = 32;
+  const size_t n_work_groups = (size + work_group_size - 1) / work_group_size;
+  const size_t global_size = n_work_groups * work_group_size;
+
+  auto event_fill = qu->fill(hist_data, FPType(0), nbins * 2, event_in);
+  auto event_main = qu->submit([&](::sycl::handler& cgh) {
+    cgh.depends_on(event_fill);
+
+    ::sycl::local_accessor<FPType, 1> local_hist(::sycl::range<1>(nbins * 2), cgh);
+    cgh.parallel_for<>(::sycl::nd_range<1>(global_size, work_group_size),
+                       [=](::sycl::nd_item<1> item) {
+      const int local_id = item.get_local_id(0);
+      const int group_size = item.get_local_range(0);
+
+      for (size_t i = local_id; i < nbins * 2; i += group_size) {
+        local_hist[i] = 0.0;
+      }
+      item.barrier(::sycl::access::fence_space::local_space);
+
+      for (size_t i = item.get_global_id(0); i < size; i += item.get_global_range(0)) {
+        const size_t icol_start = n_columns * rid[i];
+        const size_t idx_gh = rid[i];
+        const FPType pgh_row[2] = {pgh[2 * idx_gh], pgh[2 * idx_gh + 1]};
+        const BinIdxType* gr_index_local = gradient_index + icol_start;
+        for (size_t j = 0; j < n_columns; ++j) {
+          uint32_t idx_bin = static_cast<uint32_t>(gr_index_local[j]);
+          if constexpr (isDense) {
+            idx_bin += offsets[j];
+          }
+          if (idx_bin < nbins) {
+            LocalAtomicRef<FPType> gsum(local_hist[2 * idx_bin]);
+            LocalAtomicRef<FPType> hsum(local_hist[2 * idx_bin+1]);
+            gsum += pgh_row[0];
+            hsum += pgh_row[1];
+          }
+        }
+      }
+
+      item.barrier(::sycl::access::fence_space::local_space);
+
+      for (size_t i = local_id; i < nbins; i += group_size) {
+        AtomicRef<FPType> gsum(hist_data[2 * i]);
+        AtomicRef<FPType> hsum(hist_data[2 * i + 1]);
+        gsum += local_hist[2 * i];
+        hsum += local_hist[2 * i + 1];
+      }
+    });
+  });
+  return event_main;
+}
+
 template<typename FPType, typename BinIdxType>
 ::sycl::event BuildHistDispatchKernel(
                 ::sycl::queue* qu,
@@ -260,7 +330,8 @@ template<typename FPType, typename BinIdxType>
                 GHistRow<FPType, MemoryType::on_device>* hist,
                 bool isDense,
                 GHistRow<FPType, MemoryType::on_device>* hist_buffer,
-                ::sycl::event events_priv,
+                ::sycl::event event_in,
+                std::vector<::sycl::event>* events_buffer,
                 bool force_atomic_use) {
   const size_t size = row_indices.Size();
   const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
@@ -272,22 +343,26 @@ template<typename FPType, typename BinIdxType>
   // force_atomic_use flag is used only for testing
   use_atomic = use_atomic || force_atomic_use;
   if (!use_atomic) {
+    ::sycl::event event_out;
+    events_buffer->push_back(event_in);
     if (isDense) {
-      return BuildHistKernel<FPType, BinIdxType, true>(qu, gpair, row_indices,
-                                                       gmat, hist, hist_buffer,
-                                                       events_priv);
+      event_out = BuildHistKernel<FPType, BinIdxType, true>(qu, gpair, row_indices,
+                                                            gmat, hist, hist_buffer,
+                                                            *events_buffer);
     } else {
-      return BuildHistKernel<FPType, uint32_t, false>(qu, gpair, row_indices,
-                                                      gmat, hist, hist_buffer,
-                                                      events_priv);
+      event_out = BuildHistKernel<FPType, uint32_t, false>(qu, gpair, row_indices,
+                                                           gmat, hist, hist_buffer,
+                                                           *events_buffer);
     }
+    events_buffer->back() = event_out;
+    return event_out;
   } else {
     if (isDense) {
       return BuildHistKernel<FPType, BinIdxType, true>(qu, gpair, row_indices,
-                                                       gmat, hist, events_priv);
+                                                       gmat, hist, event_in);
     } else {
       return BuildHistKernel<FPType, uint32_t, false>(qu, gpair, row_indices,
-                                                      gmat, hist, events_priv);
+                                                      gmat, hist, event_in);
     }
   }
 }
@@ -299,24 +374,25 @@ template<typename FPType>
                             const GHistIndexMatrix& gmat, const bool isDense,
                             GHistRow<FPType, MemoryType::on_device>* hist,
                             GHistRow<FPType, MemoryType::on_device>* hist_buffer,
-                            ::sycl::event event_priv,
+                            ::sycl::event event_in,
+                            std::vector<::sycl::event>* events_buffer,
                             bool force_atomic_use) {
   const bool is_dense = isDense;
   switch (gmat.index.GetBinTypeSize()) {
     case BinTypeSize::kUint8BinsTypeSize:
       return BuildHistDispatchKernel<FPType, uint8_t>(qu, gpair, row_indices,
                                                       gmat, hist, is_dense, hist_buffer,
-                                                      event_priv, force_atomic_use);
+                                                      event_in, events_buffer, force_atomic_use);
       break;
     case BinTypeSize::kUint16BinsTypeSize:
       return BuildHistDispatchKernel<FPType, uint16_t>(qu, gpair, row_indices,
                                                        gmat, hist, is_dense, hist_buffer,
-                                                       event_priv, force_atomic_use);
+                                                       event_in, events_buffer, force_atomic_use);
       break;
     case BinTypeSize::kUint32BinsTypeSize:
       return BuildHistDispatchKernel<FPType, uint32_t>(qu, gpair, row_indices,
                                                        gmat, hist, is_dense, hist_buffer,
-                                                       event_priv, force_atomic_use);
+                                                       event_in, events_buffer, force_atomic_use);
       break;
     default:
       CHECK(false);  // no default behavior
@@ -331,10 +407,11 @@ template <typename GradientSumT>
               GHistRowT<MemoryType::on_device>* hist,
               bool isDense,
               GHistRowT<MemoryType::on_device>* hist_buffer,
-              ::sycl::event event_priv,
+              ::sycl::event event_in,
+              std::vector<::sycl::event>* events_buffer,
               bool force_atomic_use) {
   return BuildHistKernel<GradientSumT>(qu_, gpair, row_indices, gmat,
-                                       isDense, hist, hist_buffer, event_priv,
+                                       isDense, hist, hist_buffer, event_in, events_buffer,
                                        force_atomic_use);
 }
 
@@ -346,7 +423,8 @@ template
               GHistRow<float, MemoryType::on_device>* hist,
               bool isDense,
               GHistRow<float, MemoryType::on_device>* hist_buffer,
-              ::sycl::event event_priv,
+              ::sycl::event event_in,
+              std::vector<::sycl::event>* events_buffer,
               bool force_atomic_use);
 template
 ::sycl::event GHistBuilder<double>::BuildHist(
@@ -356,27 +434,10 @@ template
               GHistRow<double, MemoryType::on_device>* hist,
               bool isDense,
               GHistRow<double, MemoryType::on_device>* hist_buffer,
-              ::sycl::event event_priv,
+              ::sycl::event event_in,
+              std::vector<::sycl::event>* events_buffer,
               bool force_atomic_use);
 
-template<typename GradientSumT>
-void GHistBuilder<GradientSumT>::SubtractionTrick(GHistRowT<MemoryType::on_device>* self,
-                                                  const GHistRowT<MemoryType::on_device>& sibling,
-                                                  const GHistRowT<MemoryType::on_device>& parent) {
-  const size_t size = self->Size();
-  CHECK_EQ(sibling.Size(), size);
-  CHECK_EQ(parent.Size(), size);
-
-  SubtractionHist(qu_, self, parent, sibling, size, ::sycl::event());
-}
-template
-void GHistBuilder<float>::SubtractionTrick(GHistRow<float, MemoryType::on_device>* self,
-                                           const GHistRow<float, MemoryType::on_device>& sibling,
-                                           const GHistRow<float, MemoryType::on_device>& parent);
-template
-void GHistBuilder<double>::SubtractionTrick(GHistRow<double, MemoryType::on_device>* self,
-                                            const GHistRow<double, MemoryType::on_device>& sibling,
-                                            const GHistRow<double, MemoryType::on_device>& parent);
 }  // namespace common
 }  // namespace sycl
 }  // namespace xgboost
