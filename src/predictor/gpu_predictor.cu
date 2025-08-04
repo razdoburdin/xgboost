@@ -22,7 +22,6 @@
 #include "../data/device_adapter.cuh"
 #include "../data/ellpack_page.cuh"
 #include "../data/proxy_dmatrix.h"
-#include "../encoder/ordinal.cuh"  // for CudaCategoryRecoder
 #include "../gbm/gbtree_model.h"
 #include "predict_fn.h"
 #include "xgboost/data.h"
@@ -892,17 +891,7 @@ class ColumnSplitHelper {
   Context const* ctx_;
 };
 
-auto MakeCatAccessor(Context const* ctx, enc::DeviceColumnsView const& new_enc,
-                     DeviceModel const& model) {
-  dh::DeviceUVector<std::int32_t> mapping(new_enc.n_total_cats);
-  auto d_sorted_idx = model.cat_enc->RefSortedIndex(ctx);
-  auto orig_enc = model.cat_enc->DeviceView(ctx);
-  enc::Recode(cuda_impl::EncPolicy, orig_enc, d_sorted_idx, new_enc, dh::ToSpan(mapping));
-  CHECK_EQ(new_enc.feature_segments.size(), orig_enc.feature_segments.size());
-  auto cats_mapping = enc::MappingView{new_enc.feature_segments, dh::ToSpan(mapping)};
-  auto acc = CatAccessor{cats_mapping};
-  return std::tuple{acc, std::move(mapping)};
-}
+using cuda_impl::MakeCatAccessor;
 
 template <typename EncAccessor>
 struct ShapSparsePageView {
@@ -924,7 +913,7 @@ void LaunchPredictKernel(Context const* ctx, bool is_dense, enc::DeviceColumnsVi
   if (is_dense) {
     auto is_dense = std::true_type{};
     if (model.cat_enc->HasCategorical() && new_enc.HasCategorical()) {
-      auto [acc, mapping] = MakeCatAccessor(ctx, new_enc, model);
+      auto [acc, mapping] = MakeCatAccessor(ctx, new_enc, model.cat_enc);
       launch(is_dense, std::move(acc));
     } else {
       launch(is_dense, NoOpAccessor{});
@@ -932,7 +921,7 @@ void LaunchPredictKernel(Context const* ctx, bool is_dense, enc::DeviceColumnsVi
   } else {
     auto is_dense = std::false_type{};
     if (model.cat_enc->HasCategorical() && new_enc.HasCategorical()) {
-      auto [acc, mapping] = MakeCatAccessor(ctx, new_enc, model);
+      auto [acc, mapping] = MakeCatAccessor(ctx, new_enc, model.cat_enc);
       launch(is_dense, std::move(acc));
     } else {
       launch(is_dense, NoOpAccessor{});
@@ -1033,7 +1022,7 @@ template <typename Kernel>
 void LaunchShapKernel(Context const* ctx, enc::DeviceColumnsView const& new_enc,
                       DeviceModel const& model, Kernel launch) {
   if (model.cat_enc->HasCategorical() && new_enc.HasCategorical()) {
-    auto [acc, mapping] = MakeCatAccessor(ctx, new_enc, model);
+    auto [acc, mapping] = MakeCatAccessor(ctx, new_enc, model.cat_enc);
     launch(std::move(acc));
   } else {
     launch(NoOpAccessor{});
@@ -1060,7 +1049,9 @@ class GPUPredictor : public xgboost::Predictor {
     }
 
     CHECK_LE(p_fmat->Info().num_col_, model.learner_model_param->num_feature);
-    auto new_enc = p_fmat->Cats()->DeviceView(ctx_);
+    auto new_enc =
+        p_fmat->Cats()->NeedRecode() ? p_fmat->Cats()->DeviceView(ctx_) : enc::DeviceColumnsView{};
+
     if (p_fmat->PageExists<SparsePage>()) {
       bst_idx_t batch_offset = 0;
       for (auto& page : p_fmat->GetBatches<SparsePage>()) {
@@ -1152,10 +1143,7 @@ class GPUPredictor : public xgboost::Predictor {
 
     if constexpr (std::is_same_v<Adapter, data::CudfAdapter>) {
       if (m->HasCategorical()) {
-        // FIXME(jiamingy): Remove this container construction once cuDF can return device
-        // arrow.
-        auto container = std::make_shared<CatContainer>(m->Device(), m->Cats());
-        auto new_enc = container->DeviceView(this->ctx_);
+        auto new_enc = m->DCats();
         cfg.LaunchPredict<PartialLoader<BatchT>::template Type>(
             this->ctx_, m->Value(), missing, n_samples, n_features, d_model, false, new_enc, 0,
             &out_preds->predictions);
@@ -1222,7 +1210,8 @@ class GPUPredictor : public xgboost::Predictor {
     dh::device_vector<gpu_treeshap::PathElement<ShapSplitCondition>> device_paths;
     DeviceModel d_model;
     d_model.Init(model, 0, tree_end, ctx_->Device());
-    auto new_enc = p_fmat->Cats()->DeviceView(this->ctx_);
+    auto new_enc =
+        p_fmat->Cats()->NeedRecode() ? p_fmat->Cats()->DeviceView(ctx_) : enc::DeviceColumnsView{};
 
     dh::device_vector<uint32_t> categories;
     ExtractPaths(ctx_, &device_paths, &d_model, &categories, ctx_->Device());
@@ -1306,7 +1295,8 @@ class GPUPredictor : public xgboost::Predictor {
     d_model.Init(model, 0, tree_end, ctx_->Device());
     dh::device_vector<uint32_t> categories;
     ExtractPaths(ctx_, &device_paths, &d_model, &categories, ctx_->Device());
-    auto new_enc = p_fmat->Cats()->DeviceView(ctx_);
+    auto new_enc =
+        p_fmat->Cats()->NeedRecode() ? p_fmat->Cats()->DeviceView(ctx_) : enc::DeviceColumnsView{};
 
     if (p_fmat->PageExists<SparsePage>()) {
       for (auto const& batch : p_fmat->GetBatches<SparsePage>()) {
@@ -1381,7 +1371,8 @@ class GPUPredictor : public xgboost::Predictor {
     }
 
     bst_feature_t n_features = info.num_col_;
-    auto new_enc = p_fmat->Cats()->DeviceView(this->ctx_);
+    auto new_enc =
+        p_fmat->Cats()->NeedRecode() ? p_fmat->Cats()->DeviceView(ctx_) : enc::DeviceColumnsView{};
     LaunchConfig cfg{this->ctx_, n_features};
 
     if (p_fmat->PageExists<SparsePage>()) {
