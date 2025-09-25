@@ -37,10 +37,14 @@ enum class MemoryType { shared, on_device};
 template <typename T>
 class USMDeleter {
  public:
+  USMDeleter() : qu_(nullptr) {}
+
   explicit USMDeleter(::sycl::queue* qu) : qu_(qu) {}
 
-  void operator()(T* data) const {
-    ::sycl::free(data, *qu_);
+  void operator()(T* data) noexcept {
+    if (qu_ != nullptr) {
+      ::sycl::free(data, *qu_);
+    }
   }
 
  private:
@@ -51,12 +55,17 @@ template <typename T, MemoryType memory_type = MemoryType::shared>
 class USMVector {
   static_assert(std::is_standard_layout<T>::value, "USMVector admits only POD types");
 
-  std::shared_ptr<T> allocate_memory_(::sycl::queue* qu, size_t size) {
+  std::unique_ptr<T, USMDeleter<T>> allocate_memory_(::sycl::queue* qu, size_t size) {
+    T* ptr = nullptr;
     if constexpr (memory_type == MemoryType::shared) {
-      return std::shared_ptr<T>(::sycl::malloc_shared<T>(size_, *qu), USMDeleter<T>(qu));
+      ptr = ::sycl::malloc_shared<T>(size, *qu);
     } else {
-      return std::shared_ptr<T>(::sycl::malloc_device<T>(size_, *qu), USMDeleter<T>(qu));
+      ptr = ::sycl::malloc_device<T>(size, *qu);
     }
+    if (ptr == nullptr) LOG(FATAL) << "Unable to allocate "
+                                   << size * sizeof(T)
+                                   << " bytes";
+    return std::unique_ptr<T, USMDeleter<T>>(ptr, USMDeleter<T>(qu));
   }
 
   void copy_vector_to_memory_(::sycl::queue* qu, const std::vector<T> &vec) {
@@ -93,8 +102,7 @@ class USMVector {
     copy_vector_to_memory_(qu, vec);
   }
 
-  ~USMVector() {
-  }
+  ~USMVector() {}
 
   USMVector<T>& operator=(const USMVector<T>& other) {
     size_ = other.size_;
@@ -103,8 +111,13 @@ class USMVector {
     return *this;
   }
 
-  T* Data() { return data_.get(); }
-  const T* DataConst() const { return data_.get(); }
+  T* Data() { 
+    return data_.get();
+  }
+
+  const T* DataConst() const {
+    return data_.get();
+  }
 
   size_t Size() const { return size_; }
 
@@ -129,10 +142,10 @@ class USMVector {
       size_ = size_new;
     } else {
       size_t size_old = size_;
-      auto data_old = data_;
+      auto data_old = std::move(data_);
       size_ = size_new;
       capacity_ = size_new;
-      data_ = allocate_memory_(qu, size_);;
+      data_ = allocate_memory_(qu, size_);
       if (size_old > 0) {
         qu->memcpy(data_.get(), data_old.get(), sizeof(T) * size_old).wait();
       }
@@ -144,6 +157,7 @@ class USMVector {
     if (size_new <= capacity_) {
       size_ = size_new;
     } else {
+      data_.reset();
       size_ = size_new;
       capacity_ = size_new;
       data_ = allocate_memory_(qu, size_);
@@ -158,7 +172,7 @@ class USMVector {
       size_ = size_new;
     } else {
       size_t size_old = size_;
-      auto data_old = data_;
+      auto data_old = std::move(data_);
       size_ = size_new;
       capacity_ = size_new;
       data_ = allocate_memory_(qu, size_);
@@ -173,11 +187,11 @@ class USMVector {
     if (size_new <= size_) {
       size_ = size_new;
     } else if (size_new <= capacity_) {
-      auto event = qu->fill(data_.get() + size_, v, size_new - size_);
+      *event = qu->fill(data_.get() + size_, v, size_new - size_, *event);
       size_ = size_new;
     } else {
       size_t size_old = size_;
-      auto data_old = data_;
+      auto data_old = std::move(data_);
       size_ = size_new;
       capacity_ = size_new;
       data_ = allocate_memory_(qu, size_);
@@ -188,25 +202,8 @@ class USMVector {
     }
   }
 
-  void ResizeAndFill(::sycl::queue* qu, size_t size_new, int v, ::sycl::event* event) {
-    if (size_new <= size_) {
-      size_ = size_new;
-      *event = qu->memset(data_.get(), v, size_new * sizeof(T), *event);
-    } else if (size_new <= capacity_) {
-      size_ = size_new;
-      *event = qu->memset(data_.get(), v, size_new * sizeof(T), *event);
-    } else {
-      size_t size_old = size_;
-      auto data_old = data_;
-      size_ = size_new;
-      capacity_ = size_new;
-      data_ = allocate_memory_(qu, size_);
-      *event = qu->memset(data_.get(), v, size_new * sizeof(T), *event);
-    }
-  }
-
-  ::sycl::event Fill(::sycl::queue* qu, T v) {
-    return qu->fill(data_.get(), v, size_);
+  void Fill(::sycl::queue* qu, T v, ::sycl::event* event) {
+    *event = qu->fill(data_.get(), v, size_, *event);
   }
 
   void Init(::sycl::queue* qu, const std::vector<T> &vec) {
@@ -221,7 +218,7 @@ class USMVector {
  private:
   size_t size_;
   size_t capacity_;
-  std::shared_ptr<T> data_;
+  std::unique_ptr<T, USMDeleter<T>> data_;
 };
 
 }  // namespace sycl

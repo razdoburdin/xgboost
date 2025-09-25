@@ -40,12 +40,12 @@ ExtMemQuantileDMatrix::ExtMemQuantileDMatrix(DataIterHandle iter_handle, DMatrix
   ctx.Init(Args{{"nthread", std::to_string(config.n_threads)}, {"device", pctx->DeviceName()}});
 
   BatchParam p{max_bin, tree::TrainParam::DftSparseThreshold()};
-  if (ctx.IsCPU()) {
-    CHECK(detail::HostRatioIsAuto(config.cache_host_ratio)) << error::CacheHostRatioNotImpl();
-    this->InitFromCPU(&ctx, iter, proxy, p, config.missing, ref);
-  } else {
+  if (ctx.IsCUDA()) {
     p.n_prefetch_batches = ::xgboost::cuda_impl::DftPrefetchBatches();
     this->InitFromCUDA(&ctx, iter, proxy, p, ref, max_quantile_blocks, config);
+  } else {
+    CHECK(detail::HostRatioIsAuto(config.cache_host_ratio)) << error::CacheHostRatioNotImpl();
+    this->InitFromCPU(&ctx, iter, proxy, p, config.missing, ref);
   }
   this->batch_ = p;
   this->fmat_ctx_ = ctx;

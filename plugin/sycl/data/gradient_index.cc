@@ -6,6 +6,7 @@
 #include <limits>
 #include <algorithm>
 
+#include "../../src/data/gradient_index.h"
 #include "gradient_index.h"
 
 #include <sycl/sycl.hpp>
@@ -53,46 +54,46 @@ void GHistIndexMatrix::SetIndexData(::sycl::queue* qu,
                                     Context const * ctx,
                                     BinIdxType* index_data,
                                     DMatrix *dmat) {
-  if (nbins == 0) return;
-  const bst_float* cut_values = cut.cut_values_.ConstDevicePointer();
-  const uint32_t* cut_ptrs = cut.cut_ptrs_.ConstDevicePointer();
-  size_t* hit_count_ptr = hit_count.DevicePointer();
+  // if (nbins == 0) return;
+  // const bst_float* cut_values = cut.cut_values_.ConstDevicePointer();
+  // const uint32_t* cut_ptrs = cut.cut_ptrs_.ConstDevicePointer();
+  // size_t* hit_count_ptr = hit_count.DevicePointer();
 
-  BinIdxType* sort_data = reinterpret_cast<BinIdxType*>(sort_buff.Data());
+  // BinIdxType* sort_data = reinterpret_cast<BinIdxType*>(sort_buff.Data());
 
-  for (auto &batch : dmat->GetBatches<SparsePage>()) {
-    const xgboost::Entry *data_ptr = batch.data.ConstDevicePointer();
-    const bst_idx_t *offset_vec = batch.offset.ConstDevicePointer();
-    size_t batch_size = batch.Size();
-    if (batch_size > 0) {
-      const auto base_rowid = batch.base_rowid;
-      size_t row_stride = this->row_stride;
-      size_t nbins = this->nbins;
-      qu->submit([&](::sycl::handler& cgh) {
-        cgh.parallel_for<>(::sycl::range<1>(batch_size), [=](::sycl::item<1> pid) {
-          const size_t i = pid.get_id(0);
-          const size_t ibegin = offset_vec[i];
-          const size_t iend = offset_vec[i + 1];
-          const size_t size = iend - ibegin;
-          const size_t start = (i + base_rowid) * row_stride;
-          for (bst_uint j = 0; j < size; ++j) {
-            uint32_t idx = SearchBin(cut_values, cut_ptrs, data_ptr[ibegin + j]);
-            index_data[start + j] = isDense ? idx - cut_ptrs[j] : idx;
-            AtomicRef<size_t> hit_count_ref(hit_count_ptr[idx]);
-            hit_count_ref.fetch_add(1);
-          }
-          if constexpr (!isDense) {
-            // Sparse case only
-            mergeSort<BinIdxType>(index_data + start, index_data + start + size, sort_data + start);
-            for (bst_uint j = size; j < row_stride; ++j) {
-              index_data[start + j] = nbins;
-            }
-          }
-        });
-      });
-    }
-  }
-  qu->wait();
+  // for (auto &batch : dmat->GetBatches<SparsePage>()) {
+  //   const xgboost::Entry *data_ptr = batch.data.ConstDevicePointer();
+  //   const bst_idx_t *offset_vec = batch.offset.ConstDevicePointer();
+  //   size_t batch_size = batch.Size();
+  //   if (batch_size > 0) {
+  //     const auto base_rowid = batch.base_rowid;
+  //     size_t row_stride = this->row_stride;
+  //     size_t nbins = this->nbins;
+  //     qu->submit([&](::sycl::handler& cgh) {
+  //       cgh.parallel_for<>(::sycl::range<1>(batch_size), [=](::sycl::item<1> pid) {
+  //         const size_t i = pid.get_id(0);
+  //         const size_t ibegin = offset_vec[i];
+  //         const size_t iend = offset_vec[i + 1];
+  //         const size_t size = iend - ibegin;
+  //         const size_t start = (i + base_rowid) * row_stride;
+  //         for (bst_uint j = 0; j < size; ++j) {
+  //           uint32_t idx = SearchBin(cut_values, cut_ptrs, data_ptr[ibegin + j]);
+  //           index_data[start + j] = isDense ? idx - cut_ptrs[j] : idx;
+  //           AtomicRef<size_t> hit_count_ref(hit_count_ptr[idx]);
+  //           hit_count_ref.fetch_add(1);
+  //         }
+  //         if constexpr (!isDense) {
+  //           // Sparse case only
+  //           mergeSort<BinIdxType>(index_data + start, index_data + start + size, sort_data + start);
+  //           for (bst_uint j = size; j < row_stride; ++j) {
+  //             index_data[start + j] = nbins;
+  //           }
+  //         }
+  //       });
+  //     });
+  //   }
+  // }
+  // qu->wait();
 }
 
 void GHistIndexMatrix::ResizeIndex(::sycl::queue* qu, size_t n_index) {
@@ -111,68 +112,106 @@ void GHistIndexMatrix::ResizeIndex(::sycl::queue* qu, size_t n_index) {
 
 void GHistIndexMatrix::Init(::sycl::queue* qu,
                             Context const * ctx,
-                            DMatrix *dmat,
-                            int max_bins) {
-  nfeatures = dmat->Info().num_col_;
+                            const xgboost::GHistIndexMatrix& page,
+                            std::shared_ptr<xgboost::common::HistogramCuts> p_cut_device,
+                            size_t _max_num_bins,
+                            size_t _min_num_bins,
+                            int _page_idx) {
+  CHECK_NE(qu, nullptr);
+  nfeatures = page.Features();
+  page_idx = _page_idx;
 
-  cut = xgboost::common::SketchOnDMatrix(ctx, dmat, max_bins);
-  cut.SetDevice(ctx->Device());
+  max_num_bins = _max_num_bins;
+  min_num_bins = _min_num_bins;
 
-  max_num_bins = max_bins;
-  nbins = cut.Ptrs().back();
+  cut = page.cut;
+  cut_device = p_cut_device;
+  nbins = page.cut.Ptrs().back();
 
-  min_num_bins = nbins;
-  const size_t n_offsets = cut.cut_ptrs_.Size() - 1;
-  for (unsigned fid = 0; fid < n_offsets; ++fid) {
-    auto ibegin = cut.cut_ptrs_.ConstHostVector()[fid];
-    auto iend = cut.cut_ptrs_.ConstHostVector()[fid + 1];
-    min_num_bins = std::min<size_t>(min_num_bins, iend - ibegin);
-  }
+  hit_count = page.hit_count.ToSpan();
 
-  hit_count.SetDevice(ctx->Device());
-  hit_count.Resize(nbins, 0);
+  row_stride = nfeatures;
+  n_rows = page.Size();
+  base_rowid = page.base_rowid;
 
-  const bool isDense = dmat->IsDense();
-  this->isDense_ = isDense;
+  isDense_ = page.IsDense();
+  const size_t n_index = page.index.Size();
 
-  row_stride = 0;
-  size_t n_rows = 0;
-  if (!isDense) {
-    for (const auto& batch : dmat->GetBatches<SparsePage>()) {
-      const auto& row_offset = batch.offset.ConstHostVector();
-      n_rows += batch.Size();
-      for (auto i = 1ull; i < row_offset.size(); i++) {
-        row_stride = std::max(row_stride, static_cast<size_t>(row_offset[i] - row_offset[i - 1]));
-      }
-    }
-  } else {
-    row_stride = nfeatures;
-    n_rows = dmat->Info().num_row_;
-  }
+  auto bin_type_size = page.index.GetBinTypeSize();
+  index.SetBinTypeSize(bin_type_size);
 
-  const size_t n_index = n_rows * row_stride;
-  ResizeIndex(qu, n_index);
-
-  CHECK_GT(cut.cut_values_.Size(), 0U);
-
-  if (isDense) {
-    BinTypeSize curent_bin_size = index.GetBinTypeSize();
-    if (curent_bin_size == BinTypeSize::kUint8BinsTypeSize) {
-      SetIndexData<uint8_t, true>(qu, ctx, index.data<uint8_t>(), dmat);
-
-    } else if (curent_bin_size == BinTypeSize::kUint16BinsTypeSize) {
-      SetIndexData<uint16_t, true>(qu, ctx, index.data<uint16_t>(), dmat);
-    } else {
-      CHECK_EQ(curent_bin_size, BinTypeSize::kUint32BinsTypeSize);
-      SetIndexData<uint32_t, true>(qu, ctx, index.data<uint32_t>(), dmat);
-    }
-  /* For sparse DMatrix we have to store index of feature for each bin
-     in index field to chose right offset. So offset is nullptr and index is not reduced */
-  } else {
-    sort_buff.Resize(qu, n_rows * row_stride * sizeof(uint32_t));
-    SetIndexData<uint32_t, false>(qu, ctx, index.data<uint32_t>(), dmat);
+  if (index.data_.Size() != bin_type_size * n_index) {
+    index.Resize(qu, bin_type_size * n_index);
+    qu->copy(page.index.begin(),
+             index.begin(),
+             bin_type_size * n_index).wait_and_throw();
   }
 }
+
+// void GHistIndexMatrix::Init(::sycl::queue* qu,
+//                             Context const * ctx,
+//                             DMatrix *dmat,
+//                             int max_bins) {
+//   nfeatures = dmat->Info().num_col_;
+
+//   cut = xgboost::common::SketchOnDMatrix(ctx, dmat, max_bins);
+//   cut.SetDevice(ctx->Device());
+
+//   max_num_bins = max_bins;
+//   nbins = cut.Ptrs().back();
+
+//   min_num_bins = nbins;
+//   const size_t n_offsets = cut.cut_ptrs_.Size() - 1;
+//   for (unsigned fid = 0; fid < n_offsets; ++fid) {
+//     auto ibegin = cut.cut_ptrs_.ConstHostVector()[fid];
+//     auto iend = cut.cut_ptrs_.ConstHostVector()[fid + 1];
+//     min_num_bins = std::min<size_t>(min_num_bins, iend - ibegin);
+//   }
+
+//   hit_count.SetDevice(ctx->Device());
+//   hit_count.Resize(nbins, 0);
+
+//   const bool isDense = dmat->IsDense();
+//   this->isDense_ = isDense;
+
+//   row_stride = 0;
+//   n_rows = 0;
+//   if (!isDense) {
+//     for (const auto& batch : dmat->GetBatches<SparsePage>()) {
+//       const auto& row_offset = batch.offset.ConstHostVector();
+//       n_rows += batch.Size();
+//       for (auto i = 1ull; i < row_offset.size(); i++) {
+//         row_stride = std::max(row_stride, static_cast<size_t>(row_offset[i] - row_offset[i - 1]));
+//       }
+//     }
+//   } else {
+//     row_stride = nfeatures;
+//     n_rows = dmat->Info().num_row_;
+//   }
+
+//   const size_t n_index = n_rows * row_stride;
+//   ResizeIndex(qu, n_index);
+
+//   CHECK_GT(cut.cut_values_.Size(), 0U);
+
+//   if (isDense) {
+//     BinTypeSize curent_bin_size = index.GetBinTypeSize();
+//     if (curent_bin_size == BinTypeSize::kUint8BinsTypeSize) {
+//       SetIndexData<uint8_t, true>(qu, ctx, index.data<uint8_t>(), dmat);
+
+//     } else if (curent_bin_size == BinTypeSize::kUint16BinsTypeSize) {
+//       SetIndexData<uint16_t, true>(qu, ctx, index.data<uint16_t>(), dmat);
+//     } else {
+//       CHECK_EQ(curent_bin_size, BinTypeSize::kUint32BinsTypeSize);
+//       SetIndexData<uint32_t, true>(qu, ctx, index.data<uint32_t>(), dmat);
+//     }
+//   /* For sparse DMatrix we have to store index of feature for each bin
+//      in index field to chose right offset. So offset is nullptr and index is not reduced */
+//   } else {
+//     sort_buff.Resize(qu, n_rows * row_stride * sizeof(uint32_t));
+//     SetIndexData<uint32_t, false>(qu, ctx, index.data<uint32_t>(), dmat);
+//   }
+// }
 
 }  // namespace common
 }  // namespace sycl

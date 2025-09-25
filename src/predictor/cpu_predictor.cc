@@ -456,6 +456,7 @@ struct LaunchConfig : public Args... {
     if (!p_fmat->PageExists<SparsePage>()) {
       auto ft = p_fmat->Info().feature_types.ConstHostVector();
       for (auto const &page : p_fmat->GetBatches<GHistIndexMatrix>(ctx, {})) {
+        LOG(FATAL) << "I am here";
         fn(GHistIndexMatrixView{page, acc, ft});
       }
     } else {
@@ -988,6 +989,7 @@ class CPUPredictor : public Predictor {
   [[nodiscard]] bool InplacePredict(std::shared_ptr<DMatrix> p_m, gbm::GBTreeModel const &model,
                                     float missing, PredictionCacheEntry *out_preds,
                                     bst_tree_t tree_begin, bst_tree_t tree_end) const override {
+    LOG(FATAL) << "InplacePredict";
     auto proxy = dynamic_cast<data::DMatrixProxy *>(p_m.get());
     CHECK(proxy) << error::InplacePredictProxy();
 
@@ -1037,6 +1039,7 @@ class CPUPredictor : public Predictor {
 
   void PredictLeaf(DMatrix *p_fmat, HostDeviceVector<float> *out_preds,
                    gbm::GBTreeModel const &model, bst_tree_t ntree_limit) const override {
+    LOG(FATAL) << "PredictLeaf";
     auto const n_threads = this->ctx_->Threads();
     // number of valid trees
     ntree_limit = GetTreeLimit(model.trees, ntree_limit);

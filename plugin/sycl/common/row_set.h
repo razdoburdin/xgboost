@@ -29,13 +29,13 @@ class RowSetCollection {
    *  rows (instances) associated with a particular node in a decision
    *  tree. */
   struct Elem {
-    const size_t* begin{nullptr};
-    const size_t* end{nullptr};
+    size_t* begin{nullptr};
+    size_t* end{nullptr};
     bst_node_t node_id{-1};  // id of node associated with this instance set; -1 means uninitialized
     Elem()
          = default;
-    Elem(const size_t* begin,
-         const size_t* end,
+    Elem(size_t* begin,
+         size_t* end,
          bst_node_t node_id = -1)
         : begin(begin), end(end), node_id(node_id) {}
 
@@ -45,6 +45,8 @@ class RowSetCollection {
     }
   };
 
+  RowSetCollection() {}
+
   inline size_t Size() const {
     return elem_of_each_node_.size();
   }
@@ -53,7 +55,7 @@ class RowSetCollection {
   inline const Elem& operator[](unsigned node_id) const {
     const Elem& e = elem_of_each_node_[node_id];
     CHECK(e.begin != nullptr)
-        << "access element that is not in the set";
+        << "access element " << node_id << " that is not in the set";
     return e;
   }
 
@@ -71,8 +73,8 @@ class RowSetCollection {
   inline void Init() {
     CHECK_EQ(elem_of_each_node_.size(), 0U);
 
-    const size_t* begin = row_indices_.Begin();
-    const size_t* end = row_indices_.End();
+    size_t* begin = row_indices_.Begin();
+    size_t* end = row_indices_.End();
     elem_of_each_node_.emplace_back(Elem(begin, end, 0));
   }
 

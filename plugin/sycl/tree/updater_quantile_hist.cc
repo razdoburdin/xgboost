@@ -68,7 +68,7 @@ void QuantileHistMaker::CallUpdate(
         xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
         const std::vector<RegTree *> &trees) {
   for (auto tree : trees) {
-    pimpl->Update(param, gmat_, *(gpair->Data()), dmat, out_position, tree);
+    pimpl->Update(param, *(gpair->Data()), dmat, out_position, tree);
   }
 }
 
@@ -78,12 +78,6 @@ void QuantileHistMaker::Update(xgboost::tree::TrainParam const *param,
                                xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
                                const std::vector<RegTree *> &trees) {
   gpair->Data()->SetDevice(ctx_->Device());
-  if (dmat != p_last_dmat_ || is_gmat_initialized_ == false) {
-    updater_monitor_.Start("GmatInitialization");
-    gmat_.Init(qu_, ctx_, dmat, static_cast<uint32_t>(param_.max_bin));
-    updater_monitor_.Stop("GmatInitialization");
-    is_gmat_initialized_ = true;
-  }
   // rescale learning rate according to size of trees
   float lr = param_.learning_rate;
   param_.learning_rate = lr / trees.size();

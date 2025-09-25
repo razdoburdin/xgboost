@@ -78,11 +78,9 @@ class QuantileHistMaker: public TreeUpdater {
   // training parameter
   xgboost::tree::TrainParam param_;
   // quantized data matrix
-  common::GHistIndexMatrix gmat_;
   // (optional) data matrix with feature grouping
   // column accessor
   DMatrix const* p_last_dmat_ {nullptr};
-  bool is_gmat_initialized_ {false};
 
   xgboost::common::Monitor updater_monitor_;
 

@@ -57,7 +57,9 @@ class HistUpdater {
                        const xgboost::tree::TrainParam& param,
                        FeatureInteractionConstraintHost int_constraints_,
                        DMatrix const* fmat)
-    : ctx_(ctx), qu_(qu), device_properties_(qu->get_device()), param_(param),
+    : ctx_(ctx), qu_(qu), device_properties_(qu->get_device()), 
+      row_set_collection_(fmat->NumBatches()), base_rowid_(fmat->NumBatches()),
+      param_(param),
       tree_evaluator_(qu, param, fmat->Info().num_col_),
       interaction_constraints_{std::move(int_constraints_)},
       p_last_tree_(nullptr), p_last_fmat_(fmat) {
@@ -74,7 +76,6 @@ class HistUpdater {
 
   // update one tree, growing
   void Update(xgboost::tree::TrainParam const *param,
-              const common::GHistIndexMatrix &gmat,
               const HostDeviceVector<GradientPair>& gpair,
               DMatrix *p_fmat,
               xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
@@ -103,7 +104,7 @@ class HistUpdater {
                     USMVector<size_t, MemoryType::on_device>* row_indices);
 
   void EvaluateSplits(const std::vector<ExpandEntry>& nodes_set,
-                      const common::GHistIndexMatrix& gmat,
+                      const xgboost::common::HistogramCuts& cut,
                       const RegTree& tree);
 
   // Enumerate the split values of specific feature
@@ -116,11 +117,11 @@ class HistUpdater {
       typename TreeEvaluator<GradientSumT>::SplitEvaluator const &evaluator,
       float min_child_weight);
 
-  void ApplySplit(std::vector<ExpandEntry> nodes,
-                      const common::GHistIndexMatrix& gmat,
-                      RegTree* p_tree);
+  void ApplySplit(const std::vector<ExpandEntry>& nodes,
+                  const common::GHistIndexMatrix& gmat,
+                  RegTree* p_tree);
 
-  void AddSplitsToRowSet(const std::vector<ExpandEntry>& nodes, RegTree* p_tree);
+  void AddSplitsToRowSet(const std::vector<ExpandEntry>& nodes, int page_idx, RegTree* p_tree);
 
   void InitData(const common::GHistIndexMatrix& gmat,
                 const HostDeviceVector<GradientPair>& gpair,
@@ -135,12 +136,11 @@ class HistUpdater {
                         GHistRowT<MemoryType::on_device>* hist_buffer,
                         ::sycl::event event_priv) {
     return hist_builder_.BuildHist(gpair, row_indices, gmat, hist,
-                                   data_layout_ != kSparseData, hist_buffer,
+                                   gmat.IsDense(), hist_buffer,
                                    device_properties_, event_priv);
   }
 
   void InitNewNode(int nid,
-                   const common::GHistIndexMatrix& gmat,
                    const HostDeviceVector<GradientPair>& gpair,
                    const RegTree& tree);
 
@@ -152,8 +152,7 @@ class HistUpdater {
                   std::vector<ExpandEntry>* big_siblings,
                   RegTree *p_tree);
 
-  void BuildNodeStats(const common::GHistIndexMatrix &gmat,
-                      RegTree *p_tree,
+  void BuildNodeStats(RegTree *p_tree,
                       const HostDeviceVector<GradientPair>& gpair);
 
   void EvaluateAndApplySplits(const common::GHistIndexMatrix &gmat,
@@ -163,16 +162,19 @@ class HistUpdater {
                               std::vector<ExpandEntry> *temp_qexpand_depth);
 
   void AddSplitsToTree(
-            const common::GHistIndexMatrix &gmat,
             RegTree *p_tree,
             int *num_leaves,
             int depth,
             std::vector<ExpandEntry>* nodes_for_apply_split,
             std::vector<ExpandEntry>* temp_qexpand_depth);
 
-  void ExpandWithDepthWise(const common::GHistIndexMatrix &gmat,
-                            RegTree *p_tree,
-                            const HostDeviceVector<GradientPair>& gpair);
+  void InitRowSet(const xgboost::GHistIndexMatrix& page,
+                  const HostDeviceVector<GradientPair>& gpair,
+                  size_t page_idx);
+
+  void ExpandWithDepthWise(DMatrix *p_fmat,
+                           RegTree *p_tree,
+                           const HostDeviceVector<GradientPair>& gpair);
 
   void BuildLocalHistograms(const common::GHistIndexMatrix &gmat,
                             RegTree *p_tree,
@@ -206,8 +208,14 @@ class HistUpdater {
 
   DeviceProperties device_properties_;
 
+  common::GHistIndexCache gmat_cache_;
+  std::shared_ptr<xgboost::common::HistogramCuts> cut_;
+  // std::vector<std::unique_ptr<common::GHistIndexMatrix>> gmat_cache_;
+  // std::vector<int> cached_pages_;
+
   // the internal row sets
-  common::RowSetCollection row_set_collection_;
+  std::vector<common::RowSetCollection> row_set_collection_;
+  std::vector<size_t> base_rowid_;
 
   const xgboost::tree::TrainParam& param_;
   std::shared_ptr<xgboost::common::ColumnSampler> column_sampler_;
@@ -249,9 +257,14 @@ class HistUpdater {
   xgboost::common::Monitor builder_monitor_;
   xgboost::common::Monitor kernel_monitor_;
 
+  uint32_t min_num_bins;
+  uint32_t max_num_bins;
+
   /*! \brief feature with least # of bins. to be used for dense specialization
               of InitNewNode() */
   uint32_t fid_least_bins_;
+  uint32_t min_bins_feat_begin_;
+  uint32_t min_bins_feat_end_;
 
   uint64_t seed_ = 0;
 

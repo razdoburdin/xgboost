@@ -38,6 +38,7 @@ import argparse
 import os
 import tempfile
 from typing import Callable, List, Literal, Tuple
+import time
 
 import numpy as np
 from sklearn.datasets import make_regression
@@ -70,6 +71,7 @@ def make_batches(
         np.save(X_path, X)
         np.save(y_path, y)
         files.append((X_path, y_path))
+        print(f"batch {i} ready: X_path = {X_path}\ty_path = {y_path}")
     return files
 
 
@@ -132,14 +134,35 @@ def hist_train(it: Iterator) -> None:
     """
     # For non-data arguments, specify it here once instead of passing them by the `next`
     # method.
-    Xy = xgboost.ExtMemQuantileDMatrix(it, missing=np.nan, enable_categorical=False)
+    begin = time.time()
+    Xy = xgboost.ExtMemQuantileDMatrix(it, missing=np.nan, max_bin=256, enable_categorical=False)
+    end = time.time()
+    print(f"ExtMemQuantileDMatrix time = {end - begin}")
+
+    begin = time.time()
     booster = xgboost.train(
-        {"tree_method": "hist", "max_depth": 4, "device": it.device},
+        {"tree_method": "hist", "max_depth": 8, "device": "cpu"},
         Xy,
         evals=[(Xy, "Train")],
         num_boost_round=10,
     )
-    booster.predict(Xy)
+    end = time.time()
+    cpu_time = end - begin
+    print(f"CPU time = {cpu_time}")
+    # booster.predict(Xy)
+
+    begin = time.time()
+    booster = xgboost.train(
+        {"verbosity": 3, "tree_method": "hist", "max_depth": 8, "device": "sycl"},
+        Xy,
+        evals=[(Xy, "Train")],
+        num_boost_round=10,
+    )
+    end = time.time()
+    sycl_time = end - begin
+    print(f"SYCL time = {sycl_time}")
+    print(f"SYCL vs CPU time = {cpu_time / sycl_time: .2f}")
+    # booster.predict(Xy)
 
 
 def approx_train(it: Iterator) -> None:
@@ -163,13 +186,17 @@ def main(tmpdir: str, args: argparse.Namespace) -> None:
     """Entry point for training."""
 
     # generate some random data for demo
+    begin = time.time()
     files = make_batches(
-        n_samples_per_batch=1024, n_features=17, n_batches=31, tmpdir=tmpdir
+        n_samples_per_batch=1024*1024, n_features=4, n_batches=2, tmpdir=tmpdir
     )
+    end = time.time()
+    print(f"make_batches time = {end - begin}")
+
     it = Iterator(args.device, files)
 
     hist_train(it)
-    approx_train(it)
+    # approx_train(it)
 
 
 def setup_rmm() -> None:

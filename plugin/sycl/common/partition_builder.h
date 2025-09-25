@@ -85,7 +85,7 @@ inline ::sycl::event PartitionSparseKernel(::sycl::queue* qu,
   const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
   const size_t* rid = rid_span.begin;
   const size_t range_size = rid_span.Size();
-  const uint32_t* cut_ptrs = gmat.cut.cut_ptrs_.ConstDevicePointer();
+  const uint32_t* cut_ptrs = gmat.cut_device->cut_ptrs_.ConstDevicePointer();
 
   size_t* p_rid_buf = rid_buf->data();
   return qu->submit([&](::sycl::handler& cgh) {
@@ -129,7 +129,7 @@ class PartitionBuilder {
     }
 
     if (data_.Size() < nodes_offsets_[n_nodes]) {
-      data_.Resize(qu, nodes_offsets_[n_nodes]);
+      data_.ResizeNoCopy(qu, nodes_offsets_[n_nodes]);
     }
   }
 
@@ -191,10 +191,12 @@ class PartitionBuilder {
                  const RowSetCollection& row_set_collection,
                  const std::vector<int32_t>& split_conditions,
                  RegTree* p_tree,
-                 ::sycl::event* general_event) {
+                 ::sycl::event* event) {
+    // std::vector<::sycl::event> nodes_event(n_nodes_);
     nodes_events_.resize(n_nodes_);
 
-    parts_size_.ResizeAndFill(qu_, 2 * n_nodes_, 0, general_event);
+    parts_size_.ResizeNoCopy(qu_, 2 * n_nodes_);
+    *event = qu_->memset(parts_size_.Data(), 0, parts_size_.Size() * sizeof(size_t), *event);
 
     for (size_t node_in_set = 0; node_in_set < n_nodes_; node_in_set++) {
       const int32_t nid = nodes[node_in_set].nid;
@@ -208,15 +210,15 @@ class PartitionBuilder {
         switch (gmat.index.GetBinTypeSize()) {
           case common::BinTypeSize::kUint8BinsTypeSize:
             node_event = Partition<uint8_t>(split_condition, gmat, rid_span, node,
-                                            &rid_buf, part_size, *general_event);
+                                            &rid_buf, part_size, *event);
             break;
           case common::BinTypeSize::kUint16BinsTypeSize:
             node_event = Partition<uint16_t>(split_condition, gmat, rid_span, node,
-                                            &rid_buf, part_size, *general_event);
+                                            &rid_buf, part_size, *event);
             break;
           case common::BinTypeSize::kUint32BinsTypeSize:
             node_event = Partition<uint32_t>(split_condition, gmat, rid_span, node,
-                                            &rid_buf, part_size, *general_event);
+                                            &rid_buf, part_size, *event);
             break;
           default:
             CHECK(false);  // no default behavior
@@ -226,18 +228,18 @@ class PartitionBuilder {
       }
     }
 
-    *general_event = qu_->memcpy(result_rows_.data(),
-                                 parts_size_.DataConst(),
-                                 sizeof(size_t) * 2 * n_nodes_,
-                                 nodes_events_);
+    *event = qu_->memcpy(result_rows_.data(),
+                         parts_size_.DataConst(),
+                         sizeof(size_t) * 2 * n_nodes_,
+                         nodes_events_);
   }
 
   void MergeToArray(size_t nid,
                     size_t* data_result,
-                    ::sycl::event* event) {
+                    ::sycl::event* event) const {
     size_t n_nodes_total = GetNLeftElems(nid) + GetNRightElems(nid);
     if (n_nodes_total > 0) {
-      const size_t* data = data_.Data() + nodes_offsets_[nid];
+      const size_t* data = data_.DataConst() + nodes_offsets_[nid];
       qu_->memcpy(data_result, data, sizeof(size_t) * n_nodes_total, *event);
     }
   }

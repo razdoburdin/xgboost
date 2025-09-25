@@ -92,11 +92,10 @@ void HistUpdater<GradientSumT>::BuildLocalHistograms(
   for (size_t i = 0; i < n_nodes; i++) {
     const int32_t nid = nodes_for_explicit_hist_build_[i].nid;
 
-    if (row_set_collection_[nid].Size() > 0) {
-      event = BuildHist(gpair, row_set_collection_[nid], gmat, &(hist_[nid]),
+    const auto& row_set = row_set_collection_[gmat.page_idx][nid];
+    if (row_set.Size() > 0) {
+      event = BuildHist(gpair, row_set, gmat, &(hist_[nid]),
                         &(hist_buffer_.GetDeviceBuffer()), event);
-    } else {
-      common::InitHist(qu_, &(hist_[nid]), hist_[nid].Size(), &event);
     }
   }
   qu_->wait_and_throw();
@@ -105,13 +104,12 @@ void HistUpdater<GradientSumT>::BuildLocalHistograms(
 
 template<typename GradientSumT>
 void HistUpdater<GradientSumT>::BuildNodeStats(
-    const common::GHistIndexMatrix &gmat,
     RegTree *p_tree,
     const HostDeviceVector<GradientPair>& gpair) {
   builder_monitor_.Start("BuildNodeStats");
   for (auto const& entry : qexpand_depth_wise_) {
     int nid = entry.nid;
-    this->InitNewNode(nid, gmat, gpair, *p_tree);
+    this->InitNewNode(nid, gpair, *p_tree);
     // add constraints
     if (!(*p_tree)[nid].IsLeftChild() && !(*p_tree)[nid].IsRoot()) {
       // it's a right child
@@ -130,7 +128,6 @@ void HistUpdater<GradientSumT>::BuildNodeStats(
 
 template<typename GradientSumT>
 void HistUpdater<GradientSumT>::AddSplitsToTree(
-    const common::GHistIndexMatrix &gmat,
     RegTree *p_tree,
     int *num_leaves,
     int depth,
@@ -178,10 +175,10 @@ void HistUpdater<GradientSumT>::EvaluateAndApplySplits(
     int *num_leaves,
     int depth,
     std::vector<ExpandEntry> *temp_qexpand_depth) {
-  EvaluateSplits(qexpand_depth_wise_, gmat, *p_tree);
+  EvaluateSplits(qexpand_depth_wise_, *gmat.cut_device, *p_tree);
 
   std::vector<ExpandEntry> nodes_for_apply_split;
-  AddSplitsToTree(gmat, p_tree, num_leaves, depth,
+  AddSplitsToTree(p_tree, num_leaves, depth,
                   &nodes_for_apply_split, temp_qexpand_depth);
   ApplySplit(nodes_for_apply_split, gmat, p_tree);
 }
@@ -208,11 +205,15 @@ void HistUpdater<GradientSumT>::SplitSiblings(
       const int32_t left_id = (*p_tree)[node.Parent()].LeftChild();
       const int32_t right_id = (*p_tree)[node.Parent()].RightChild();
 
-      if (nid == left_id && row_set_collection_[left_id ].Size() <
-                            row_set_collection_[right_id].Size()) {
+      size_t n_left = 0;
+      size_t n_right = 0;
+      for (const auto& row_set : row_set_collection_) {
+        n_left += row_set[left_id ].Size();
+        n_right += row_set[right_id ].Size();
+      }
+      if (nid == left_id && n_left < n_right) {
         small_siblings->push_back(entry);
-      } else if (nid == right_id && row_set_collection_[right_id].Size() <=
-                                    row_set_collection_[left_id ].Size()) {
+      } else if (nid == right_id && n_right <= n_left) {
         small_siblings->push_back(entry);
       } else {
         big_siblings->push_back(entry);
@@ -223,28 +224,201 @@ void HistUpdater<GradientSumT>::SplitSiblings(
 }
 
 template<typename GradientSumT>
+void HistUpdater<GradientSumT>::InitRowSet(const xgboost::GHistIndexMatrix& page,
+                                           const HostDeviceVector<GradientPair>& gpair,
+                                           size_t page_idx) {
+  row_set_collection_[page_idx].Clear();
+
+  size_t num_rows = page.Size();
+  USMVector<size_t, MemoryType::on_device>& row_indices = row_set_collection_[page_idx].Data();
+  row_indices.ResizeNoCopy(qu_, num_rows);
+  size_t* p_row_indices = row_indices.Data();
+
+  // mark subsample and build list of member rows
+  if (param_.subsample < 1.0f) {
+    CHECK_EQ(param_.sampling_method, xgboost::tree::TrainParam::kUniform)
+        << "Only uniform sampling is supported, "
+        << "gradient-based sampling is only support by GPU Hist.";
+    InitSampling(gpair, &row_indices);
+  } else {
+    int has_neg_hess = 0;
+    size_t base_rowid = base_rowid_[page_idx];
+    const GradientPair* gpair_ptr = gpair.ConstDevicePointer() + base_rowid;
+    {
+      ::sycl::buffer<int, 1> flag_buf(&has_neg_hess, 1);
+      qu_->submit([&](::sycl::handler& cgh) {
+        auto flag_buf_acc  = flag_buf.get_access<::sycl::access::mode::read_write>(cgh);
+        cgh.parallel_for<>(::sycl::range<1>(::sycl::range<1>(num_rows)),
+                           [=](::sycl::item<1> pid) {
+          const size_t idx = pid.get_id(0);
+          p_row_indices[idx] = idx;
+          if (gpair_ptr[idx].GetHess() < 0.0f) {
+            AtomicRef<int> has_neg_hess_ref(flag_buf_acc[0]);
+            has_neg_hess_ref.fetch_max(1);
+          }
+        });
+      });
+    }
+    CHECK_EQ(has_neg_hess, 0);
+
+    if (has_neg_hess) {
+      size_t max_idx = 0;
+      {
+        ::sycl::buffer<size_t, 1> flag_buf(&max_idx, 1);
+        qu_->submit([&](::sycl::handler& cgh) {
+          auto flag_buf_acc = flag_buf.get_access<::sycl::access::mode::read_write>(cgh);
+          cgh.parallel_for<>(::sycl::range<1>(::sycl::range<1>(num_rows)),
+                             [=](::sycl::item<1> pid) {
+            const size_t idx = pid.get_id(0);
+            if (gpair_ptr[idx].GetHess() >= 0.0f) {
+              AtomicRef<size_t> max_idx_ref(flag_buf_acc[0]);
+              p_row_indices[max_idx_ref++] = idx;
+            }
+          });
+        });
+      }
+      row_indices.Resize(qu_, max_idx);
+    }
+  }
+  row_set_collection_[page_idx].Init();
+}
+
+template<typename GradientSumT>
 void HistUpdater<GradientSumT>::ExpandWithDepthWise(
-    const common::GHistIndexMatrix &gmat,
+    DMatrix *p_fmat,
     RegTree *p_tree,
     const HostDeviceVector<GradientPair>& gpair) {
   int num_leaves = 0;
 
+  qexpand_depth_wise_.clear();
   // in depth_wise growing, we feed loss_chg with 0.0 since it is not used anyway
   qexpand_depth_wise_.emplace_back(ExpandEntry::kRootNid,
                                    p_tree->GetDepth(ExpandEntry::kRootNid));
   ++num_leaves;
+
+  const auto batch_params = BatchParam(param_.max_bin, param_.sparse_threshold);
+
+  int page_idx = 0;
+  uint32_t nbins = 0;
+  bool first_tree = false;
+  size_t index_size = 0;
+  for (auto const &page : p_fmat->GetBatches<GHistIndexMatrix>(ctx_, batch_params)) {
+    index_size = std::max<size_t>(index_size, page.index.Size() * page.index.GetBinTypeSize());
+    base_rowid_[page_idx] = page.base_rowid;
+    InitRowSet(page, gpair, page_idx);
+
+    if (page_idx == 0) {
+      const auto& info = p_fmat->Info();
+      std::fill(snode_host_.begin(), snode_host_.end(),  NodeEntry<GradientSumT>(param_));
+      if (!column_sampler_) {
+        column_sampler_ = xgboost::common::MakeColumnSampler(ctx_);
+        column_sampler_->Init(ctx_, info.num_col_, info.feature_weights.ConstHostVector(),
+                              param_.colsample_bynode, param_.colsample_bylevel,
+                              param_.colsample_bytree);
+      }
+
+      // store a pointer to the tree
+      p_last_tree_ = p_tree;
+
+      nbins = page.cut.Ptrs().back();
+      if (cut_ == nullptr) {
+        first_tree = true;
+        cut_ = std::make_shared<xgboost::common::HistogramCuts>();
+        *cut_ = page.cut;
+        cut_->SetDevice(ctx_->Device());
+        hist_.Init(qu_, nbins);
+        hist_local_worker_.Init(qu_, nbins);
+
+        // initialize histogram builder
+        hist_builder_ = common::GHistBuilder<GradientSumT>(qu_, nbins);
+
+        hist_buffer_.Init(qu_, nbins);
+        max_num_bins = page.max_numeric_bins_per_feat;
+
+        min_num_bins = nbins;
+        const size_t n_offsets = cut_->cut_ptrs_.Size() - 1;
+        for (unsigned fid = 0; fid < n_offsets; ++fid) {
+          auto ibegin = cut_->cut_ptrs_.ConstHostVector()[fid];
+          auto iend = cut_->cut_ptrs_.ConstHostVector()[fid + 1];
+          if (iend - ibegin < min_num_bins) {
+            min_num_bins = iend - ibegin;
+            min_bins_feat_begin_ = ibegin;
+            min_bins_feat_end_ = iend;
+          }
+        }
+
+        size_t buffer_size = GetRequiredBufferSize<GradientSumT>
+                            (device_properties_, page.Size(), nbins, page.Features(),
+                            max_num_bins, min_num_bins);
+        hist_buffer_.Reset(buffer_size);
+      }
+    } else {
+      CHECK_EQ(nbins, page.cut.Ptrs().back());
+
+      CHECK_EQ(cut_->cut_ptrs_.Size(), page.cut.cut_ptrs_.Size());
+      const size_t n_offsets = cut_->cut_ptrs_.Size() - 1;
+      for (unsigned fid = 0; fid < n_offsets; ++fid) {
+        CHECK_EQ(cut_->cut_ptrs_.ConstHostVector()[fid], page.cut.cut_ptrs_.ConstHostVector()[fid]);
+      }
+
+      CHECK_EQ(cut_->cut_values_.Size(), page.cut.cut_values_.Size());
+      for (unsigned i = 0; i < cut_->cut_values_.Size(); ++i) {
+        CHECK_EQ(cut_->cut_values_.ConstHostVector()[i], page.cut.cut_values_.ConstHostVector()[i]);
+      }
+    }
+
+    page_idx += 1;
+  }
+
+  int n_pages = p_fmat->NumBatches();
+  gmat_cache_.Init(qu_, cut_, n_pages, index_size);
+  
+  size_t reserved_mem = cut_->cut_ptrs_.Size() * sizeof(uint32_t) + 
+                        cut_->cut_values_.Size() * sizeof(float) + 
+                        cut_->min_vals_.Size() * sizeof(float) + 
+                        p_fmat->Info().num_row_ * sizeof(size_t) +
+                        p_fmat->Info().num_row_ * sizeof(GradientPair) +
+                        hist_buffer_.GetDeviceBuffer().Size() * 2 * sizeof(GradientSumT);
+
   for (int depth = 0; depth < param_.max_depth + 1; depth++) {
+    size_t n_nodes = hist_.Size();
+    for (const auto& entry : qexpand_depth_wise_) {
+      // Need to allocate memory for the node
+      if (hist_.Count(entry.nid) == 0) {
+        n_nodes += 1;
+      }
+    }
+    size_t hist_size = n_nodes * nbins * 2 * sizeof(GradientSumT);
+
+    size_t max_cache_size = gmat_cache_.MaxCacheSize(reserved_mem + hist_size);
+    gmat_cache_.ShrinkCache(max_cache_size);
+
     std::vector<int> sync_ids;
     std::vector<ExpandEntry> temp_qexpand_depth;
     SplitSiblings(qexpand_depth_wise_, &nodes_for_explicit_hist_build_,
                   &nodes_for_subtraction_trick_, p_tree);
     hist_rows_adder_->AddHistRows(this, &sync_ids, p_tree);
-    BuildLocalHistograms(gmat, p_tree, gpair);
-    hist_synchronizer_->SyncHistograms(this, sync_ids, p_tree);
-    BuildNodeStats(gmat, p_tree, gpair);
 
-    EvaluateAndApplySplits(gmat, p_tree, &num_leaves, depth,
-                   &temp_qexpand_depth);
+    gmat_cache_.Process(ctx_, batch_params, p_fmat, max_num_bins, min_num_bins,
+                        max_cache_size,
+                        [&](const common::GHistIndexMatrix& gmat) {
+                          this->BuildLocalHistograms(gmat, p_tree, gpair);
+                        });
+
+    hist_synchronizer_->SyncHistograms(this, sync_ids, p_tree);
+
+    BuildNodeStats(p_tree, gpair);
+
+    EvaluateSplits(qexpand_depth_wise_, *cut_, *p_tree);
+    std::vector<ExpandEntry> nodes_for_apply_split;
+    AddSplitsToTree(p_tree, &num_leaves, depth,
+                    &nodes_for_apply_split, &temp_qexpand_depth);
+
+    gmat_cache_.Process(ctx_, batch_params, p_fmat, max_num_bins, min_num_bins,
+                        max_cache_size,
+                        [&](const common::GHistIndexMatrix& gmat) {
+                          this->ApplySplit(nodes_for_apply_split, gmat, p_tree);
+                        });
 
     // clean up
     qexpand_depth_wise_.clear();
@@ -257,6 +431,15 @@ void HistUpdater<GradientSumT>::ExpandWithDepthWise(
       temp_qexpand_depth.clear();
     }
   }
+
+  if (n_pages > gmat_cache_.NumCachedPages()) {
+    /* If we can't cache all pages,
+     * it is more effective to clear historgrams.
+     * In this case we trade memory reallocation for histograms to keeping more pages in cache.
+     */
+    hist_.Clear();
+    if (first_tree) fprintf(stderr, "Not fit in GPU Memory: only %d pages are cached\n", int(gmat_cache_.NumCachedPages()));
+  }
 }
 
 template<typename GradientSumT>
@@ -264,77 +447,76 @@ void HistUpdater<GradientSumT>::ExpandWithLossGuide(
     const common::GHistIndexMatrix& gmat,
     RegTree* p_tree,
     const HostDeviceVector<GradientPair>& gpair) {
-  builder_monitor_.Start("ExpandWithLossGuide");
-  int num_leaves = 0;
-  const auto lr = param_.learning_rate;
+  // builder_monitor_.Start("ExpandWithLossGuide");
+  // int num_leaves = 0;
+  // const auto lr = param_.learning_rate;
 
-  ExpandEntry node(ExpandEntry::kRootNid, p_tree->GetDepth(ExpandEntry::kRootNid));
-  BuildHistogramsLossGuide(node, gmat, p_tree, gpair);
+  // ExpandEntry node(ExpandEntry::kRootNid, p_tree->GetDepth(ExpandEntry::kRootNid));
+  // BuildHistogramsLossGuide(node, gmat, p_tree, gpair);
 
-  this->InitNewNode(ExpandEntry::kRootNid, gmat, gpair, *p_tree);
+  // this->InitNewNode(ExpandEntry::kRootNid, gpair, *p_tree);
 
-  this->EvaluateSplits({node}, gmat, *p_tree);
-  node.split.loss_chg = snode_host_[ExpandEntry::kRootNid].best.loss_chg;
+  // this->EvaluateSplits({node}, gmat.cut, *p_tree);
+  // node.split.loss_chg = snode_host_[ExpandEntry::kRootNid].best.loss_chg;
 
-  qexpand_loss_guided_->push(node);
-  ++num_leaves;
+  // qexpand_loss_guided_->push(node);
+  // ++num_leaves;
 
-  while (!qexpand_loss_guided_->empty()) {
-    const ExpandEntry candidate = qexpand_loss_guided_->top();
-    const int nid = candidate.nid;
-    qexpand_loss_guided_->pop();
-    if (!candidate.IsValid(param_, num_leaves)) {
-      (*p_tree)[nid].SetLeaf(snode_host_[nid].weight * lr);
-    } else {
-      auto evaluator = tree_evaluator_.GetEvaluator();
-      NodeEntry<GradientSumT>& e = snode_host_[nid];
-      bst_float left_leaf_weight =
-          evaluator.CalcWeight(nid, GradStats<GradientSumT>{e.best.left_sum}) * lr;
-      bst_float right_leaf_weight =
-          evaluator.CalcWeight(nid, GradStats<GradientSumT>{e.best.right_sum}) * lr;
-      p_tree->ExpandNode(nid, e.best.SplitIndex(), e.best.split_value,
-                         e.best.DefaultLeft(), e.weight, left_leaf_weight,
-                         right_leaf_weight, e.best.loss_chg, e.stats.GetHess(),
-                         e.best.left_sum.GetHess(), e.best.right_sum.GetHess());
+  // while (!qexpand_loss_guided_->empty()) {
+  //   const ExpandEntry candidate = qexpand_loss_guided_->top();
+  //   const int nid = candidate.nid;
+  //   qexpand_loss_guided_->pop();
+  //   if (!candidate.IsValid(param_, num_leaves)) {
+  //     (*p_tree)[nid].SetLeaf(snode_host_[nid].weight * lr);
+  //   } else {
+  //     auto evaluator = tree_evaluator_.GetEvaluator();
+  //     NodeEntry<GradientSumT>& e = snode_host_[nid];
+  //     bst_float left_leaf_weight =
+  //         evaluator.CalcWeight(nid, GradStats<GradientSumT>{e.best.left_sum}) * lr;
+  //     bst_float right_leaf_weight =
+  //         evaluator.CalcWeight(nid, GradStats<GradientSumT>{e.best.right_sum}) * lr;
+  //     p_tree->ExpandNode(nid, e.best.SplitIndex(), e.best.split_value,
+  //                        e.best.DefaultLeft(), e.weight, left_leaf_weight,
+  //                        right_leaf_weight, e.best.loss_chg, e.stats.GetHess(),
+  //                        e.best.left_sum.GetHess(), e.best.right_sum.GetHess());
 
-      this->ApplySplit({candidate}, gmat, p_tree);
+  //     this->ApplySplit({candidate}, gmat, p_tree);
 
-      const int cleft = (*p_tree)[nid].LeftChild();
-      const int cright = (*p_tree)[nid].RightChild();
+  //     const int cleft = (*p_tree)[nid].LeftChild();
+  //     const int cright = (*p_tree)[nid].RightChild();
 
-      ExpandEntry left_node(cleft, p_tree->GetDepth(cleft));
-      ExpandEntry right_node(cright, p_tree->GetDepth(cright));
+  //     ExpandEntry left_node(cleft, p_tree->GetDepth(cleft));
+  //     ExpandEntry right_node(cright, p_tree->GetDepth(cright));
 
-      if (row_set_collection_[cleft].Size() < row_set_collection_[cright].Size()) {
-        BuildHistogramsLossGuide(left_node, gmat, p_tree, gpair);
-      } else {
-        BuildHistogramsLossGuide(right_node, gmat, p_tree, gpair);
-      }
+  //     if (row_set_collection_[cleft].Size() < row_set_collection_[cright].Size()) {
+  //       BuildHistogramsLossGuide(left_node, gmat, p_tree, gpair);
+  //     } else {
+  //       BuildHistogramsLossGuide(right_node, gmat, p_tree, gpair);
+  //     }
 
-      this->InitNewNode(cleft, gmat, gpair, *p_tree);
-      this->InitNewNode(cright, gmat, gpair, *p_tree);
-      bst_uint featureid = snode_host_[nid].best.SplitIndex();
-      tree_evaluator_.AddSplit(nid, cleft, cright, featureid,
-                               snode_host_[cleft].weight, snode_host_[cright].weight);
-      interaction_constraints_.Split(nid, featureid, cleft, cright);
+  //     this->InitNewNode(cleft, gpair, *p_tree);
+  //     this->InitNewNode(cright, gpair, *p_tree);
+  //     bst_uint featureid = snode_host_[nid].best.SplitIndex();
+  //     tree_evaluator_.AddSplit(nid, cleft, cright, featureid,
+  //                              snode_host_[cleft].weight, snode_host_[cright].weight);
+  //     interaction_constraints_.Split(nid, featureid, cleft, cright);
 
-      this->EvaluateSplits({left_node, right_node}, gmat, *p_tree);
-      left_node.split.loss_chg = snode_host_[cleft].best.loss_chg;
-      right_node.split.loss_chg = snode_host_[cright].best.loss_chg;
+  //     this->EvaluateSplits({left_node, right_node}, gmat.cut, *p_tree);
+  //     left_node.split.loss_chg = snode_host_[cleft].best.loss_chg;
+  //     right_node.split.loss_chg = snode_host_[cright].best.loss_chg;
 
-      qexpand_loss_guided_->push(left_node);
-      qexpand_loss_guided_->push(right_node);
+  //     qexpand_loss_guided_->push(left_node);
+  //     qexpand_loss_guided_->push(right_node);
 
-      ++num_leaves;  // give two and take one, as parent is no longer a leaf
-    }
-  }
+  //     ++num_leaves;  // give two and take one, as parent is no longer a leaf
+  //   }
+  // }
   builder_monitor_.Stop("ExpandWithLossGuide");
 }
 
 template <typename GradientSumT>
 void HistUpdater<GradientSumT>::Update(
     xgboost::tree::TrainParam const *param,
-    const common::GHistIndexMatrix &gmat,
     const HostDeviceVector<GradientPair>& gpair,
     DMatrix *p_fmat,
     xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
@@ -343,12 +525,11 @@ void HistUpdater<GradientSumT>::Update(
 
   tree_evaluator_.Reset(qu_, param_, p_fmat->Info().num_col_);
   interaction_constraints_.Reset();
-
-  this->InitData(gmat, gpair, *p_fmat, *p_tree);
+  common::GHistIndexMatrix gmat;
   if (param_.grow_policy == xgboost::tree::TrainParam::kLossGuide) {
     ExpandWithLossGuide(gmat, p_tree, gpair);
   } else {
-    ExpandWithDepthWise(gmat, p_tree, gpair);
+    ExpandWithDepthWise(p_fmat, p_tree, gpair);
   }
 
   for (int nid = 0; nid < p_tree->NumNodes(); ++nid) {
@@ -373,34 +554,40 @@ bool HistUpdater<GradientSumT>::UpdatePredictionCache(
   builder_monitor_.Start("UpdatePredictionCache");
   CHECK_GT(out_preds.Size(), 0U);
 
-  size_t n_nodes = row_set_collection_.Size();
-  std::vector<::sycl::event> events(n_nodes);
+   size_t n_nodes = p_last_tree_->GetNodes().size();
   for (size_t node = 0; node < n_nodes; node++) {
-    const common::RowSetCollection::Elem& rowset = row_set_collection_[node];
-    if (rowset.begin != nullptr && rowset.end != nullptr && rowset.Size() != 0) {
-      int nid = rowset.node_id;
-      // if a node is marked as deleted by the pruner, traverse upward to locate
-      // a non-deleted leaf.
-      if ((*p_last_tree_)[nid].IsDeleted()) {
-        while ((*p_last_tree_)[nid].IsDeleted()) {
-          nid = (*p_last_tree_)[nid].Parent();
-        }
-        CHECK((*p_last_tree_)[nid].IsLeaf());
-      }
-      bst_float leaf_value = (*p_last_tree_)[nid].LeafValue();
-      const size_t* rid = rowset.begin;
-      const size_t num_rows = rowset.Size();
+    if ((*p_last_tree_)[node].IsLeaf()) {
+      for (size_t page_idx = 0; page_idx < row_set_collection_.size(); ++page_idx) {
+        const auto& row_set = row_set_collection_[page_idx];
+        size_t base_rowid = base_rowid_[page_idx];
 
-      events[node] = qu_->submit([&](::sycl::handler& cgh) {
-        cgh.parallel_for<>(::sycl::range<1>(num_rows), [=](::sycl::item<1> pid) {
-          size_t row_id = rid[pid.get_id(0)];
-          float& val = const_cast<float&>(out_preds(row_id));
-          val += leaf_value;
-        });
-      });
+        const common::RowSetCollection::Elem& rowset_elem = row_set[node];
+        if (rowset_elem.begin != nullptr && rowset_elem.end != nullptr && rowset_elem.Size() != 0) {
+          int nid = rowset_elem.node_id;
+          // if a node is marked as deleted by the pruner, traverse upward to locate
+          // a non-deleted leaf.
+          if ((*p_last_tree_)[nid].IsDeleted()) {
+            while ((*p_last_tree_)[nid].IsDeleted()) {
+              nid = (*p_last_tree_)[nid].Parent();
+            }
+            CHECK((*p_last_tree_)[nid].IsLeaf());
+          }
+          bst_float leaf_value = (*p_last_tree_)[nid].LeafValue();
+          const size_t* rid = rowset_elem.begin;
+          const size_t num_rows = rowset_elem.Size();
+
+          qu_->submit([&](::sycl::handler& cgh) {
+            cgh.parallel_for<>(::sycl::range<1>(num_rows), [=](::sycl::item<1> pid) {
+              size_t row_id = rid[pid.get_id(0)] + base_rowid;
+              float& val = const_cast<float&>(out_preds(row_id));
+              val += leaf_value;
+            });
+          });
+        }
+      }
     }
+    qu_->wait();
   }
-  qu_->wait();
 
   builder_monitor_.Stop("UpdatePredictionCache");
   return true;
@@ -477,156 +664,101 @@ void HistUpdater<GradientSumT>::InitData(
                                 const HostDeviceVector<GradientPair>& gpair,
                                 const DMatrix& fmat,
                                 const RegTree& tree) {
-  CHECK((param_.max_depth > 0 || param_.max_leaves > 0))
-      << "max_depth or max_leaves cannot be both 0 (unlimited); "
-      << "at least one should be a positive quantity.";
-  if (param_.grow_policy == xgboost::tree::TrainParam::kDepthWise) {
-    CHECK(param_.max_depth > 0) << "max_depth cannot be 0 (unlimited) "
-                                << "when grow_policy is depthwise.";
-  }
-  builder_monitor_.Start("InitData");
-  const auto& info = fmat.Info();
+  // CHECK((param_.max_depth > 0 || param_.max_leaves > 0))
+  //     << "max_depth or max_leaves cannot be both 0 (unlimited); "
+  //     << "at least one should be a positive quantity.";
+  // if (param_.grow_policy == xgboost::tree::TrainParam::kDepthWise) {
+  //   CHECK(param_.max_depth > 0) << "max_depth cannot be 0 (unlimited) "
+  //                               << "when grow_policy is depthwise.";
+  // }
+  // builder_monitor_.Start("InitData");
+  // const auto& info = fmat.Info();
 
-  if (!column_sampler_) {
-    column_sampler_ = xgboost::common::MakeColumnSampler(ctx_);
-  }
+  // if (!column_sampler_) {
+  //   column_sampler_ = xgboost::common::MakeColumnSampler(ctx_);
+  // }
+  // {
+  //   // initialize histogram collection
+  //   uint32_t nbins = gmat.cut.Ptrs().back();
+  //   hist_.Init(qu_, nbins);
+  //   hist_local_worker_.Init(qu_, nbins);
 
-  // initialize the row set
-  {
-    row_set_collection_.Clear();
+  //   // initialize histogram builder
+  //   hist_builder_ = common::GHistBuilder<GradientSumT>(qu_, nbins);
+  // }
 
-    // initialize histogram collection
-    uint32_t nbins = gmat.cut.Ptrs().back();
-    hist_.Init(qu_, nbins);
-    hist_local_worker_.Init(qu_, nbins);
+  // {
+  //   /* determine layout of data */
+  //   const size_t nrow = info.num_row_;
+  //   const size_t ncol = info.num_col_;
+  //   const size_t nnz = info.num_nonzero_;
+  //   // number of discrete bins for feature 0
+  //   const uint32_t nbins_f0 = gmat.cut.Ptrs()[1] - gmat.cut.Ptrs()[0];
+  //   if (nrow * ncol == nnz) {
+  //     // dense data with zero-based indexing
+  //     data_layout_ = kDenseDataZeroBased;
+  //   } else if (nbins_f0 == 0 && nrow * (ncol - 1) == nnz) {
+  //     // dense data with one-based indexing
+  //     data_layout_ = kDenseDataOneBased;
+  //   } else {
+  //     // sparse data
+  //     data_layout_ = kSparseData;
+  //   }
+  // }
 
-    // initialize histogram builder
-    hist_builder_ = common::GHistBuilder<GradientSumT>(qu_, nbins);
+  // // store a pointer to the tree
+  // p_last_tree_ = &tree;
+  // column_sampler_->Init(ctx_, info.num_col_, info.feature_weights.ConstHostVector(),
+  //                       param_.colsample_bynode, param_.colsample_bylevel,
+  //                       param_.colsample_bytree);
+  // if (data_layout_ == kDenseDataZeroBased || data_layout_ == kDenseDataOneBased) {
+  //   /* specialized code for dense data:
+  //      choose the column that has a least positive number of discrete bins.
+  //      For dense data (with no missing value),
+  //      the sum of gradient histogram is equal to snode[nid] */
+  //   const std::vector<uint32_t>& row_ptr = gmat.cut.Ptrs();
+  //   const auto nfeature = static_cast<bst_uint>(row_ptr.size() - 1);
+  //   uint32_t min_nbins_per_feature = 0;
+  //   for (bst_uint i = 0; i < nfeature; ++i) {
+  //     const uint32_t nbins = row_ptr[i + 1] - row_ptr[i];
+  //     if (nbins > 0) {
+  //       if (min_nbins_per_feature == 0 || min_nbins_per_feature > nbins) {
+  //         min_nbins_per_feature = nbins;
+  //         fid_least_bins_ = i;
+  //       }
+  //     }
+  //   }
+  //   CHECK_GT(min_nbins_per_feature, 0U);
+  // }
 
-    USMVector<size_t, MemoryType::on_device>* row_indices = &(row_set_collection_.Data());
-    row_indices->Resize(qu_, info.num_row_);
-    size_t* p_row_indices = row_indices->Data();
-    // mark subsample and build list of member rows
-    if (param_.subsample < 1.0f) {
-      CHECK_EQ(param_.sampling_method, xgboost::tree::TrainParam::kUniform)
-        << "Only uniform sampling is supported, "
-        << "gradient-based sampling is only support by GPU Hist.";
-      InitSampling(gpair, row_indices);
-    } else {
-      int has_neg_hess = 0;
-      const GradientPair* gpair_ptr = gpair.ConstDevicePointer();
-      ::sycl::event event;
-      {
-        ::sycl::buffer<int, 1> flag_buf(&has_neg_hess, 1);
-        event = qu_->submit([&](::sycl::handler& cgh) {
-          auto flag_buf_acc  = flag_buf.get_access<::sycl::access::mode::read_write>(cgh);
-          cgh.parallel_for<>(::sycl::range<1>(::sycl::range<1>(info.num_row_)),
-                                            [=](::sycl::item<1> pid) {
-            const size_t idx = pid.get_id(0);
-            p_row_indices[idx] = idx;
-            if (gpair_ptr[idx].GetHess() < 0.0f) {
-              AtomicRef<int> has_neg_hess_ref(flag_buf_acc[0]);
-              has_neg_hess_ref.fetch_max(1);
-            }
-          });
-        });
-      }
+  // std::fill(snode_host_.begin(), snode_host_.end(),  NodeEntry<GradientSumT>(param_));
 
-      if (has_neg_hess) {
-        size_t max_idx = 0;
-        {
-          ::sycl::buffer<size_t, 1> flag_buf(&max_idx, 1);
-          event = qu_->submit([&](::sycl::handler& cgh) {
-            cgh.depends_on(event);
-            auto flag_buf_acc  = flag_buf.get_access<::sycl::access::mode::read_write>(cgh);
-            cgh.parallel_for<>(::sycl::range<1>(::sycl::range<1>(info.num_row_)),
-                                                [=](::sycl::item<1> pid) {
-              const size_t idx = pid.get_id(0);
-              if (gpair_ptr[idx].GetHess() >= 0.0f) {
-                AtomicRef<size_t> max_idx_ref(flag_buf_acc[0]);
-                p_row_indices[max_idx_ref++] = idx;
-              }
-            });
-          });
-        }
-        row_indices->Resize(qu_, max_idx, 0, &event);
-      }
-      qu_->wait_and_throw();
-    }
-  }
-  row_set_collection_.Init();
+  // {
+  //   if (param_.grow_policy == xgboost::tree::TrainParam::kLossGuide) {
+  //     qexpand_loss_guided_.reset(new ExpandQueue(LossGuide));
+  //   } else {
+  //     // qexpand_depth_wise_.clear();
+  //   }
+  // }
 
-  {
-    /* determine layout of data */
-    const size_t nrow = info.num_row_;
-    const size_t ncol = info.num_col_;
-    const size_t nnz = info.num_nonzero_;
-    // number of discrete bins for feature 0
-    const uint32_t nbins_f0 = gmat.cut.Ptrs()[1] - gmat.cut.Ptrs()[0];
-    if (nrow * ncol == nnz) {
-      // dense data with zero-based indexing
-      data_layout_ = kDenseDataZeroBased;
-    } else if (nbins_f0 == 0 && nrow * (ncol - 1) == nnz) {
-      // dense data with one-based indexing
-      data_layout_ = kDenseDataOneBased;
-    } else {
-      // sparse data
-      data_layout_ = kSparseData;
-    }
-  }
+  // {
+  //   uint32_t nbins = gmat.cut.Ptrs().back();
+  //   hist_buffer_.Init(qu_, nbins);
+  //   bool isDense = data_layout_ != kSparseData;
+  //   const size_t ncolumns = isDense ? gmat.nfeatures : gmat.row_stride;
+  //   size_t buffer_size = GetRequiredBufferSize<GradientSumT>
+  //                        (device_properties_, info.num_row_, nbins, ncolumns,
+  //                         gmat.max_num_bins, gmat.min_num_bins);
+  //   hist_buffer_.Reset(buffer_size);
+  // }
 
-  // store a pointer to the tree
-  p_last_tree_ = &tree;
-  column_sampler_->Init(ctx_, info.num_col_, info.feature_weights.ConstHostVector(),
-                        param_.colsample_bynode, param_.colsample_bylevel,
-                        param_.colsample_bytree);
-  if (data_layout_ == kDenseDataZeroBased || data_layout_ == kDenseDataOneBased) {
-    /* specialized code for dense data:
-       choose the column that has a least positive number of discrete bins.
-       For dense data (with no missing value),
-       the sum of gradient histogram is equal to snode[nid] */
-    const std::vector<uint32_t>& row_ptr = gmat.cut.Ptrs();
-    const auto nfeature = static_cast<bst_uint>(row_ptr.size() - 1);
-    uint32_t min_nbins_per_feature = 0;
-    for (bst_uint i = 0; i < nfeature; ++i) {
-      const uint32_t nbins = row_ptr[i + 1] - row_ptr[i];
-      if (nbins > 0) {
-        if (min_nbins_per_feature == 0 || min_nbins_per_feature > nbins) {
-          min_nbins_per_feature = nbins;
-          fid_least_bins_ = i;
-        }
-      }
-    }
-    CHECK_GT(min_nbins_per_feature, 0U);
-  }
-
-  std::fill(snode_host_.begin(), snode_host_.end(),  NodeEntry<GradientSumT>(param_));
-
-  {
-    if (param_.grow_policy == xgboost::tree::TrainParam::kLossGuide) {
-      qexpand_loss_guided_.reset(new ExpandQueue(LossGuide));
-    } else {
-      qexpand_depth_wise_.clear();
-    }
-  }
-
-  {
-    uint32_t nbins = gmat.cut.Ptrs().back();
-    hist_buffer_.Init(qu_, nbins);
-    bool isDense = data_layout_ != kSparseData;
-    const size_t ncolumns = isDense ? gmat.nfeatures : gmat.row_stride;
-    size_t buffer_size = GetRequiredBufferSize<GradientSumT>
-                         (device_properties_, info.num_row_, nbins, ncolumns,
-                          gmat.max_num_bins, gmat.min_num_bins);
-    hist_buffer_.Reset(buffer_size);
-  }
-
-  builder_monitor_.Stop("InitData");
+  // builder_monitor_.Stop("InitData");
 }
 
 template <typename GradientSumT>
 void HistUpdater<GradientSumT>::AddSplitsToRowSet(
                                                 const std::vector<ExpandEntry>& nodes,
+                                                int page_idx,
                                                 RegTree* p_tree) {
   const size_t n_nodes = nodes.size();
   for (size_t i = 0; i < n_nodes; ++i) {
@@ -634,14 +766,14 @@ void HistUpdater<GradientSumT>::AddSplitsToRowSet(
     const size_t n_left = partition_builder_.GetNLeftElems(i);
     const size_t n_right = partition_builder_.GetNRightElems(i);
 
-    row_set_collection_.AddSplit(nid, (*p_tree)[nid].LeftChild(),
+    row_set_collection_[page_idx].AddSplit(nid, (*p_tree)[nid].LeftChild(),
         (*p_tree)[nid].RightChild(), n_left, n_right);
   }
 }
 
 template <typename GradientSumT>
 void HistUpdater<GradientSumT>::ApplySplit(
-                      const std::vector<ExpandEntry> nodes,
+                      const std::vector<ExpandEntry>& nodes,
                       const common::GHistIndexMatrix& gmat,
                       RegTree* p_tree) {
   using CommonRowPartitioner = xgboost::tree::CommonRowPartitioner;
@@ -651,31 +783,30 @@ void HistUpdater<GradientSumT>::ApplySplit(
   std::vector<int32_t> split_conditions(n_nodes);
   CommonRowPartitioner::FindSplitConditions(nodes, *p_tree, gmat, &split_conditions);
 
+  auto& row_set = row_set_collection_[gmat.page_idx];
   partition_builder_.Init(qu_, n_nodes, [&](size_t node_in_set) {
     const int32_t nid = nodes[node_in_set].nid;
-    return row_set_collection_[nid].Size();
+    return row_set[nid].Size();
   });
 
   ::sycl::event event;
-  partition_builder_.Partition(gmat, nodes, row_set_collection_,
+  partition_builder_.Partition(gmat, nodes, row_set,
                                split_conditions, p_tree, &event);
   qu_->wait_and_throw();
 
   for (size_t node_in_set = 0; node_in_set < n_nodes; node_in_set++) {
     const int32_t nid = nodes[node_in_set].nid;
-    size_t* data_result = const_cast<size_t*>(row_set_collection_[nid].begin);
+    size_t* data_result = row_set[nid].begin;
     partition_builder_.MergeToArray(node_in_set, data_result, &event);
   }
   qu_->wait_and_throw();
 
-  AddSplitsToRowSet(nodes, p_tree);
-
+  AddSplitsToRowSet(nodes, gmat.page_idx, p_tree);
   builder_monitor_.Stop("ApplySplit");
 }
 
 template <typename GradientSumT>
 void HistUpdater<GradientSumT>::InitNewNode(int nid,
-                                            const common::GHistIndexMatrix& gmat,
                                             const HostDeviceVector<GradientPair>& gpair,
                                             const RegTree& tree) {
   builder_monitor_.Start("InitNewNode");
@@ -685,11 +816,14 @@ void HistUpdater<GradientSumT>::InitNewNode(int nid,
     if (tree[nid].IsRoot()) {
       GradStats<GradientSumT> grad_stat;
       if (data_layout_ == kDenseDataZeroBased || data_layout_ == kDenseDataOneBased) {
-        const std::vector<uint32_t>& row_ptr = gmat.cut.Ptrs();
-        const uint32_t ibegin = row_ptr[fid_least_bins_];
-        const uint32_t iend = row_ptr[fid_least_bins_ + 1];
+        const uint32_t ibegin = min_bins_feat_begin_;
+        const uint32_t iend = min_bins_feat_end_;
         const auto* hist = reinterpret_cast<GradStats<GradientSumT>*>(hist_[nid].Data());
 
+        CHECK_EQ(sizeof(GradStats<GradientSumT>),
+                 sizeof(xgboost::detail::GradientPairInternal<GradientSumT>));
+
+        fprintf(stderr, "ibegin = %d\tiend = %d\t hist.size = %ld\n", ibegin, iend, hist_[nid].Size());
         std::vector<GradStats<GradientSumT>> ets(iend - ibegin);
         qu_->memcpy(ets.data(), hist + ibegin,
                    (iend - ibegin) * sizeof(GradStats<GradientSumT>)).wait_and_throw();
@@ -697,26 +831,31 @@ void HistUpdater<GradientSumT>::InitNewNode(int nid,
           grad_stat += et;
         }
       } else {
-        const common::RowSetCollection::Elem e = row_set_collection_[nid];
-        const size_t* row_idxs = e.begin;
-        const size_t size = e.Size();
-        const GradientPair* gpair_ptr = gpair.ConstDevicePointer();
+        for (size_t page_idx = 0; page_idx < row_set_collection_.size(); ++page_idx) {
+          const auto& row_set = row_set_collection_[page_idx];
+          size_t base_rowid = base_rowid_[page_idx];
+          const common::RowSetCollection::Elem e = row_set[nid];
+          const size_t* row_idxs = e.begin;
+          const size_t size = e.Size();
 
-        ::sycl::buffer<GradStats<GradientSumT>> buff(&grad_stat, 1);
-        qu_->submit([&](::sycl::handler& cgh) {
-          auto reduction = ::sycl::reduction(buff, cgh, ::sycl::plus<>());
-          cgh.parallel_for<>(::sycl::range<1>(size), reduction,
-                            [=](::sycl::item<1> pid, auto& sum) {
-            size_t i = pid.get_id(0);
-            size_t row_idx = row_idxs[i];
-            if constexpr (std::is_same<GradientPair::ValueT, GradientSumT>::value) {
-              sum += gpair_ptr[row_idx];
-            } else {
-              sum += GradStats<GradientSumT>(gpair_ptr[row_idx].GetGrad(),
-                                             gpair_ptr[row_idx].GetHess());
-            }
-          });
-        }).wait_and_throw();
+          const GradientPair* gpair_ptr = gpair.ConstDevicePointer() + base_rowid;
+
+          ::sycl::buffer<GradStats<GradientSumT>> buff(&grad_stat, 1);
+          qu_->submit([&](::sycl::handler& cgh) {
+            auto reduction = ::sycl::reduction(buff, cgh, ::sycl::plus<>());
+            cgh.parallel_for<>(::sycl::range<1>(size), reduction,
+                              [=](::sycl::item<1> pid, auto& sum) {
+              size_t i = pid.get_id(0);
+              size_t row_idx = row_idxs[i];
+              if constexpr (std::is_same<GradientPair::ValueT, GradientSumT>::value) {
+                sum += gpair_ptr[row_idx];
+              } else {
+                sum += GradStats<GradientSumT>(gpair_ptr[row_idx].GetGrad(),
+                                               gpair_ptr[row_idx].GetHess());
+              }
+            });
+          }).wait_and_throw();
+        }
       }
       auto rc = collective::Allreduce(
                       ctx_, linalg::MakeVec(reinterpret_cast<GradientSumT*>(&grad_stat), 2),
@@ -747,10 +886,9 @@ void HistUpdater<GradientSumT>::InitNewNode(int nid,
 template<typename GradientSumT>
 void HistUpdater<GradientSumT>::EvaluateSplits(
                         const std::vector<ExpandEntry>& nodes_set,
-                        const common::GHistIndexMatrix& gmat,
+                        const xgboost::common::HistogramCuts& cut,
                         const RegTree& tree) {
   builder_monitor_.Start("EvaluateSplits");
-
   const size_t n_nodes_in_set = nodes_set.size();
 
   using FeatureSetType = std::shared_ptr<HostDeviceVector<bst_feature_t>>;
@@ -777,12 +915,12 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
 
   split_queries_device_.Resize(qu_, total_features);
   auto event = qu_->memcpy(split_queries_device_.Data(), split_queries_host_.data(),
-                          total_features * sizeof(SplitQuery));
+                           total_features * sizeof(SplitQuery));
 
   auto evaluator = tree_evaluator_.GetEvaluator();
   SplitQuery* split_queries_device = split_queries_device_.Data();
-  const uint32_t* cut_ptr = gmat.cut.cut_ptrs_.ConstDevicePointer();
-  const bst_float* cut_val = gmat.cut.cut_values_.ConstDevicePointer();
+  const uint32_t* cut_ptr = cut.cut_ptrs_.ConstDevicePointer();
+  const bst_float* cut_val = cut.cut_values_.ConstDevicePointer();
 
   snode_device_.ResizeNoCopy(qu_, snode_host_.size());
   event = qu_->memcpy(snode_device_.Data(), snode_host_.data(),
@@ -812,7 +950,7 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
     });
   });
   event = qu_->memcpy(best_splits_host_.data(), best_splits,
-                     total_features * sizeof(SplitEntry<GradientSumT>), event);
+                      total_features * sizeof(SplitEntry<GradientSumT>), event);
 
   qu_->wait();
   for (size_t i = 0; i < total_features; i++) {

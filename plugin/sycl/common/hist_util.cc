@@ -16,21 +16,21 @@ namespace xgboost {
 namespace sycl {
 namespace common {
 
-/*!
- * \brief Fill histogram with zeroes
- */
-template<typename GradientSumT>
-void InitHist(::sycl::queue* qu, GHistRow<GradientSumT, MemoryType::on_device>* hist,
-              size_t size, ::sycl::event* event) {
-  *event = qu->fill(hist->Begin(),
-                   xgboost::detail::GradientPairInternal<GradientSumT>(), size, *event);
-}
-template void InitHist(::sycl::queue* qu,
-                       GHistRow<float,  MemoryType::on_device>* hist,
-                       size_t size, ::sycl::event* event);
-template void InitHist(::sycl::queue* qu,
-                       GHistRow<double, MemoryType::on_device>* hist,
-                       size_t size, ::sycl::event* event);
+// /*!
+//  * \brief Fill histogram with zeroes
+//  */
+// template<typename GradientSumT>
+// void InitHist(::sycl::queue* qu, GHistRow<GradientSumT, MemoryType::on_device>* hist,
+//               size_t size, ::sycl::event* event) {
+//   *event = qu->fill(hist->Begin(),
+//                    xgboost::detail::GradientPairInternal<GradientSumT>(), size, *event);
+// }
+// template void InitHist(::sycl::queue* qu,
+//                        GHistRow<float,  MemoryType::on_device>* hist,
+//                        size_t size, ::sycl::event* event);
+// template void InitHist(::sycl::queue* qu,
+//                        GHistRow<double, MemoryType::on_device>* hist,
+//                        size_t size, ::sycl::event* event);
 
 /*!
  * \brief Copy histogram from src to dst
@@ -108,7 +108,7 @@ template <typename GradientPairT>
         gpair += hist_buffer_data[j * nbins + idx_bin];
       }
 
-      hist_data[idx_bin] = gpair;
+      hist_data[idx_bin] += gpair;
     });
   });
 
@@ -128,10 +128,10 @@ template<typename FPType, typename BinIdxType, bool isDense>
   using GradientPairT = xgboost::detail::GradientPairInternal<FPType>;
   const size_t size = row_indices.Size();
   const size_t* rid = row_indices.begin;
-  const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
-  const auto* pgh = gpair.ConstDevicePointer();
+  const size_t n_columns = gmat.nfeatures;
+  const auto* pgh = gpair.ConstDevicePointer() + gmat.base_rowid;
   const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
-  const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
+  const uint32_t* offsets = gmat.cut_device->cut_ptrs_.ConstDevicePointer();
   const size_t nbins = gmat.nbins;
 
   const size_t work_group_size = dispatcher.work_group_size;
@@ -196,9 +196,9 @@ template<typename FPType, typename BinIdxType>
   const size_t size = row_indices.Size();
   const size_t* rid = row_indices.begin;
   const size_t n_columns = gmat.nfeatures;
-  const auto* pgh = gpair.ConstDevicePointer();
+  const auto* pgh = gpair.ConstDevicePointer() + gmat.base_rowid;
   const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
-  const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
+  const uint32_t* offsets = gmat.cut_device->cut_ptrs_.ConstDevicePointer();
   const size_t nbins = gmat.nbins;
 
   const size_t work_group_size = dispatcher.work_group_size;
@@ -267,20 +267,21 @@ template<typename FPType, typename BinIdxType, bool isDense>
                             ::sycl::event event_priv) {
   const size_t size = row_indices.Size();
   const size_t* rid = row_indices.begin;
-  const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
+  const size_t n_columns = gmat.nfeatures;
+
   const GradientPair::ValueT* pgh =
-    reinterpret_cast<const GradientPair::ValueT*>(gpair.ConstDevicePointer());
+    reinterpret_cast<const GradientPair::ValueT*>(gpair.ConstDevicePointer() + gmat.base_rowid);
   const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
-  const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
+  const uint32_t* offsets = gmat.cut_device->cut_ptrs_.ConstDevicePointer();
   FPType* hist_data = reinterpret_cast<FPType*>(hist->Data());
   const size_t nbins = gmat.nbins;
 
   size_t work_group_size = dispatcher.work_group_size;
   const size_t n_work_groups = n_columns / work_group_size + (n_columns % work_group_size > 0);
 
-  auto event_fill = qu->fill(hist_data, FPType(0), nbins * 2, event_priv);
+  // auto event_fill = qu->fill(hist_data, FPType(0), nbins * 2, event_priv);
   auto event_main = qu->submit([&](::sycl::handler& cgh) {
-    cgh.depends_on(event_fill);
+    cgh.depends_on(event_priv);
     cgh.parallel_for<>(::sycl::nd_range<2>(::sycl::range<2>(size, n_work_groups * work_group_size),
                                            ::sycl::range<2>(1, work_group_size)),
                        [=](::sycl::nd_item<2> pid) {
@@ -441,24 +442,24 @@ template
               ::sycl::event event_priv,
               bool force_atomic_use);
 
-template<typename GradientSumT>
-void GHistBuilder<GradientSumT>::SubtractionTrick(GHistRowT<MemoryType::on_device>* self,
-                                                  const GHistRowT<MemoryType::on_device>& sibling,
-                                                  const GHistRowT<MemoryType::on_device>& parent) {
-  const size_t size = self->Size();
-  CHECK_EQ(sibling.Size(), size);
-  CHECK_EQ(parent.Size(), size);
+// template<typename GradientSumT>
+// void GHistBuilder<GradientSumT>::SubtractionTrick(GHistRowT<MemoryType::on_device>* self,
+//                                                   const GHistRowT<MemoryType::on_device>& sibling,
+//                                                   const GHistRowT<MemoryType::on_device>& parent) {
+//   const size_t size = self->Size();
+//   CHECK_EQ(sibling.Size(), size);
+//   CHECK_EQ(parent.Size(), size);
 
-  SubtractionHist(qu_, self, parent, sibling, size, ::sycl::event());
-}
-template
-void GHistBuilder<float>::SubtractionTrick(GHistRow<float, MemoryType::on_device>* self,
-                                           const GHistRow<float, MemoryType::on_device>& sibling,
-                                           const GHistRow<float, MemoryType::on_device>& parent);
-template
-void GHistBuilder<double>::SubtractionTrick(GHistRow<double, MemoryType::on_device>* self,
-                                            const GHistRow<double, MemoryType::on_device>& sibling,
-                                            const GHistRow<double, MemoryType::on_device>& parent);
+//   SubtractionHist(qu_, self, parent, sibling, size, ::sycl::event());
+// }
+// template
+// void GHistBuilder<float>::SubtractionTrick(GHistRow<float, MemoryType::on_device>* self,
+//                                            const GHistRow<float, MemoryType::on_device>& sibling,
+//                                            const GHistRow<float, MemoryType::on_device>& parent);
+// template
+// void GHistBuilder<double>::SubtractionTrick(GHistRow<double, MemoryType::on_device>* self,
+//                                             const GHistRow<double, MemoryType::on_device>& sibling,
+//                                             const GHistRow<double, MemoryType::on_device>& parent);
 }  // namespace common
 }  // namespace sycl
 }  // namespace xgboost

@@ -29,10 +29,11 @@ class BatchHistRowsAdder: public HistRowsAdder<GradientSumT> {
 
     for (auto const& entry : builder->nodes_for_explicit_hist_build_) {
       int nid = entry.nid;
-      auto event = builder->hist_.AddHistRow(nid);
+      auto event = builder->hist_.AddHistRow(nid, {0, 0});
+      event.wait();
     }
     for (auto const& node : builder->nodes_for_subtraction_trick_) {
-      auto event = builder->hist_.AddHistRow(node.nid);
+      builder->hist_.AddHistRow(node.nid);
     }
 
     builder->builder_monitor_.Stop("AddHistRows");

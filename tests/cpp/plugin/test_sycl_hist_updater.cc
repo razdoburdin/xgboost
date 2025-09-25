@@ -78,7 +78,7 @@ class TestHistUpdater : public HistUpdater<GradientSumT> {
                                DMatrix *p_fmat,
                                RegTree* p_tree,
                                const HostDeviceVector<GradientPair>& gpair) {
-    HistUpdater<GradientSumT>::ExpandWithDepthWise(gmat, p_tree, gpair);
+    HistUpdater<GradientSumT>::ExpandWithDepthWise(p_fmat, p_tree, gpair);
   }
 };
 

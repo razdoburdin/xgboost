@@ -35,7 +35,6 @@ class BatchHistSynchronizer: public HistSynchronizer<GradientSumT> {
     builder->builder_monitor_.Start("SyncHistograms");
     const size_t nbins = builder->hist_builder_.GetNumBins();
 
-    hist_sync_events_.resize(builder->nodes_for_explicit_hist_build_.size());
     for (int i = 0; i < builder->nodes_for_explicit_hist_build_.size(); i++) {
       const auto entry = builder->nodes_for_explicit_hist_build_[i];
       auto& this_hist = builder->hist_[entry.nid];
@@ -44,8 +43,9 @@ class BatchHistSynchronizer: public HistSynchronizer<GradientSumT> {
         const size_t parent_id = (*p_tree)[entry.nid].Parent();
         auto& parent_hist = builder->hist_[parent_id];
         auto& sibling_hist = builder->hist_[entry.GetSiblingId(p_tree, parent_id)];
-        hist_sync_events_[i] = common::SubtractionHist(builder->qu_, &sibling_hist, parent_hist,
-                                                       this_hist, nbins, ::sycl::event());
+        auto event = common::SubtractionHist(builder->qu_, &sibling_hist, parent_hist,
+                                             this_hist, nbins, ::sycl::event());
+        event.wait_and_throw();
       }
     }
     builder->qu_->wait_and_throw();
