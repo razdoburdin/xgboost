@@ -823,7 +823,6 @@ void HistUpdater<GradientSumT>::InitNewNode(int nid,
         CHECK_EQ(sizeof(GradStats<GradientSumT>),
                  sizeof(xgboost::detail::GradientPairInternal<GradientSumT>));
 
-        fprintf(stderr, "ibegin = %d\tiend = %d\t hist.size = %ld\n", ibegin, iend, hist_[nid].Size());
         std::vector<GradStats<GradientSumT>> ets(iend - ibegin);
         qu_->memcpy(ets.data(), hist + ibegin,
                    (iend - ibegin) * sizeof(GradStats<GradientSumT>)).wait_and_throw();

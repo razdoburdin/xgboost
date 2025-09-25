@@ -140,12 +140,10 @@ void GHistIndexMatrix::Init(::sycl::queue* qu,
   auto bin_type_size = page.index.GetBinTypeSize();
   index.SetBinTypeSize(bin_type_size);
 
-  if (index.data_.Size() != bin_type_size * n_index) {
-    index.Resize(qu, bin_type_size * n_index);
-    qu->copy(page.index.begin(),
-             index.begin(),
-             bin_type_size * n_index).wait_and_throw();
-  }
+  index.Resize(qu, bin_type_size * n_index);
+  qu->copy(page.index.begin(),
+            index.begin(),
+            bin_type_size * n_index).wait_and_throw();
 }
 
 // void GHistIndexMatrix::Init(::sycl::queue* qu,
