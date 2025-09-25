@@ -65,6 +65,7 @@ class USMVector {
     if (ptr == nullptr) LOG(FATAL) << "Unable to allocate "
                                    << size * sizeof(T)
                                    << " bytes";
+    // fprintf(stderr, "Allocating %ld elements of size %ld each. %.2lf MB total\n", size, sizeof(T), double(size * sizeof(T)) / (1024 * 1024));
     return std::unique_ptr<T, USMDeleter<T>>(ptr, USMDeleter<T>(qu));
   }
 
@@ -120,6 +121,8 @@ class USMVector {
   }
 
   size_t Size() const { return size_; }
+
+  size_t SizeBytes() const { return size_ * sizeof(T); }
 
   size_t Capacity() const { return capacity_; }
 

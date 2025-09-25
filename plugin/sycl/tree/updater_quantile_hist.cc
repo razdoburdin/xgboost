@@ -77,7 +77,6 @@ void QuantileHistMaker::Update(xgboost::tree::TrainParam const *param,
                                DMatrix *dmat,
                                xgboost::common::Span<HostDeviceVector<bst_node_t>> out_position,
                                const std::vector<RegTree *> &trees) {
-  gpair->Data()->SetDevice(ctx_->Device());
   // rescale learning rate according to size of trees
   float lr = param_.learning_rate;
   param_.learning_rate = lr / trees.size();

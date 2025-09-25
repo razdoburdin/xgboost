@@ -179,7 +179,7 @@ class GHistIndexCache {
 
   void ShrinkCache(size_t max_cache_size) {
     while (cached_pages_.size() > max_cache_size) {
-      fprintf(stderr, "Removing page %d from cache\n", cached_pages_.back());
+      // fprintf(stderr, "Removing page %d from cache\n", cached_pages_.back());
       gmat_cache_[cached_pages_.back()].reset();
       cached_pages_.pop_back();
     }
@@ -190,7 +190,7 @@ class GHistIndexCache {
     if (cached_pages_.size() < max_cache_size) {
       gmat_cache_[page_idx] = std::make_unique<GHistIndexMatrix>();
       cached_pages_.push_back(page_idx);
-      fprintf(stderr, "Adding page %d to cache\n", cached_pages_.back());
+      // fprintf(stderr, "Adding page %d to cache\n", cached_pages_.back());
       return;
     }
 
@@ -201,7 +201,7 @@ class GHistIndexCache {
 
     // cached_pages_.size() == max_cache_size
     // move memory to another page
-    fprintf(stderr, "Mooving page %d to %ld\n", cached_pages_.back(), page_idx);
+    // fprintf(stderr, "Mooving page %d to %ld\n", cached_pages_.back(), page_idx);
     gmat_cache_[page_idx] = std::move(gmat_cache_[cached_pages_.back()]);
     CHECK_EQ(gmat_cache_[cached_pages_.back()].get(), nullptr);
     cached_pages_.back() = page_idx;
@@ -213,7 +213,6 @@ class GHistIndexCache {
     std::fill(computed_pages_.begin(), computed_pages_.end(), 0);
     for (size_t page_idx = 0; page_idx < n_pages_; ++page_idx) {
       if (gmat_cache_[page_idx].get() != nullptr) {
-        // fprintf(stderr, "Processing page %ld from cache\n", page_idx);
         fn(*gmat_cache_[page_idx]);
         computed_pages_[page_idx] = 1;
       }

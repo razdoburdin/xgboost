@@ -122,7 +122,6 @@ class PartitionBuilder {
     result_rows_.resize(2 * n_nodes);
     n_nodes_ = n_nodes;
 
-
     nodes_offsets_[0] = 0;
     for (size_t i = 1; i < n_nodes+1; ++i) {
       nodes_offsets_[i] = nodes_offsets_[i-1] + funcNTaks(i-1);

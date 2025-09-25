@@ -66,7 +66,9 @@ class HistUpdater {
     builder_monitor_.Init("SYCL::Quantile::HistUpdater");
     kernel_monitor_.Init("SYCL::Quantile::HistUpdater");
     if (param.max_depth > 0) {
-      snode_device_.Resize(qu, 1u << (param.max_depth + 1));
+      snode_device_.ResizeNoCopy(qu, 1u << (param.max_depth + 1));
+      split_queries_device_.ResizeNoCopy(qu, (1u << (param.max_depth)) * fmat->Info().num_col_);
+      best_splits_device_.ResizeNoCopy(qu, (1u << (param.max_depth)) * fmat->Info().num_col_);
     }
     has_fp64_support_ = qu_->get_device().has(::sycl::aspect::fp64);
     const auto sub_group_sizes =

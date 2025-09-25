@@ -373,9 +373,14 @@ void HistUpdater<GradientSumT>::ExpandWithDepthWise(
   int n_pages = p_fmat->NumBatches();
   gmat_cache_.Init(qu_, cut_, n_pages, index_size);
   
-  size_t reserved_mem = cut_->cut_ptrs_.Size() * sizeof(uint32_t) + 
-                        cut_->cut_values_.Size() * sizeof(float) + 
-                        cut_->min_vals_.Size() * sizeof(float) + 
+  size_t reserved_mem = split_queries_device_.SizeBytes() +
+                        snode_device_.SizeBytes() +
+                        best_splits_device_.SizeBytes() +
+                        cut_->cut_ptrs_.Size() * sizeof(uint32_t) +
+                        cut_->cut_values_.Size() * sizeof(float) +
+                        cut_->min_vals_.Size() * sizeof(float) +
+                        p_fmat->Info().num_row_ * sizeof(float) +
+                        p_fmat->Info().num_row_ * sizeof(float) +
                         p_fmat->Info().num_row_ * sizeof(size_t) +
                         p_fmat->Info().num_row_ * sizeof(GradientPair) +
                         hist_buffer_.GetDeviceBuffer().Size() * 2 * sizeof(GradientSumT);
@@ -525,9 +530,8 @@ void HistUpdater<GradientSumT>::Update(
 
   tree_evaluator_.Reset(qu_, param_, p_fmat->Info().num_col_);
   interaction_constraints_.Reset();
-  common::GHistIndexMatrix gmat;
   if (param_.grow_policy == xgboost::tree::TrainParam::kLossGuide) {
-    ExpandWithLossGuide(gmat, p_tree, gpair);
+    // ExpandWithLossGuide(gmat, p_tree, gpair);
   } else {
     ExpandWithDepthWise(p_fmat, p_tree, gpair);
   }
@@ -912,7 +916,7 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
   }
   const size_t total_features = pos;
 
-  split_queries_device_.Resize(qu_, total_features);
+  split_queries_device_.ResizeNoCopy(qu_, total_features);
   auto event = qu_->memcpy(split_queries_device_.Data(), split_queries_host_.data(),
                            total_features * sizeof(SplitQuery));
 
