@@ -113,6 +113,7 @@ void GHistIndexMatrix::ResizeIndex(::sycl::queue* qu, size_t n_index) {
 void GHistIndexMatrix::Init(::sycl::queue* qu,
                             Context const * ctx,
                             const xgboost::GHistIndexMatrix& page,
+                            USMVector<uint8_t, MemoryType::on_host>* p_copy_buff,
                             std::shared_ptr<xgboost::common::HistogramCuts> p_cut_device,
                             size_t _max_num_bins,
                             size_t _min_num_bins,
@@ -141,9 +142,14 @@ void GHistIndexMatrix::Init(::sycl::queue* qu,
   index.SetBinTypeSize(bin_type_size);
 
   index.Resize(qu, bin_type_size * n_index);
-  qu->copy(page.index.begin(),
-            index.begin(),
-            bin_type_size * n_index).wait_and_throw();
+
+  p_copy_buff->ResizeNoCopy(qu, bin_type_size * n_index);
+  std::copy(page.index.begin(),
+            page.index.end(),
+            p_copy_buff->Data());
+  qu->copy(p_copy_buff->DataConst(),
+           index.begin(),
+           bin_type_size * n_index).wait_and_throw();
 }
 
 // void GHistIndexMatrix::Init(::sycl::queue* qu,

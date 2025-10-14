@@ -32,7 +32,7 @@ using AtomicRef = ::sycl::atomic_ref<T,
                                     ::sycl::memory_scope::device,
                                     ::sycl::access::address_space::ext_intel_global_device_space>;
 
-enum class MemoryType { shared, on_device};
+enum class MemoryType { shared, on_device, on_host};
 
 template <typename T>
 class USMDeleter {
@@ -59,21 +59,23 @@ class USMVector {
     T* ptr = nullptr;
     if constexpr (memory_type == MemoryType::shared) {
       ptr = ::sycl::malloc_shared<T>(size, *qu);
-    } else {
+    } else if constexpr (memory_type == MemoryType::on_device) {
       ptr = ::sycl::malloc_device<T>(size, *qu);
+    } else {
+      ptr = ::sycl::malloc_host<T>(size, *qu);
     }
+
     if (ptr == nullptr) LOG(FATAL) << "Unable to allocate "
                                    << size * sizeof(T)
                                    << " bytes";
-    // fprintf(stderr, "Allocating %ld elements of size %ld each. %.2lf MB total\n", size, sizeof(T), double(size * sizeof(T)) / (1024 * 1024));
     return std::unique_ptr<T, USMDeleter<T>>(ptr, USMDeleter<T>(qu));
   }
 
   void copy_vector_to_memory_(::sycl::queue* qu, const std::vector<T> &vec) {
-    if constexpr (memory_type == MemoryType::shared) {
-      std::copy(vec.begin(), vec.end(), data_.get());
-    } else {
+    if constexpr (memory_type == MemoryType::on_device) {
       qu->memcpy(data_.get(), vec.data(), size_ * sizeof(T));
+    } else {
+      std::copy(vec.begin(), vec.end(), data_.get());
     }
   }
 
