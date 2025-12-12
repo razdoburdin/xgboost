@@ -32,7 +32,7 @@ using AtomicRef = ::sycl::atomic_ref<T,
                                     ::sycl::memory_scope::device,
                                     ::sycl::access::address_space::ext_intel_global_device_space>;
 
-enum class MemoryType { shared, on_device};
+enum class MemoryType { shared, on_device, on_host};
 
 template <typename T>
 class USMDeleter {
@@ -54,8 +54,10 @@ class USMVector {
   std::shared_ptr<T> allocate_memory_(::sycl::queue* qu, size_t size) {
     if constexpr (memory_type == MemoryType::shared) {
       return std::shared_ptr<T>(::sycl::malloc_shared<T>(size_, *qu), USMDeleter<T>(qu));
-    } else {
+    } else if constexpr (memory_type == MemoryType::on_device) {
       return std::shared_ptr<T>(::sycl::malloc_device<T>(size_, *qu), USMDeleter<T>(qu));
+    } else {
+      return std::shared_ptr<T>(::sycl::malloc_host<T>(size_, *qu), USMDeleter<T>(qu));
     }
   }
 

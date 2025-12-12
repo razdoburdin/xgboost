@@ -212,11 +212,11 @@ class HistUpdater {
   const xgboost::tree::TrainParam& param_;
   std::shared_ptr<xgboost::common::ColumnSampler> column_sampler_;
 
-  std::vector<SplitQuery> split_queries_host_;
   USMVector<SplitQuery, MemoryType::on_device> split_queries_device_;
+  USMVector<SplitQuery, MemoryType::on_host> split_queries_host_;
 
   USMVector<SplitEntry<GradientSumT>, MemoryType::on_device> best_splits_device_;
-  std::vector<SplitEntry<GradientSumT>> best_splits_host_;
+  USMVector<SplitEntry<GradientSumT>, MemoryType::on_host> best_splits_host_;
 
   TreeEvaluator<GradientSumT> tree_evaluator_;
   FeatureInteractionConstraintHost interaction_constraints_;
@@ -243,7 +243,7 @@ class HistUpdater {
   common::HistCollection<GradientSumT, MemoryType::on_device> hist_local_worker_;
 
   /*! \brief TreeNode Data: statistics for each constructed node */
-  std::vector<NodeEntry<GradientSumT>> snode_host_;
+  USMVector<NodeEntry<GradientSumT>, MemoryType::on_host> snode_host_;
   USMVector<NodeEntry<GradientSumT>, MemoryType::on_device> snode_device_;
 
   xgboost::common::Monitor builder_monitor_;

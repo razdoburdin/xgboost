@@ -154,12 +154,18 @@ class HistDispatcher {
 template<typename FPType>
 size_t GetRequiredBufferSize(const DeviceProperties& device_prop, size_t max_n_rows, size_t nbins,
                              size_t ncolumns, size_t max_num_bins, size_t min_num_bins) {
-  size_t max_nblocks = HistDispatcher<FPType>::kMaxGPUUtilisation * device_prop.max_compute_units;
+  using GradientPairT = xgboost::detail::GradientPairInternal<FPType>;
+  size_t max_nblocks = static_cast<size_t>((0.8 * device_prop.l2_size) / (sizeof(GradientPairT) * nbins));
+  max_nblocks = std::min(max_nblocks, HistDispatcher<FPType>::kMaxGPUUtilisation * device_prop.max_compute_units);
   // Buffer size doesn't depend on isDense flag.
   auto build_params = HistDispatcher<FPType>
                       (device_prop, true, max_n_rows, max_nblocks, nbins,
                        ncolumns, max_num_bins, min_num_bins);
 
+  LOG(INFO) << "build_params.block.nblocks = " << build_params.block.nblocks;
+  LOG(INFO) << "build_params.use_atomic = " << build_params.use_atomics;
+  LOG(INFO) << "max_nblocks = " << max_nblocks;
+  LOG(INFO) << "device_prop.max_compute_units = " << device_prop.max_compute_units;
   return build_params.use_atomics ? 0 : build_params.block.nblocks;
 }
 

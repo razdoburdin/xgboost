@@ -602,7 +602,8 @@ void HistUpdater<GradientSumT>::InitData(
     CHECK_GT(min_nbins_per_feature, 0U);
   }
 
-  std::fill(snode_host_.begin(), snode_host_.end(),  NodeEntry<GradientSumT>(param_));
+  // std::fill(snode_host_.begin(), snode_host_.end(),  NodeEntry<GradientSumT>(param_));
+  qu_->fill(snode_host_.Data(), NodeEntry<GradientSumT>(param_), snode_host_.Size()).wait();
 
   {
     if (param_.grow_policy == xgboost::tree::TrainParam::kLossGuide) {
@@ -683,7 +684,7 @@ void HistUpdater<GradientSumT>::InitNewNode(int nid,
                                             const RegTree& tree) {
   builder_monitor_.Start("InitNewNode");
 
-  snode_host_.resize(tree.NumNodes(), NodeEntry<GradientSumT>(param_));
+  snode_host_.Resize(qu_, tree.NumNodes(), NodeEntry<GradientSumT>(param_));
   auto sc_tree = tree.HostScView();
   {
     if (sc_tree.IsRoot(nid)) {
@@ -761,6 +762,7 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
 
   // Generate feature set for each tree node
   size_t pos = 0;
+  split_queries_host_.Resize(qu_, n_nodes_in_set * gmat.nfeatures);
   for (size_t nid_in_set = 0; nid_in_set < n_nodes_in_set; ++nid_in_set) {
     const bst_node_t nid = nodes_set[nid_in_set].nid;
     FeatureSetType features_set = column_sampler_->GetFeatureSet(tree.GetDepth(nid));
@@ -768,36 +770,63 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
       const size_t fid = features_set->ConstHostVector()[idx];
       if (interaction_constraints_.Query(nid, fid)) {
         auto this_hist = hist_[nid].DataConst();
-        if (pos < split_queries_host_.size()) {
-          split_queries_host_[pos] = SplitQuery{nid, fid, this_hist};
-        } else {
-          split_queries_host_.push_back({nid, fid, this_hist});
-        }
+        split_queries_host_[pos] = SplitQuery{nid, fid, this_hist};
         ++pos;
       }
     }
   }
   const size_t total_features = pos;
+  best_splits_host_.ResizeNoCopy(qu_, total_features);
+  // if (split_queries_host_.Size() < total_features) {
+  //   split_queries_host_.ResizeNoCopy(qu_, total_features);
 
-  split_queries_device_.Resize(qu_, total_features);
-  auto event = qu_->memcpy(split_queries_device_.Data(), split_queries_host_.data(),
-                          total_features * sizeof(SplitQuery));
+  //   pos = 0;
+  //   for (size_t nid_in_set = 0; nid_in_set < n_nodes_in_set; ++nid_in_set) {
+  //     const bst_node_t nid = nodes_set[nid_in_set].nid;
+  //     FeatureSetType features_set = column_sampler_->GetFeatureSet(tree.GetDepth(nid));
+  //     for (size_t idx = 0; idx < features_set->Size(); idx++) {
+  //       const size_t fid = features_set->ConstHostVector()[idx];
+  //       if (interaction_constraints_.Query(nid, fid)) {
+  //         auto this_hist = hist_[nid].DataConst();
+  //         split_queries_host_[pos] = SplitQuery{nid, fid, this_hist};
+  //         ++pos;
+  //       }
+  //     }
+  //   }
+  // }
+
+  bool igpu = device_properties_.usm_host_allocations;
+
+  SplitQuery* split_queries;
+  SplitEntry<GradientSumT>* best_splits;
+  const NodeEntry<GradientSumT>* snode;
+  ::sycl::event event;
+  if (igpu) {
+    split_queries = split_queries_host_.Data();
+    best_splits = best_splits_host_.Data();
+    snode = snode_host_.DataConst();
+  } else {
+    split_queries_device_.Resize(qu_, total_features);
+    split_queries = split_queries_device_.Data();
+
+    best_splits_device_.ResizeNoCopy(qu_, total_features);
+    best_splits = best_splits_device_.Data();
+
+    snode_device_.ResizeNoCopy(qu_, snode_host_.Size());
+    snode = snode_device_.DataConst();
+
+    event = qu_->memcpy(split_queries, split_queries_host_.Data(),
+                        total_features * sizeof(SplitQuery));
+
+    event = qu_->memcpy(snode_device_.Data(), snode_host_.Data(),
+                      snode_host_.Size() * sizeof(NodeEntry<GradientSumT>), event);
+  }
 
   auto evaluator = tree_evaluator_.GetEvaluator();
-  SplitQuery* split_queries_device = split_queries_device_.Data();
   const uint32_t* cut_ptr = gmat.cut.cut_ptrs_.ConstDevicePointer();
   const bst_float* cut_val = gmat.cut.cut_values_.ConstDevicePointer();
 
-  snode_device_.ResizeNoCopy(qu_, snode_host_.size());
-  event = qu_->memcpy(snode_device_.Data(), snode_host_.data(),
-                     snode_host_.size() * sizeof(NodeEntry<GradientSumT>), event);
-  const NodeEntry<GradientSumT>* snode = snode_device_.Data();
-
   const float min_child_weight = param_.min_child_weight;
-
-  best_splits_device_.ResizeNoCopy(qu_, total_features);
-  if (best_splits_host_.size() < total_features) best_splits_host_.resize(total_features);
-  SplitEntry<GradientSumT>* best_splits = best_splits_device_.Data();
 
   event = qu_->submit([&](::sycl::handler& cgh) {
     cgh.depends_on(event);
@@ -806,17 +835,19 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
                        [=](::sycl::nd_item<2> pid) {
       int i = pid.get_global_id(0);
       auto sg = pid.get_sub_group();
-      int nid = split_queries_device[i].nid;
-      int fid = split_queries_device[i].fid;
-      const GradientPairT* hist_data = split_queries_device[i].hist;
+      int nid = split_queries[i].nid;
+      int fid = split_queries[i].fid;
+      const GradientPairT* hist_data = split_queries[i].hist;
 
       best_splits[i] = snode[nid].best;
       EnumerateSplit(sg, cut_ptr, cut_val, hist_data, snode[nid],
                      &(best_splits[i]), fid, nid, evaluator, min_child_weight);
     });
   });
-  event = qu_->memcpy(best_splits_host_.data(), best_splits,
-                     total_features * sizeof(SplitEntry<GradientSumT>), event);
+  if (!igpu) {
+    event = qu_->memcpy(best_splits_host_.Data(), best_splits,
+                      total_features * sizeof(SplitEntry<GradientSumT>), event);
+  }
 
   qu_->wait();
   for (size_t i = 0; i < total_features; i++) {
