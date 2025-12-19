@@ -191,10 +191,11 @@ class PartitionBuilder {
                  const RowSetCollection& row_set_collection,
                  const std::vector<int32_t>& split_conditions,
                  RegTree* p_tree,
-                 ::sycl::event* general_event) {
+                 ::sycl::event* event) {
     nodes_events_.resize(n_nodes_);
 
-    parts_size_.ResizeAndFill(qu_, 2 * n_nodes_, 0, general_event);
+    parts_size_.ResizeNoCopy(qu_, 2 * n_nodes_);
+    *event = qu_->memset(parts_size_.Data(), 0, parts_size_.Size() * sizeof(size_t), *event);
 
     for (size_t node_in_set = 0; node_in_set < n_nodes_; node_in_set++) {
       const int32_t nid = nodes[node_in_set].nid;
@@ -208,39 +209,39 @@ class PartitionBuilder {
         switch (gmat.index.GetBinTypeSize()) {
           case common::BinTypeSize::kUint8BinsTypeSize:
             node_event = Partition<uint8_t>(split_condition, gmat, rid_span, node,
-                                            &rid_buf, part_size, *general_event);
+                                            &rid_buf, part_size, *event);
             break;
           case common::BinTypeSize::kUint16BinsTypeSize:
             node_event = Partition<uint16_t>(split_condition, gmat, rid_span, node,
-                                            &rid_buf, part_size, *general_event);
+                                            &rid_buf, part_size, *event);
             break;
           case common::BinTypeSize::kUint32BinsTypeSize:
             node_event = Partition<uint32_t>(split_condition, gmat, rid_span, node,
-                                            &rid_buf, part_size, *general_event);
+                                            &rid_buf, part_size, *event);
             break;
           default:
             CHECK(false);  // no default behavior
         }
+        node_event = qu_->memcpy(const_cast<size_t*>(rid_span.begin), rid_buf.data(), sizeof(size_t) * row_set_collection[nid].Size(), node_event);
       } else {
         node_event = ::sycl::event();
       }
     }
 
-    *general_event = qu_->memcpy(result_rows_.data(),
+    *event = qu_->memcpy(result_rows_.data(),
                                  parts_size_.DataConst(),
                                  sizeof(size_t) * 2 * n_nodes_,
                                  nodes_events_);
   }
 
-  void MergeToArray(size_t nid,
-                    size_t* data_result,
-                    ::sycl::event* event) {
-    size_t n_nodes_total = GetNLeftElems(nid) + GetNRightElems(nid);
-    if (n_nodes_total > 0) {
-      const size_t* data = data_.Data() + nodes_offsets_[nid];
-      qu_->memcpy(data_result, data, sizeof(size_t) * n_nodes_total, *event);
-    }
-  }
+  // void MergeToArray(size_t nid,
+  //                   size_t* data_result) {
+  //   size_t n_nodes_total = GetNLeftElems(nid) + GetNRightElems(nid);
+  //   if (n_nodes_total > 0) {
+  //     const size_t* data = data_.Data() + nodes_offsets_[nid];
+  //     qu_->memcpy(data_result, data, sizeof(size_t) * n_nodes_total).wait();
+  //   }
+  // }
 
  protected:
   std::vector<size_t> nodes_offsets_;

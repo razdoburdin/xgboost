@@ -97,8 +97,6 @@ void HistUpdater<GradientSumT>::BuildLocalHistograms(
     if (row_set_collection_[nid].Size() > 0) {
       event = BuildHist(gpair, row_set_collection_[nid], gmat, &(hist_[nid]),
                         &(hist_buffer_.GetDeviceBuffer()), event);
-    } else {
-      common::InitHist(qu_, &(hist_[nid]), hist_[nid].Size(), &event);
     }
   }
   qu_->wait_and_throw();
@@ -602,8 +600,7 @@ void HistUpdater<GradientSumT>::InitData(
     CHECK_GT(min_nbins_per_feature, 0U);
   }
 
-  // std::fill(snode_host_.begin(), snode_host_.end(),  NodeEntry<GradientSumT>(param_));
-  qu_->fill(snode_host_.Data(), NodeEntry<GradientSumT>(param_), snode_host_.Size()).wait();
+  std::fill(snode_host_.Begin(), snode_host_.End(),  NodeEntry<GradientSumT>(param_));
 
   {
     if (param_.grow_policy == xgboost::tree::TrainParam::kLossGuide) {
@@ -665,12 +662,12 @@ void HistUpdater<GradientSumT>::ApplySplit(
                                split_conditions, p_tree, &event);
   qu_->wait_and_throw();
 
-  for (size_t node_in_set = 0; node_in_set < n_nodes; node_in_set++) {
-    const int32_t nid = nodes[node_in_set].nid;
-    size_t* data_result = const_cast<size_t*>(row_set_collection_[nid].begin);
-    partition_builder_.MergeToArray(node_in_set, data_result, &event);
-  }
-  qu_->wait_and_throw();
+  // #pragma omp parallel for
+  // for (size_t node_in_set = 0; node_in_set < n_nodes; node_in_set++) {
+  //   const int32_t nid = nodes[node_in_set].nid;
+  //   size_t* data_result = const_cast<size_t*>(row_set_collection_[nid].begin);
+  //   partition_builder_.MergeToArray(node_in_set, data_result);
+  // }
 
   AddSplitsToRowSet(nodes, p_tree);
 

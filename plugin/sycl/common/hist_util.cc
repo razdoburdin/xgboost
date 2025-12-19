@@ -17,22 +17,6 @@ namespace sycl {
 namespace common {
 
 /*!
- * \brief Fill histogram with zeroes
- */
-template<typename GradientSumT>
-void InitHist(::sycl::queue* qu, GHistRow<GradientSumT, MemoryType::on_device>* hist,
-              size_t size, ::sycl::event* event) {
-  *event = qu->fill(hist->Begin(),
-                   xgboost::detail::GradientPairInternal<GradientSumT>(), size, *event);
-}
-template void InitHist(::sycl::queue* qu,
-                       GHistRow<float,  MemoryType::on_device>* hist,
-                       size_t size, ::sycl::event* event);
-template void InitHist(::sycl::queue* qu,
-                       GHistRow<double, MemoryType::on_device>* hist,
-                       size_t size, ::sycl::event* event);
-
-/*!
  * \brief Copy histogram from src to dst
  */
 template<typename GradientSumT>
@@ -441,24 +425,6 @@ template
               ::sycl::event event_priv,
               bool force_atomic_use);
 
-template<typename GradientSumT>
-void GHistBuilder<GradientSumT>::SubtractionTrick(GHistRowT<MemoryType::on_device>* self,
-                                                  const GHistRowT<MemoryType::on_device>& sibling,
-                                                  const GHistRowT<MemoryType::on_device>& parent) {
-  const size_t size = self->Size();
-  CHECK_EQ(sibling.Size(), size);
-  CHECK_EQ(parent.Size(), size);
-
-  SubtractionHist(qu_, self, parent, sibling, size, ::sycl::event());
-}
-template
-void GHistBuilder<float>::SubtractionTrick(GHistRow<float, MemoryType::on_device>* self,
-                                           const GHistRow<float, MemoryType::on_device>& sibling,
-                                           const GHistRow<float, MemoryType::on_device>& parent);
-template
-void GHistBuilder<double>::SubtractionTrick(GHistRow<double, MemoryType::on_device>* self,
-                                            const GHistRow<double, MemoryType::on_device>& sibling,
-                                            const GHistRow<double, MemoryType::on_device>& parent);
 }  // namespace common
 }  // namespace sycl
 }  // namespace xgboost

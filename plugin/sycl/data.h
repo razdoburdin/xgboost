@@ -190,25 +190,8 @@ class USMVector {
     }
   }
 
-  void ResizeAndFill(::sycl::queue* qu, size_t size_new, int v, ::sycl::event* event) {
-    if (size_new <= size_) {
-      size_ = size_new;
-      *event = qu->memset(data_.get(), v, size_new * sizeof(T), *event);
-    } else if (size_new <= capacity_) {
-      size_ = size_new;
-      *event = qu->memset(data_.get(), v, size_new * sizeof(T), *event);
-    } else {
-      size_t size_old = size_;
-      auto data_old = data_;
-      size_ = size_new;
-      capacity_ = size_new;
-      data_ = allocate_memory_(qu, size_);
-      *event = qu->memset(data_.get(), v, size_new * sizeof(T), *event);
-    }
-  }
-
-  ::sycl::event Fill(::sycl::queue* qu, T v) {
-    return qu->fill(data_.get(), v, size_);
+  void Fill(::sycl::queue* qu, T v, ::sycl::event* event) {
+    *event = qu->fill(data_.get(), v, size_, *event);
   }
 
   void Init(::sycl::queue* qu, const std::vector<T> &vec) {

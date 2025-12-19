@@ -23,9 +23,7 @@ class HistDispatcher {
   // Higher -> better GPU utilisation with higer memory overhead.
   constexpr static int kMaxGPUUtilisation = 4;
   // Minimal value of block size for buffer-based hist building
-  constexpr static size_t KMinBlockSize = 32;
-  // Maximal value of block size, when increasing can affect performance
-  constexpr static size_t KMaxEffectiveBlockSize = 1u << 11;
+  constexpr static size_t KMinBlockSize = 64;
   // Maximal number of bins acceptable for local histograms
   constexpr static size_t KMaxNumBins = 256;
   // Amount of sram for local-histogram kernel launch
@@ -48,21 +46,10 @@ class HistDispatcher {
   size_t work_group_size;
   BlockParams block;
 
-  inline BlockParams GetBlocksParameters(size_t size, size_t max_nblocks,
-                                         size_t max_compute_units) const {
+  inline BlockParams GetBlocksParameters(size_t size, size_t max_nblocks) const {
     if (max_nblocks == 0) return {0, 0};
-    size_t nblocks = max_compute_units;
-
+    size_t nblocks = max_nblocks;
     size_t block_size = size / nblocks + !!(size % nblocks);
-    while (block_size > (1u << 11)) {
-      nblocks *= 2;
-      if (nblocks >= max_nblocks) {
-        nblocks = max_nblocks;
-        block_size = size / nblocks + !!(size % nblocks);
-        break;
-      }
-      block_size = size / nblocks + !!(size % nblocks);
-    }
 
     if (block_size < KMinBlockSize) {
       block_size = KMinBlockSize;
@@ -75,7 +62,7 @@ class HistDispatcher {
   HistDispatcher(const DeviceProperties& device_prop, bool isDense, size_t size,
                  size_t max_nblocks, size_t nbins, size_t ncolumns,
                  size_t max_num_bins, size_t min_num_bins) {
-    block = GetBlocksParameters(size, max_nblocks, device_prop.max_compute_units);
+    block = GetBlocksParameters(size, max_nblocks);
     work_group_size = std::min(ncolumns, device_prop.max_work_group_size);
     if (!device_prop.is_gpu) return;
 
@@ -162,10 +149,10 @@ size_t GetRequiredBufferSize(const DeviceProperties& device_prop, size_t max_n_r
                       (device_prop, true, max_n_rows, max_nblocks, nbins,
                        ncolumns, max_num_bins, min_num_bins);
 
-  LOG(INFO) << "build_params.block.nblocks = " << build_params.block.nblocks;
-  LOG(INFO) << "build_params.use_atomic = " << build_params.use_atomics;
-  LOG(INFO) << "max_nblocks = " << max_nblocks;
-  LOG(INFO) << "device_prop.max_compute_units = " << device_prop.max_compute_units;
+  // LOG(INFO) << "build_params.block.nblocks = " << build_params.block.nblocks;
+  // LOG(INFO) << "build_params.use_atomic = " << build_params.use_atomics;
+  // LOG(INFO) << "max_nblocks = " << max_nblocks;
+  // LOG(INFO) << "device_prop.max_compute_units = " << device_prop.max_compute_units;
   return build_params.use_atomics ? 0 : build_params.block.nblocks;
 }
 

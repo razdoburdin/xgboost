@@ -30,14 +30,6 @@ using BinTypeSize = ::xgboost::common::BinTypeSize;
 class ColumnMatrix;
 
 /*!
- * \brief Fill histogram with zeroes
- */
-template<typename GradientSumT>
-void InitHist(::sycl::queue* qu,
-              GHistRow<GradientSumT, MemoryType::on_device>* hist,
-              size_t size, ::sycl::event* event);
-
-/*!
  * \brief Copy histogram from src to dst
  */
 template<typename GradientSumT>
@@ -83,26 +75,18 @@ class HistCollection {
   }
 
   // Create an empty histogram for i-th node
-  ::sycl::event AddHistRow(bst_uint nid) {
-    ::sycl::event event;
+  void AddHistRow(bst_uint nid) {
     if (data_.count(nid) == 0) {
       data_[nid] =
-        std::make_shared<GHistRowT>(qu_, nbins_,
-                                    xgboost::detail::GradientPairInternal<GradientSumT>(0, 0),
-                                    &event);
-    } else {
-      data_[nid]->Resize(qu_, nbins_,
-                         xgboost::detail::GradientPairInternal<GradientSumT>(0, 0),
-                         &event);
+        std::make_unique<GHistRowT>(qu_, nbins_);
     }
-    return event;
   }
 
  private:
   /*! \brief Number of all bins over all features */
   uint32_t nbins_ = 0;
 
-  std::unordered_map<uint32_t, std::shared_ptr<GHistRowT>> data_;
+  std::unordered_map<uint32_t, std::unique_ptr<GHistRowT>> data_;
 
   ::sycl::queue* qu_;
 };
@@ -165,11 +149,6 @@ class GHistBuilder {
                           const DeviceProperties& device_prop,
                           ::sycl::event event,
                           bool force_atomic_use = false);
-
-  // Construct a histogram via subtraction trick
-  void SubtractionTrick(GHistRowT<MemoryType::on_device>* self,
-                        const GHistRowT<MemoryType::on_device>& sibling,
-                        const GHistRowT<MemoryType::on_device>& parent);
 
   uint32_t GetNumBins() const {
       return nbins_;
