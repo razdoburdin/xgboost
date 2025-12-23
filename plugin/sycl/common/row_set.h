@@ -31,13 +31,11 @@ class RowSetCollection {
   struct Elem {
     const size_t* begin{nullptr};
     const size_t* end{nullptr};
-    bst_node_t node_id{-1};  // id of node associated with this instance set; -1 means uninitialized
     Elem()
          = default;
     Elem(const size_t* begin,
-         const size_t* end,
-         bst_node_t node_id = -1)
-        : begin(begin), end(end), node_id(node_id) {}
+         const size_t* end)
+        : begin(begin), end(end) {}
 
 
     inline size_t Size() const {
@@ -73,7 +71,7 @@ class RowSetCollection {
 
     const size_t* begin = row_indices_.Begin();
     const size_t* end = row_indices_.End();
-    elem_of_each_node_.emplace_back(Elem(begin, end, 0));
+    elem_of_each_node_.emplace_back(Elem(begin, end));
   }
 
   auto& Data() { return row_indices_; }
@@ -96,16 +94,16 @@ class RowSetCollection {
 
 
     if (left_node_id >= elem_of_each_node_.size()) {
-      elem_of_each_node_.resize(left_node_id + 1, Elem(nullptr, nullptr, -1));
+      elem_of_each_node_.resize(left_node_id + 1, Elem(nullptr, nullptr));
     }
     if (right_node_id >= elem_of_each_node_.size()) {
-      elem_of_each_node_.resize(right_node_id + 1, Elem(nullptr, nullptr, -1));
+      elem_of_each_node_.resize(right_node_id + 1, Elem(nullptr, nullptr));
     }
 
 
-    elem_of_each_node_[left_node_id] = Elem(begin, begin + n_left, left_node_id);
-    elem_of_each_node_[right_node_id] = Elem(begin + n_left, e.end, right_node_id);
-    elem_of_each_node_[node_id] = Elem(nullptr, nullptr, -1);
+    elem_of_each_node_[left_node_id] = Elem(begin, begin + n_left);
+    elem_of_each_node_[right_node_id] = Elem(begin + n_left, e.end);
+    elem_of_each_node_[node_id] = Elem(nullptr, nullptr);
   }
 
  private:

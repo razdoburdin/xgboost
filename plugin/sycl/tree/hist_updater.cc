@@ -378,16 +378,15 @@ bool HistUpdater<GradientSumT>::UpdatePredictionCache(
   for (size_t node = 0; node < n_nodes; node++) {
     const common::RowSetCollection::Elem& rowset = row_set_collection_[node];
     if (rowset.begin != nullptr && rowset.end != nullptr && rowset.Size() != 0) {
-      int nid = rowset.node_id;
       // if a node is marked as deleted by the pruner, traverse upward to locate
       // a non-deleted leaf.
-      if (tree.IsDeleted(nid)) {
-        while (tree.IsDeleted(nid)) {
-          nid = tree.Parent(nid);
+      if (tree.IsDeleted(node)) {
+        while (tree.IsDeleted(node)) {
+          node = tree.Parent(node);
         }
-        CHECK(tree.IsLeaf(nid));
+        CHECK(tree.IsLeaf(node));
       }
-      bst_float leaf_value = tree.LeafValue(nid);
+      bst_float leaf_value = tree.LeafValue(node);
       const size_t* rid = rowset.begin;
       const size_t num_rows = rowset.Size();
 

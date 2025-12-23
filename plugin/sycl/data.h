@@ -148,6 +148,7 @@ class USMVector {
     } else {
       size_ = size_new;
       capacity_ = size_new;
+      data_.reset();
       data_ = allocate_memory_(qu, size_);
     }
   }
@@ -197,6 +198,7 @@ class USMVector {
   void Init(::sycl::queue* qu, const std::vector<T> &vec) {
     size_ = vec.size();
     capacity_ = size_;
+    data_.reset();
     data_ = allocate_memory_(qu, size_);
     copy_vector_to_memory_(qu, vec);
   }
