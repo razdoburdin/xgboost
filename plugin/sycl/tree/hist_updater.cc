@@ -88,17 +88,18 @@ void HistUpdater<GradientSumT>::BuildLocalHistograms(
     RegTree *p_tree,
     const HostDeviceVector<GradientPair>& gpair) {
   builder_monitor_.Start("BuildLocalHistograms");
-  const size_t n_nodes = nodes_for_explicit_hist_build_.size();
+  // const size_t n_nodes = nodes_for_explicit_hist_build_.size();
   ::sycl::event event;
 
-  for (size_t i = 0; i < n_nodes; i++) {
-    const int32_t nid = nodes_for_explicit_hist_build_[i].nid;
+  // for (size_t i = 0; i < n_nodes; i++) {
+  //   const int32_t nid = nodes_for_explicit_hist_build_[i].nid;
 
-    if (row_set_collection_[nid].Size() > 0) {
-      event = BuildHist(gpair, row_set_collection_[nid], gmat, &(hist_[nid]),
-                        &(hist_buffer_.GetDeviceBuffer()), event);
-    }
-  }
+  //   if (row_set_collection_[nid].Size() > 0) {
+  //     event = BuildHist(gpair, row_set_collection_[nid], gmat, &(hist_[nid]),
+  //                       &(hist_buffer_.GetDeviceBuffer()), event);
+  //   }
+  // }
+  event = BuildHist(gpair, gmat, event);
   qu_->wait_and_throw();
   builder_monitor_.Stop("BuildLocalHistograms");
 }

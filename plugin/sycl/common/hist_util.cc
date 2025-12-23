@@ -296,6 +296,92 @@ template<typename FPType, typename BinIdxType, bool isDense>
   return event_main;
 }
 
+// Kernel with atomic using
+template<typename FPType, typename BinIdxType, bool isDense>
+::sycl::event BuildHistKernel(::sycl::queue* qu,
+                              const HostDeviceVector<GradientPair>& gpair,
+                              const std::vector<bst_node_t>& nodes,
+                              const bst_node_t* nodes_ptr,
+                              RowSetCollection* row_set,
+                              const GHistIndexMatrix& gmat,
+                              HistCollection<FPType>* histograms,
+                              ::sycl::event event) {
+  const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
+  const GradientPair::ValueT* pgh =
+    reinterpret_cast<const GradientPair::ValueT*>(gpair.ConstDevicePointer());
+  const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
+  const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
+  const size_t nbins = gmat.nbins;
+
+  size_t work_group_size = 16;
+  const size_t n_work_groups = n_columns / work_group_size + (n_columns % work_group_size > 0);
+
+  size_t n_nodes = nodes.size();
+
+  ::sycl::event event_batch = event;
+  const auto* rows = row_set->RowSetDevice(qu, &event_batch);
+  auto** hist_collection = histograms->GetDevicePointers();
+
+  std::vector<::sycl::event> events;
+  size_t size = 0;
+  for (bst_node_t nid : nodes) {
+    size = std::max(size, (*row_set)[nid].Size());
+    FPType* hist = reinterpret_cast<FPType*>((*histograms)[nid].Data());
+    events.push_back(qu->fill(hist, FPType(0), nbins * 2, event_batch));
+  }
+
+  size_t block_size = 256;
+  size_t n_blocks = size / block_size + (size % block_size > 0);
+  if (n_nodes * n_blocks * n_work_groups < 48) {
+    n_blocks = 48 / (n_work_groups * n_nodes);
+    block_size = size / n_blocks + (size % n_blocks > 0);
+  }
+
+  event_batch = qu->submit([&](::sycl::handler& cgh) {
+    cgh.depends_on(events);
+    cgh.parallel_for<>(::sycl::nd_range<3>(::sycl::range<3>(n_nodes, n_blocks, n_work_groups * work_group_size),
+                                           ::sycl::range<3>(      1,        1, work_group_size)),
+                      [=](::sycl::nd_item<3> pid) {
+      auto group  = pid.get_group();
+      const size_t node_idx = pid.get_global_id(0);
+      const size_t block    = pid.get_global_id(1);
+      const size_t group_id = group.get_group_id()[2];
+
+      bst_node_t nid = nodes_ptr[node_idx];
+      size_t n_rows = rows[nid].Size();
+
+      size_t begin = block * block_size;
+      size_t end = std::min(begin + block_size, n_rows);
+      for (size_t i = begin; i < end; ++i) {
+        const size_t* rid = rows[nid].begin;
+
+        const size_t local_id = group.get_local_id()[2];
+        const size_t j = group_id * work_group_size + local_id;
+        if (j < n_columns) {
+          FPType* hist = reinterpret_cast<FPType*>(hist_collection[nid]);
+          const size_t icol_start = n_columns * rid[i];
+          const size_t idx_gh = rid[i];
+          const FPType pgh_row[2] = {pgh[2 * idx_gh], pgh[2 * idx_gh + 1]};
+          const BinIdxType* gr_index_local = gradient_index + icol_start;
+
+          uint32_t idx_bin = static_cast<uint32_t>(gr_index_local[j]);
+          if constexpr (isDense) {
+            idx_bin += offsets[j];
+          }
+          if (idx_bin < nbins) {
+            AtomicRef<FPType> gsum(hist[2 * idx_bin]);
+            AtomicRef<FPType> hsum(hist[2 * idx_bin + 1]);
+            gsum += pgh_row[0];
+            hsum += pgh_row[1];
+          }
+        }
+      }
+    });
+  });
+
+  return event_batch;
+}
+
 template<typename FPType, typename BinIdxType>
 ::sycl::event BuildHistDispatchKernel(
                 ::sycl::queue* qu,
@@ -320,7 +406,7 @@ template<typename FPType, typename BinIdxType>
                         n_columns, max_num_bins, min_num_bins);
 
   // force_atomic_use flag is used only for testing
-  bool use_atomic = dispatcher.use_atomics || force_atomic_use;
+  bool use_atomic = true; //dispatcher.use_atomics || force_atomic_use;
   if (!use_atomic) {
     if (isDense) {
       if (dispatcher.use_local_hist) {
@@ -424,6 +510,71 @@ template
               const DeviceProperties& device_prop,
               ::sycl::event event_priv,
               bool force_atomic_use);
+
+template <typename FPType>
+::sycl::event GHistBuilder<FPType>::BuildHist(
+              const HostDeviceVector<GradientPair>& gpair,
+              const std::vector<bst_node_t>& nodes,
+              const bst_node_t* nodes_ptr,
+              RowSetCollection* row_indices,
+              const GHistIndexMatrix& gmat,
+              HistCollection<FPType>* histograms,
+              bool isDense,
+              const DeviceProperties& device_prop,
+              ::sycl::event event,
+              bool force_atomic_use) {
+  switch (gmat.index.GetBinTypeSize()) {
+    case BinTypeSize::kUint8BinsTypeSize:
+      if (isDense) {
+        return BuildHistKernel<FPType, uint8_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+      } else {
+        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+      }
+      break;
+    case BinTypeSize::kUint16BinsTypeSize:
+      if (isDense) {
+        return BuildHistKernel<FPType, uint16_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+      } else {
+        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+      }
+      break;
+    case BinTypeSize::kUint32BinsTypeSize:
+      if (isDense) {
+        return BuildHistKernel<FPType, uint32_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+      } else {
+        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+      }
+      break;
+    default:
+      CHECK(false);  // no default behavior
+  }
+}
+
+template
+::sycl::event GHistBuilder<float>::BuildHist(
+              const HostDeviceVector<GradientPair>& gpair,
+              const std::vector<bst_node_t>& nodes,
+              const bst_node_t* nodes_device_ptr,
+              RowSetCollection* row_indices,
+              const GHistIndexMatrix& gmat,
+              HistCollection<float>* histograms,
+              bool isDense,
+              const DeviceProperties& device_prop,
+              ::sycl::event event,
+              bool force_atomic_use = false);
+
+template
+::sycl::event GHistBuilder<double>::BuildHist(
+              const HostDeviceVector<GradientPair>& gpair,
+              const std::vector<bst_node_t>& nodes,
+              const bst_node_t* nodes_device_ptr,
+              RowSetCollection* row_indices,
+              const GHistIndexMatrix& gmat,
+              HistCollection<double>* histograms,
+              bool isDense,
+              const DeviceProperties& device_prop,
+              ::sycl::event event,
+              bool force_atomic_use = false);
 
 }  // namespace common
 }  // namespace sycl

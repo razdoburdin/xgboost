@@ -62,10 +62,10 @@ class USMVector {
   }
 
   void copy_vector_to_memory_(::sycl::queue* qu, const std::vector<T> &vec) {
-    if constexpr (memory_type == MemoryType::shared) {
-      std::copy(vec.begin(), vec.end(), data_.get());
+    if constexpr (memory_type == MemoryType::on_device) {
+      qu->memcpy(data_.get(), vec.data(), size_ * sizeof(T)).wait();
     } else {
-      qu->memcpy(data_.get(), vec.data(), size_ * sizeof(T));
+      std::copy(vec.begin(), vec.end(), data_.get());
     }
   }
 
@@ -197,9 +197,11 @@ class USMVector {
 
   void Init(::sycl::queue* qu, const std::vector<T> &vec) {
     size_ = vec.size();
-    capacity_ = size_;
-    data_.reset();
-    data_ = allocate_memory_(qu, size_);
+    if (capacity_ < vec.size()) {
+      capacity_ = size_;
+      data_.reset();
+      data_ = allocate_memory_(qu, size_);
+    }
     copy_vector_to_memory_(qu, vec);
   }
 

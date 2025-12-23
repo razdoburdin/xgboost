@@ -33,6 +33,7 @@ class BatchHistRowsAdder: public HistRowsAdder<GradientSumT> {
     for (auto const& node : builder->nodes_for_subtraction_trick_) {
       builder->hist_.AddHistRow(node.nid);
     }
+    builder->hist_.PushPointersToDevice();
 
     builder->builder_monitor_.Stop("AddHistRows");
   }

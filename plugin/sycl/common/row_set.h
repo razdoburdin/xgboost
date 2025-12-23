@@ -31,6 +31,7 @@ class RowSetCollection {
   struct Elem {
     const size_t* begin{nullptr};
     const size_t* end{nullptr};
+    // bst_node_t node_id{-1};  // id of node associated with this instance set; -1 means uninitialized
     Elem()
          = default;
     Elem(const size_t* begin,
@@ -59,6 +60,17 @@ class RowSetCollection {
   inline Elem& operator[](unsigned node_id) {
     Elem& e = elem_of_each_node_[node_id];
     return e;
+  }
+
+  void PushToDevice(::sycl::queue* qu, ::sycl::event* event) {
+    elem_of_each_node_device_.ResizeNoCopy(qu, elem_of_each_node_.size());
+    *event = qu->memcpy(elem_of_each_node_device_.Data(), elem_of_each_node_.data(),
+                        sizeof(Elem) * elem_of_each_node_.size(), *event);
+  }
+
+  Elem* RowSetDevice(::sycl::queue* qu, ::sycl::event* event) {
+    PushToDevice(qu, event);
+    return elem_of_each_node_device_.Data();
   }
 
   // clear up things
@@ -111,6 +123,7 @@ class RowSetCollection {
   USMVector<size_t, MemoryType::on_device> row_indices_;
   // vector: node_id -> elements
   std::vector<Elem> elem_of_each_node_;
+  USMVector<Elem, MemoryType::on_device> elem_of_each_node_device_;
 };
 
 }  // namespace common

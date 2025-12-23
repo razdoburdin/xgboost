@@ -51,10 +51,11 @@ template<typename GradientSumT>
 /*!
  * \brief Histograms of gradient statistics for multiple nodes
  */
-template<typename GradientSumT, MemoryType memory_type = MemoryType::shared>
+template<typename GradientSumT>
 class HistCollection {
  public:
-  using GHistRowT = GHistRow<GradientSumT, memory_type>;
+  using GHistRowT = GHistRow<GradientSumT, MemoryType::on_device>;
+  using GradientPair = xgboost::detail::GradientPairInternal<GradientSumT>;
 
   // Access histogram for i-th node
   GHistRowT& operator[](bst_uint nid) {
@@ -82,11 +83,27 @@ class HistCollection {
     }
   }
 
+  void PushPointersToDevice() {
+    std::vector<GradientPair*> ptrs_host(data_.size(), nullptr);
+    for (const auto& [nid, hist] : data_) {
+      if (ptrs_host.size() <= nid) ptrs_host.resize(nid + 1);
+
+      ptrs_host[nid] = hist->Data();
+    }
+
+    ptrs_.Init(qu_, ptrs_host);
+  }
+
+  GradientPair** GetDevicePointers() {
+    return ptrs_.Data();
+  }
+
  private:
   /*! \brief Number of all bins over all features */
   uint32_t nbins_ = 0;
 
   std::unordered_map<uint32_t, std::unique_ptr<GHistRowT>> data_;
+  USMVector<GradientPair*, MemoryType::on_device> ptrs_;
 
   ::sycl::queue* qu_;
 };
@@ -146,6 +163,18 @@ class GHistBuilder {
                           GHistRowT<MemoryType::on_device>* HistCollection,
                           bool isDense,
                           GHistRowT<MemoryType::on_device>* hist_buffer,
+                          const DeviceProperties& device_prop,
+                          ::sycl::event event,
+                          bool force_atomic_use = false);
+
+  // Construct a histogram via histogram aggregation
+  ::sycl::event BuildHist(const HostDeviceVector<GradientPair>& gpair,
+                          const std::vector<bst_node_t>& nodes,
+                          const bst_node_t* nodes_device_ptr,
+                          RowSetCollection* row_indices,
+                          const GHistIndexMatrix& gmat,
+                          HistCollection<GradientSumT>* histograms,
+                          bool isDense,
                           const DeviceProperties& device_prop,
                           ::sycl::event event,
                           bool force_atomic_use = false);

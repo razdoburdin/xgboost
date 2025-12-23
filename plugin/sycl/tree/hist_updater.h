@@ -139,6 +139,32 @@ class HistUpdater {
                                    device_properties_, event_priv);
   }
 
+  inline ::sycl::event BuildHist(
+                        const HostDeviceVector<GradientPair>& gpair,
+                        const common::GHistIndexMatrix& gmat,
+                        ::sycl::event event) {
+    bool isDense = data_layout_ != kSparseData;
+    std::vector<bst_node_t> nids_host(nodes_for_explicit_hist_build_.size());
+    for (size_t node_idx = 0; node_idx < nodes_for_explicit_hist_build_.size(); ++node_idx) {
+      if (nids_host.size() <= node_idx) nids_host.resize(node_idx + 1);
+
+      nids_host[node_idx] = nodes_for_explicit_hist_build_[node_idx].nid;
+    }
+    nids_device_.Init(qu_, nids_host);
+    return hist_builder_.BuildHist(gpair, nids_host, nids_device_.DataConst(), &row_set_collection_,
+                                   gmat, &hist_, isDense,  device_properties_, event);
+
+  // for (size_t i = 0; i < n_nodes; i++) {
+  //   const int32_t nid = nodes_for_explicit_hist_build_[i].nid;
+
+  //   if (row_set_collection_[nid].Size() > 0) {
+  //     event = BuildHist(gpair, row_set_collection_[nid], gmat, &(hist_[nid]),
+  //                       &(hist_buffer_.GetDeviceBuffer()), event);
+  //   }
+  // }
+                          
+  }
+
   void InitNewNode(int nid,
                    const common::GHistIndexMatrix& gmat,
                    const HostDeviceVector<GradientPair>& gpair,
@@ -238,9 +264,9 @@ class HistUpdater {
   common::GHistBuilder<GradientSumT> hist_builder_;
   common::ParallelGHistBuilder<GradientSumT> hist_buffer_;
   /*! \brief culmulative histogram of gradients. */
-  common::HistCollection<GradientSumT, MemoryType::on_device> hist_;
+  common::HistCollection<GradientSumT> hist_;
   /*! \brief culmulative local parent histogram of gradients. */
-  common::HistCollection<GradientSumT, MemoryType::on_device> hist_local_worker_;
+  common::HistCollection<GradientSumT> hist_local_worker_;
 
   /*! \brief TreeNode Data: statistics for each constructed node */
   USMVector<NodeEntry<GradientSumT>, MemoryType::on_host> snode_host_;
@@ -262,6 +288,7 @@ class HistUpdater {
   std::vector<ExpandEntry> nodes_for_subtraction_trick_;
   // list of nodes whose histograms would be built explicitly.
   std::vector<ExpandEntry> nodes_for_explicit_hist_build_;
+  USMVector<bst_node_t, MemoryType::on_device> nids_device_;
 
   std::unique_ptr<HistSynchronizer<GradientSumT>> hist_synchronizer_;
   std::unique_ptr<HistRowsAdder<GradientSumT>> hist_rows_adder_;
