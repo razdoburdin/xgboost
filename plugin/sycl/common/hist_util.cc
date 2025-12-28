@@ -324,6 +324,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
 
   size_t l2_size = 8 * 1024 * 1024;
   size_t node_batch_size = std::max<size_t>(1, l2_size / (2 * sizeof(FPType) * nbins));
+  if (node_batch_size > n_nodes) node_batch_size = n_nodes;
   size_t n_node_batch = n_nodes / node_batch_size + (n_nodes % node_batch_size > 0);
 
   std::vector<::sycl::event> events(node_batch_size);
