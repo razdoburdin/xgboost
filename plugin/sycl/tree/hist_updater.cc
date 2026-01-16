@@ -613,12 +613,17 @@ void HistUpdater<GradientSumT>::InitData(
   {
     uint32_t nbins = gmat.cut.Ptrs().back();
     hist_buffer_.Init(qu_, nbins);
-    bool isDense = data_layout_ != kSparseData;
-    const size_t ncolumns = isDense ? gmat.nfeatures : gmat.row_stride;
-    size_t buffer_size = GetRequiredBufferSize<GradientSumT>
-                         (device_properties_, info.num_row_, nbins, ncolumns,
-                          gmat.max_num_bins, gmat.min_num_bins);
-    hist_buffer_.Reset(buffer_size);
+    // bool isDense = data_layout_ != kSparseData;
+    // const size_t ncolumns = isDense ? gmat.nfeatures : gmat.row_stride;
+    // size_t buffer_size = GetRequiredBufferSize<GradientSumT>
+    //                      (device_properties_, info.num_row_, nbins, ncolumns,
+    //                       gmat.max_num_bins, gmat.min_num_bins);
+    // hist_buffer_.Reset(buffer_size);
+
+    // size_t n_parallel_hist = 256; //static_cast<size_t>((0.8 * device_properties_.l1_size) / (2 * sizeof(GradientSumT) * nbins));
+    // hist_buffer_.Reset(device_properties_.n_cores * n_parallel_hist);
+    size_t n_parallel_hist = device_properties_.l2_size / (2 * sizeof(GradientSumT) * nbins);
+    hist_buffer_.Reset(n_parallel_hist);
   }
 
   builder_monitor_.Stop("InitData");

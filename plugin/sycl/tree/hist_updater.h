@@ -144,15 +144,56 @@ class HistUpdater {
                         const common::GHistIndexMatrix& gmat,
                         ::sycl::event event) {
     bool isDense = data_layout_ != kSparseData;
-    std::vector<bst_node_t> nids_host(nodes_for_explicit_hist_build_.size());
-    for (size_t node_idx = 0; node_idx < nodes_for_explicit_hist_build_.size(); ++node_idx) {
-      if (nids_host.size() <= node_idx) nids_host.resize(node_idx + 1);
+    size_t n_parallel_hist = hist_buffer_.GetNBlocks();
 
-      nids_host[node_idx] = nodes_for_explicit_hist_build_[node_idx].nid;
+    std::map<size_t, bst_node_t, std::greater<size_t>> n_rows_map;
+    for (size_t nidx = 0; nidx < nodes_for_explicit_hist_build_.size(); ++nidx) {
+      bst_node_t nid = nodes_for_explicit_hist_build_[nidx].nid;
+      n_rows_map[row_set_collection_[nid].Size()] = nid;
     }
-    nids_device_.Init(qu_, nids_host);
-    return hist_builder_.BuildHist(gpair, nids_host, nids_device_.DataConst(), &row_set_collection_,
-                                   gmat, &hist_, isDense,  device_properties_, event);
+
+    // Split nodes between kernels
+    std::vector<bst_node_t> nodes_buffer;
+    std::vector<bst_node_t> nodes_non_buffer;
+    LOG(INFO) << "n_node = " << n_rows_map.size();
+    for (const auto& [n_rows, nid] : n_rows_map) {
+      size_t node_batch_size = std::min(n_parallel_hist, nodes_buffer.size() + 1);
+      size_t n_row_blocks = n_parallel_hist / node_batch_size;
+      size_t block_size = n_rows / n_row_blocks;
+
+      if (block_size <= 256) {
+        LOG(INFO) << "n_rows = " << n_rows << "\t" << "pure atomic";
+        nodes_non_buffer.push_back(nid);
+      } else {
+        LOG(INFO) << "n_rows = " << n_rows << "\t" << "buffer";
+        nodes_buffer.push_back(nid);
+      }
+    }
+    ::sycl::event event_out = event;
+    if (nodes_buffer.size() > 0) {
+      nids_buffer_device_.Init(qu_, nodes_buffer);
+      event_out = hist_builder_.BuildHist(gpair, nodes_buffer, nids_buffer_device_.DataConst(), &row_set_collection_,
+                                    gmat, &hist_, &(hist_buffer_.GetDeviceBuffer()),
+                                    isDense, device_properties_, event_out);
+    }
+    if (nodes_non_buffer.size() > 0) {
+      nids_non_buffer_device_.Init(qu_, nodes_non_buffer);
+      event_out = hist_builder_.BuildHist(gpair, nodes_non_buffer, nids_non_buffer_device_.DataConst(), &row_set_collection_,
+                              gmat, &hist_, isDense, device_properties_, event_out);
+    }
+    return event_out;
+
+    // launchable version
+    // std::vector<bst_node_t> nids_host(nodes_for_explicit_hist_build_.size());
+    // for (size_t node_idx = 0; node_idx < nodes_for_explicit_hist_build_.size(); ++node_idx) {
+    //   if (nids_host.size() <= node_idx) nids_host.resize(node_idx + 1);
+
+    //   nids_host[node_idx] = nodes_for_explicit_hist_build_[node_idx].nid;
+    // }
+    // nids_device_.Init(qu_, nids_host);
+    // return hist_builder_.BuildHist(gpair, nids_host, nids_device_.DataConst(), &row_set_collection_,
+    //                               gmat, &hist_, &(hist_buffer_.GetDeviceBuffer()),
+    //                               isDense,  device_properties_, event);
 
   // for (size_t i = 0; i < n_nodes; i++) {
   //   const int32_t nid = nodes_for_explicit_hist_build_[i].nid;
@@ -288,7 +329,8 @@ class HistUpdater {
   std::vector<ExpandEntry> nodes_for_subtraction_trick_;
   // list of nodes whose histograms would be built explicitly.
   std::vector<ExpandEntry> nodes_for_explicit_hist_build_;
-  USMVector<bst_node_t, MemoryType::on_device> nids_device_;
+  USMVector<bst_node_t, MemoryType::on_device> nids_buffer_device_;
+  USMVector<bst_node_t, MemoryType::on_device> nids_non_buffer_device_;
 
   std::unique_ptr<HistSynchronizer<GradientSumT>> hist_synchronizer_;
   std::unique_ptr<HistRowsAdder<GradientSumT>> hist_rows_adder_;

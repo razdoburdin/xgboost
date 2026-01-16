@@ -119,13 +119,24 @@ class ParallelGHistBuilder {
   void Init(::sycl::queue* qu, size_t nbins) {
     qu_ = qu;
     if (nbins != nbins_) {
-      hist_buffer_.Init(qu_, nbins);
       nbins_ = nbins;
+
+      size_t cache_line_size = 64;
+      size_t hist_size = 2 * nbins_ * sizeof(GradientSumT);
+      block_size_ = (hist_size / cache_line_size + (hist_size % cache_line_size > 0)) * cache_line_size / (2 * sizeof(GradientSumT));
     }
   }
 
   void Reset(size_t nblocks) {
-    hist_device_buffer_.Resize(qu_, nblocks * nbins_);
+    // LOG(INFO) << "nblocks = " << nblocks << "\t"
+    //           << "nbins_ = " << nbins_ << "\t"
+    //           << "block_size_ = " << block_size_ << "\t"
+    //           ;
+    hist_device_buffer_.Resize(qu_, nblocks * block_size_);
+  }
+
+  size_t GetNBlocks() const {
+    return hist_device_buffer_.Size() / block_size_;
   }
 
   GHistRowT& GetDeviceBuffer() {
@@ -135,8 +146,7 @@ class ParallelGHistBuilder {
  protected:
   /*! \brief Number of bins in each histogram */
   size_t nbins_ = 0;
-  /*! \brief Buffers for histograms for all nodes processed */
-  HistCollection<GradientSumT> hist_buffer_;
+  size_t block_size_ = 0;
 
   /*! \brief Buffer for additional histograms for Parallel processing  */
   GHistRowT hist_device_buffer_;
@@ -163,6 +173,19 @@ class GHistBuilder {
                           GHistRowT<MemoryType::on_device>* HistCollection,
                           bool isDense,
                           GHistRowT<MemoryType::on_device>* hist_buffer,
+                          const DeviceProperties& device_prop,
+                          ::sycl::event event,
+                          bool force_atomic_use = false);
+
+  // Construct a histogram via histogram aggregation
+  ::sycl::event BuildHist(const HostDeviceVector<GradientPair>& gpair,
+                          const std::vector<bst_node_t>& nodes,
+                          const bst_node_t* nodes_device_ptr,
+                          RowSetCollection* row_indices,
+                          const GHistIndexMatrix& gmat,
+                          HistCollection<GradientSumT>* histograms,
+                          GHistRowT<MemoryType::on_device>* hist_buffer,
+                          bool isDense,
                           const DeviceProperties& device_prop,
                           ::sycl::event event,
                           bool force_atomic_use = false);
