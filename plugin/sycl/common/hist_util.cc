@@ -325,8 +325,10 @@ template<typename FPType, typename BinIdxType, bool isDense>
   size_t n_parallel_hist = hist_buffer->Size() / nbins;
   size_t hist_buff_offset = 2 * (hist_buffer->Size() / n_parallel_hist);
 
-  size_t node_batch_size = std::min(n_parallel_hist, n_nodes);
-  size_t n_node_batch = n_nodes / n_parallel_hist + (n_nodes % n_parallel_hist > 0);
+  // size_t node_batch_size = std::min<size_t>(n_parallel_hist, n_nodes);
+  // size_t n_node_batch = n_nodes / n_parallel_hist + (n_nodes % n_parallel_hist > 0);
+  size_t node_batch_size = 1; //std::min<size_t>(n_parallel_hist, n_nodes);
+  size_t n_node_batch = n_nodes;
   size_t n_row_blocks = n_parallel_hist / node_batch_size;
 
   std::vector<::sycl::event> events(node_batch_size + 1);
