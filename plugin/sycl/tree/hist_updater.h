@@ -151,9 +151,11 @@ class HistUpdater {
     for (size_t nidx = 0; nidx < nodes_for_explicit_hist_build_.size(); ++nidx) {
       bst_node_t nid = nodes_for_explicit_hist_build_[nidx].nid;
       size_t n_rows = row_set_collection_[nid].Size();
-      size_t block_size = n_rows / n_parallel_hist + (n_rows % n_parallel_hist > 0);
+      size_t block_size = (n_parallel_hist > 0)
+                            ? n_rows / n_parallel_hist + (n_rows % n_parallel_hist > 0)
+                            : 0;
 
-      size_t th_block_size = static_cast<size_t>(1.0 * gmat.nbins / gmat.nfeatures);
+      size_t th_block_size = static_cast<size_t>((1.0 * gmat.nbins) / gmat.nfeatures);
       if (block_size < th_block_size) {
         // LOG(INFO) << "n_rows = " << n_rows << "\t"
         //           << "block_size = " << block_size << "\t"
@@ -166,46 +168,12 @@ class HistUpdater {
         // LOG(INFO) << "n_rows = " << n_rows << "\t"
         //           << "block_size = " << block_size << "\t"
         //           << "th_block_size = " << th_block_size << "\t"
-        //           << "nbins = " << gmat. << "\t"
+        //           << "nbins = " << gmat.nbins << "\t"
         //           << "buffer" << "\t"
         //           ;
         nodes_buffer.push_back(nid);
       }
     }
-
-    // // Split nodes between kernels
-    // std::vector<bst_node_t> nodes_buffer;
-    // std::vector<bst_node_t> nodes_non_buffer;
-    // // LOG(INFO) << "n_node = " << n_rows_map.size() << "\t"
-    // //           << "n_parallel_hist = " << n_parallel_hist;
-    // for (const auto& [n_rows, nids] : n_rows_map) {
-    //   // size_t node_batch_size = std::min(n_parallel_hist, nodes_buffer.size() + 1);
-    //   size_t n_row_blocks = n_parallel_hist; // / node_batch_size;
-    //   size_t block_size = n_rows / n_row_blocks + (n_rows % n_row_blocks > 0);
-
-    //   // Add-hock estimations
-    //   size_t th_block_size = static_cast<size_t>(4 * gmat.nbins / gmat.nfeatures);
-
-    //   if (block_size < th_block_size) {
-    //     // LOG(INFO) << "n_rows = " << n_rows << "\t"
-    //     //           << "block_size = " << block_size << "\t"
-    //     //           << "th_block_size = " << th_block_size << "\t"
-    //     //           << "pure atomic" << "\t"
-    //     //           ;
-    //     for (auto nid : nids) {
-    //       nodes_non_buffer.push_back(nid);
-    //     }
-    //   } else {
-    //     // LOG(INFO) << "n_rows = " << n_rows << "\t"
-    //     //           << "block_size = " << block_size << "\t"
-    //     //           << "th_block_size = " << th_block_size << "\t"
-    //     //           << "buffer" << "\t"
-    //     //           ;
-    //     for (auto nid : nids) {
-    //       nodes_buffer.push_back(nid);
-    //     }
-    //   }
-    // }
 
     ::sycl::event event_out = event;
     if (nodes_buffer.size() > 0) {
@@ -219,29 +187,7 @@ class HistUpdater {
       event_out = hist_builder_.BuildHist(gpair, nodes_non_buffer, nids_non_buffer_device_.DataConst(), &row_set_collection_,
                               gmat, &hist_, isDense, device_properties_, event_out);
     }
-    return event_out;
-
-    // launchable version
-    // std::vector<bst_node_t> nids_host(nodes_for_explicit_hist_build_.size());
-    // for (size_t node_idx = 0; node_idx < nodes_for_explicit_hist_build_.size(); ++node_idx) {
-    //   if (nids_host.size() <= node_idx) nids_host.resize(node_idx + 1);
-
-    //   nids_host[node_idx] = nodes_for_explicit_hist_build_[node_idx].nid;
-    // }
-    // nids_buffer_device_.Init(qu_, nids_host);
-    // return hist_builder_.BuildHist(gpair, nids_host, nids_buffer_device_.DataConst(), &row_set_collection_,
-    //                               gmat, &hist_, &(hist_buffer_.GetDeviceBuffer()),
-    //                               isDense,  device_properties_, event);
-
-  // for (size_t i = 0; i < n_nodes; i++) {
-  //   const int32_t nid = nodes_for_explicit_hist_build_[i].nid;
-
-  //   if (row_set_collection_[nid].Size() > 0) {
-  //     event = BuildHist(gpair, row_set_collection_[nid], gmat, &(hist_[nid]),
-  //                       &(hist_buffer_.GetDeviceBuffer()), event);
-  //   }
-  // }
-                          
+    return event_out;                          
   }
 
   void InitNewNode(int nid,
