@@ -272,7 +272,7 @@ class Predictor : public xgboost::Predictor {
   size_t GetBlockSize(size_t n_nodes, size_t num_features, size_t num_rows, float sparsity) const {
     size_t max_compute_units = device_prop_.max_compute_units;
     size_t l2_size = device_prop_.l2_size;
-    size_t sub_group_size = device_prop_.sub_group_size;
+    size_t sub_group_size = device_prop_.max_sub_group_size;
     size_t nodes_bytes = n_nodes * sizeof(Node);
     bool nodes_fit_l2 = l2_size > 2 * nodes_bytes;
     size_t block_size = nodes_fit_l2

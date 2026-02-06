@@ -622,7 +622,20 @@ void HistUpdater<GradientSumT>::InitData(
 
     // size_t n_parallel_hist = 256; //static_cast<size_t>((0.8 * device_properties_.l1_size) / (2 * sizeof(GradientSumT) * nbins));
     // hist_buffer_.Reset(device_properties_.n_cores * n_parallel_hist);
+
+    // const size_t nrow = info.num_row_;
+    // const size_t ncol = info.num_col_;
+    // const double nnz = info.num_nonzero_;
+    // double spars = nnz / (nrow * ncol);
+
+    size_t n_sub_groups = info.num_col_ / device_properties_.min_sub_group_size
+                       + (info.num_col_ % device_properties_.min_sub_group_size > 0);
+    size_t n_sub_groups_per_core = std::min<size_t>(device_properties_.eu_per_core, n_sub_groups);
+
     size_t n_parallel_hist = device_properties_.l2_size / (2 * sizeof(GradientSumT) * nbins);
+    constexpr size_t kMaxGPUUtilisation = 8;
+    n_parallel_hist = std::min<size_t>(n_parallel_hist, kMaxGPUUtilisation * device_properties_.max_compute_units / n_sub_groups_per_core);
+
     hist_buffer_.Reset(n_parallel_hist);
   }
 

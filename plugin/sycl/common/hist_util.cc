@@ -296,7 +296,6 @@ template<typename FPType, typename BinIdxType, bool isDense>
   return event_main;
 }
 
-// Kernel with l1 using
 template<typename FPType, typename BinIdxType, bool isDense>
 ::sycl::event BuildHistKernel(::sycl::queue* qu,
                               const HostDeviceVector<GradientPair>& gpair,
@@ -331,12 +330,11 @@ template<typename FPType, typename BinIdxType, bool isDense>
     FPType* hist = reinterpret_cast<FPType*>((*histograms)[nid].Data());
     event_batch = qu->memset(hist, 0, 2 * sizeof(FPType) * nbins, event_batch);
   }
-  event_batch  = qu->memset(hist_buffer_data, 0, 2 * sizeof(FPType) * hist_buffer->Size(), event_batch);
 
   event_batch = qu->submit([&](::sycl::handler& cgh) {
     cgh.depends_on(event_batch);
     cgh.parallel_for<>(::sycl::nd_range<2>(::sycl::range<2>(n_row_blocks, work_group_size),
-                                            ::sycl::range<2>(          1, work_group_size)),
+                                           ::sycl::range<2>(           1, work_group_size)),
                         [=](::sycl::nd_item<2> pid) {
       const size_t hist_idx = pid.get_global_id(0);
       size_t feat = pid.get_global_id(1);
@@ -349,6 +347,8 @@ template<typename FPType, typename BinIdxType, bool isDense>
         }
 
         bst_node_t nid = nodes_ptr[nidx];
+        const size_t* rid = rows[nid].begin;
+
         FPType* hist = reinterpret_cast<FPType*>(hist_collection[nid]);
         for (size_t fid = feat; fid < n_columns; fid += work_group_size) {
           size_t n_rows = rows[nid].Size();
@@ -359,8 +359,6 @@ template<typename FPType, typename BinIdxType, bool isDense>
           size_t end = std::min(begin + block_size, n_rows);
 
           for (size_t i = begin; i < end; ++i) {
-            const size_t* rid = rows[nid].begin;
-
             const size_t icol_start = n_columns * rid[i];
             const size_t idx_gh = rid[i];
             const FPType pgh_row[2] = {pgh[2 * idx_gh], pgh[2 * idx_gh + 1]};

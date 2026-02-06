@@ -148,6 +148,8 @@ class HistUpdater {
 
     std::vector<bst_node_t> nodes_buffer;
     std::vector<bst_node_t> nodes_non_buffer;
+
+    size_t th_block_size = static_cast<size_t>((1.0 * gmat.nbins) / gmat.nfeatures);
     for (size_t nidx = 0; nidx < nodes_for_explicit_hist_build_.size(); ++nidx) {
       bst_node_t nid = nodes_for_explicit_hist_build_[nidx].nid;
       size_t n_rows = row_set_collection_[nid].Size();
@@ -155,8 +157,8 @@ class HistUpdater {
                             ? n_rows / n_parallel_hist + (n_rows % n_parallel_hist > 0)
                             : 0;
 
-      size_t th_block_size = static_cast<size_t>((1.0 * gmat.nbins) / gmat.nfeatures);
       if (block_size < th_block_size) {
+      // if (true) {
         // LOG(INFO) << "n_rows = " << n_rows << "\t"
         //           << "block_size = " << block_size << "\t"
         //           << "th_block_size = " << th_block_size << "\t"
