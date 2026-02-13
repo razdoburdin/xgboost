@@ -79,8 +79,6 @@ struct GHistIndexMatrix {
   /*! \brief row pointer to rows by element position */
   /*! \brief The index data */
   Index index;
-  /*! \brief hit count of each index */
-  HostDeviceVector<size_t> hit_count;
 
   USMVector<uint8_t, MemoryType::on_device> sort_buff;
   /*! \brief The corresponding cuts */
@@ -101,16 +99,6 @@ struct GHistIndexMatrix {
 
   void ResizeIndex(::sycl::queue* qu, size_t n_index);
 
-  inline void GetFeatureCounts(size_t* counts) const {
-    auto nfeature = cut.cut_ptrs_.Size() - 1;
-    for (unsigned fid = 0; fid < nfeature; ++fid) {
-      auto ibegin = cut.cut_ptrs_.ConstHostVector()[fid];
-      auto iend = cut.cut_ptrs_.ConstHostVector()[fid + 1];
-      for (auto i = ibegin; i < iend; ++i) {
-        *(counts + fid) += hit_count.ConstHostVector()[i];
-      }
-    }
-  }
   inline bool IsDense() const {
     return isDense_;
   }

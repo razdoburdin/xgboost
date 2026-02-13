@@ -128,10 +128,6 @@ class ParallelGHistBuilder {
   }
 
   void Reset(size_t nblocks) {
-    // LOG(INFO) << "nblocks = " << nblocks << "\t"
-    //           << "nbins_ = " << nbins_ << "\t"
-    //           << "block_size_ = " << block_size_ << "\t"
-    //           ;
     hist_device_buffer_.Resize(qu_, nblocks * block_size_);
   }
 
@@ -185,7 +181,6 @@ class GHistBuilder {
                           const GHistIndexMatrix& gmat,
                           HistCollection<GradientSumT>* histograms,
                           GHistRowT<MemoryType::on_device>* hist_buffer,
-                          bool isDense,
                           const DeviceProperties& device_prop,
                           ::sycl::event event,
                           bool force_atomic_use = false);
@@ -197,7 +192,6 @@ class GHistBuilder {
                           RowSetCollection* row_indices,
                           const GHistIndexMatrix& gmat,
                           HistCollection<GradientSumT>* histograms,
-                          bool isDense,
                           const DeviceProperties& device_prop,
                           ::sycl::event event,
                           bool force_atomic_use = false);

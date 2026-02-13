@@ -56,7 +56,6 @@ void GHistIndexMatrix::SetIndexData(::sycl::queue* qu,
   if (nbins == 0) return;
   const bst_float* cut_values = cut.cut_values_.ConstDevicePointer();
   const uint32_t* cut_ptrs = cut.cut_ptrs_.ConstDevicePointer();
-  size_t* hit_count_ptr = hit_count.DevicePointer();
 
   BinIdxType* sort_data = reinterpret_cast<BinIdxType*>(sort_buff.Data());
 
@@ -80,8 +79,6 @@ void GHistIndexMatrix::SetIndexData(::sycl::queue* qu,
           for (bst_uint j = 0; j < size; ++j) {
             uint32_t idx = SearchBin(cut_values, cut_ptrs, data_ptr[ibegin + j]);
             index_data[start + j] = isDense ? idx - cut_ptrs[j] : idx;
-            AtomicRef<size_t> hit_count_ref(hit_count_ptr[idx]);
-            hit_count_ref.fetch_add(1);
           }
           if constexpr (!isDense) {
             // Sparse case only
@@ -130,9 +127,6 @@ void GHistIndexMatrix::Init(::sycl::queue* qu,
     auto iend = cut.cut_ptrs_.ConstHostVector()[fid + 1];
     min_num_bins = std::min<size_t>(min_num_bins, iend - ibegin);
   }
-
-  hit_count.SetDevice(ctx->Device());
-  hit_count.Resize(nbins, 0);
 
   const bool isDense = dmat->IsDense();
   this->isDense_ = isDense;

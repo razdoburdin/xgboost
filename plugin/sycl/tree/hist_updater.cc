@@ -613,28 +613,21 @@ void HistUpdater<GradientSumT>::InitData(
   {
     uint32_t nbins = gmat.cut.Ptrs().back();
     hist_buffer_.Init(qu_, nbins);
-    // bool isDense = data_layout_ != kSparseData;
-    // const size_t ncolumns = isDense ? gmat.nfeatures : gmat.row_stride;
-    // size_t buffer_size = GetRequiredBufferSize<GradientSumT>
-    //                      (device_properties_, info.num_row_, nbins, ncolumns,
-    //                       gmat.max_num_bins, gmat.min_num_bins);
-    // hist_buffer_.Reset(buffer_size);
+    bool isDense = gmat.IsDense();
+    const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
 
-    // size_t n_parallel_hist = 256; //static_cast<size_t>((0.8 * device_properties_.l1_size) / (2 * sizeof(GradientSumT) * nbins));
-    // hist_buffer_.Reset(device_properties_.n_cores * n_parallel_hist);
-
-    // const size_t nrow = info.num_row_;
-    // const size_t ncol = info.num_col_;
-    // const double nnz = info.num_nonzero_;
-    // double spars = nnz / (nrow * ncol);
-
-    size_t n_sub_groups = info.num_col_ / device_properties_.min_sub_group_size
-                       + (info.num_col_ % device_properties_.min_sub_group_size > 0);
+    size_t n_sub_groups = n_columns / device_properties_.min_sub_group_size
+                       + (n_columns % device_properties_.min_sub_group_size > 0);
     size_t n_sub_groups_per_core = std::min<size_t>(device_properties_.eu_per_core, n_sub_groups);
 
     size_t n_parallel_hist = device_properties_.l2_size / (2 * sizeof(GradientSumT) * nbins);
     constexpr size_t kMaxGPUUtilisation = 8;
     n_parallel_hist = std::min<size_t>(n_parallel_hist, kMaxGPUUtilisation * device_properties_.max_compute_units / n_sub_groups_per_core);
+
+    // if (!isDense) {
+    //   constexpr size_t kMinGPUUtilisation = 2;
+    //   n_parallel_hist = std::max<size_t>(n_parallel_hist, kMinGPUUtilisation * device_properties_.max_compute_units / n_sub_groups_per_core);
+    // }
 
     hist_buffer_.Reset(n_parallel_hist);
   }

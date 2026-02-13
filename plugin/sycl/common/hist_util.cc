@@ -619,27 +619,26 @@ template <typename FPType>
               const GHistIndexMatrix& gmat,
               HistCollection<FPType>* histograms,
               GHistRowT<MemoryType::on_device>* hist_buffer,
-              bool isDense,
               const DeviceProperties& device_prop,
               ::sycl::event event,
               bool force_atomic_use) {
   switch (gmat.index.GetBinTypeSize()) {
     case BinTypeSize::kUint8BinsTypeSize:
-      if (isDense) {
+      if (gmat.IsDense()) {
         return BuildHistKernel<FPType, uint8_t, true>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
       } else {
         return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
       }
       break;
     case BinTypeSize::kUint16BinsTypeSize:
-      if (isDense) {
+      if (gmat.IsDense()) {
         return BuildHistKernel<FPType, uint16_t, true>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
       } else {
         return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
       }
       break;
     case BinTypeSize::kUint32BinsTypeSize:
-      if (isDense) {
+      if (gmat.IsDense()) {
         return BuildHistKernel<FPType, uint32_t, true>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
       } else {
         return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
@@ -658,27 +657,26 @@ template <typename FPType>
               RowSetCollection* row_indices,
               const GHistIndexMatrix& gmat,
               HistCollection<FPType>* histograms,
-              bool isDense,
               const DeviceProperties& device_prop,
               ::sycl::event event,
               bool force_atomic_use) {
   switch (gmat.index.GetBinTypeSize()) {
     case BinTypeSize::kUint8BinsTypeSize:
-      if (isDense) {
+      if (gmat.IsDense()) {
         return BuildHistKernel<FPType, uint8_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
       } else {
         return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
       }
       break;
     case BinTypeSize::kUint16BinsTypeSize:
-      if (isDense) {
+      if (gmat.IsDense()) {
         return BuildHistKernel<FPType, uint16_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
       } else {
         return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
       }
       break;
     case BinTypeSize::kUint32BinsTypeSize:
-      if (isDense) {
+      if (gmat.IsDense()) {
         return BuildHistKernel<FPType, uint32_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
       } else {
         return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
@@ -697,7 +695,6 @@ template
               RowSetCollection* row_indices,
               const GHistIndexMatrix& gmat,
               HistCollection<float>* histograms,
-              bool isDense,
               const DeviceProperties& device_prop,
               ::sycl::event event,
               bool force_atomic_use = false);
@@ -710,7 +707,6 @@ template
               RowSetCollection* row_indices,
               const GHistIndexMatrix& gmat,
               HistCollection<double>* histograms,
-              bool isDense,
               const DeviceProperties& device_prop,
               ::sycl::event event,
               bool force_atomic_use = false);
@@ -724,7 +720,6 @@ template
               const GHistIndexMatrix& gmat,
               HistCollection<float>* histograms,
               GHistRowT<MemoryType::on_device>* hist_buffer,
-              bool isDense,
               const DeviceProperties& device_prop,
               ::sycl::event event,
               bool force_atomic_use = false);
@@ -738,7 +733,6 @@ template
               const GHistIndexMatrix& gmat,
               HistCollection<double>* histograms,
               GHistRowT<MemoryType::on_device>* hist_buffer,
-              bool isDense,
               const DeviceProperties& device_prop,
               ::sycl::event event,
               bool force_atomic_use = false);

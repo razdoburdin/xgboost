@@ -143,13 +143,15 @@ class HistUpdater {
                         const HostDeviceVector<GradientPair>& gpair,
                         const common::GHistIndexMatrix& gmat,
                         ::sycl::event event) {
-    bool isDense = data_layout_ != kSparseData;
     size_t n_parallel_hist = hist_buffer_.GetNBlocks();
 
     std::vector<bst_node_t> nodes_buffer;
     std::vector<bst_node_t> nodes_non_buffer;
 
-    size_t th_block_size = static_cast<size_t>((1.0 * gmat.nbins) / gmat.nfeatures);
+    bool isDense = gmat.IsDense();
+    const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
+
+    size_t th_block_size = static_cast<size_t>((1.0 * gmat.nbins) / n_columns);
     for (size_t nidx = 0; nidx < nodes_for_explicit_hist_build_.size(); ++nidx) {
       bst_node_t nid = nodes_for_explicit_hist_build_[nidx].nid;
       size_t n_rows = row_set_collection_[nid].Size();
@@ -158,7 +160,6 @@ class HistUpdater {
                             : 0;
 
       if (block_size < th_block_size) {
-      // if (true) {
         // LOG(INFO) << "n_rows = " << n_rows << "\t"
         //           << "block_size = " << block_size << "\t"
         //           << "th_block_size = " << th_block_size << "\t"
@@ -182,12 +183,12 @@ class HistUpdater {
       nids_buffer_device_.Init(qu_, nodes_buffer);
       event_out = hist_builder_.BuildHist(gpair, nodes_buffer, nids_buffer_device_.DataConst(), &row_set_collection_,
                                     gmat, &hist_, &(hist_buffer_.GetDeviceBuffer()),
-                                    isDense, device_properties_, event_out);
+                                    device_properties_, event_out);
     }
     if (nodes_non_buffer.size() > 0) {
       nids_non_buffer_device_.Init(qu_, nodes_non_buffer);
       event_out = hist_builder_.BuildHist(gpair, nodes_non_buffer, nids_non_buffer_device_.DataConst(), &row_set_collection_,
-                              gmat, &hist_, isDense, device_properties_, event_out);
+                              gmat, &hist_, device_properties_, event_out);
     }
     return event_out;                          
   }
