@@ -3,18 +3,21 @@
  * \file context_helper.cc
  */
 
+#include "context_helper.h"
+
 #include <sycl/sycl.hpp>
 
-
 #include "device_manager.h"
-#include "context_helper.h"
 
 namespace xgboost {
 namespace sycl {
 
 DeviceOrd DeviceFP64(const DeviceOrd& device) {
   DeviceManager device_manager;
-  bool support_fp64 = device_manager.GetQueue(device)->get_device().has(::sycl::aspect::fp64);
+  bool support_fp64 = true;
+  if (device.IsSycl()) {
+    support_fp64 = device_manager.GetQueue(device)->get_device().has(::sycl::aspect::fp64);
+  }
   if (support_fp64) {
     return device;
   } else {
