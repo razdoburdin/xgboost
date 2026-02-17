@@ -46,6 +46,67 @@ struct NodeEntry {
       : root_gain(0.0f), weight(0.0f) {}
 };
 
+template <typename T>
+class UnifiedHostDeviceBuffer {
+ public:
+  UnifiedHostDeviceBuffer(bool host_unified_memory) : host_unified_memory_(host_unified_memory) {}
+
+  T* HostPointer() {
+    return data_host_.Data();
+  }
+
+  const T* HostPointer() const {
+    return data_host_.DataConst();
+  }
+
+  T* DevicePointer() {
+    return host_unified_memory_ ? data_host_.Data() : data_device_.Data();
+  }
+
+  const T* DevicePointer() const {
+    return host_unified_memory_ ? data_host_.DataConst() : data_device_.DataConst();
+  }
+
+  void ResizeHost(::sycl::queue* qu, size_t size) {
+      data_host_.ResizeNoCopy(qu, size);
+  }
+
+  void ResizeHost(::sycl::queue* qu, size_t size, const T& val) {
+    data_host_.Resize(qu, size, val);
+  }
+
+  size_t HostSize() const {
+    return data_host_.Size();
+  }
+
+  void ResizeDevice(::sycl::queue* qu, size_t size) {
+    if (host_unified_memory_) {
+      data_host_.ResizeNoCopy(qu, size);
+    } else {
+      data_device_.ResizeNoCopy(qu, size);
+    }
+  }
+
+  void CopyToHost(::sycl::queue* qu, size_t size, ::sycl::event* event) {
+    if (!host_unified_memory_) {
+      ResizeHost(qu, size);
+      *event = qu->memcpy(data_host_.Data(), data_device_.Data(), sizeof(T) * size, *event);
+    }
+  }
+
+  void CopyToDevice(::sycl::queue* qu, size_t size, ::sycl::event* event) {
+    if (!host_unified_memory_) {
+      ResizeDevice(qu, size);
+      *event = qu->memcpy(data_device_.Data(), data_host_.Data(), sizeof(T) * size, *event);
+    }
+  }
+
+ private:
+  const bool host_unified_memory_;
+  USMVector<T, MemoryType::on_device> data_device_;
+  USMVector<T, MemoryType::on_host> data_host_;
+};
+
 template<typename GradientSumT>
 class HistUpdater {
  public:
@@ -60,12 +121,15 @@ class HistUpdater {
                        DMatrix const* fmat)
     : ctx_(ctx), qu_(qu), device_properties_(qu->get_device()), param_(param),
       tree_evaluator_(qu, param, fmat->Info().num_col_),
+      split_queries_(device_properties_.host_unified_memory),
+      best_splits_(device_properties_.host_unified_memory),
+      snode_(device_properties_.host_unified_memory),
       interaction_constraints_{std::move(int_constraints_)},
       p_last_tree_(nullptr), p_last_fmat_(fmat) {
     builder_monitor_.Init("SYCL::Quantile::HistUpdater");
     kernel_monitor_.Init("SYCL::Quantile::HistUpdater");
     if (param.max_depth > 0) {
-      snode_device_.Resize(qu, 1u << (param.max_depth + 1));
+      snode_.ResizeDevice(qu, 1u << (param.max_depth + 1));
     }
     has_fp64_support_ = qu_->get_device().has(::sycl::aspect::fp64);
     const auto sub_group_sizes =
@@ -159,8 +223,9 @@ class HistUpdater {
                             ? n_rows / n_parallel_hist + (n_rows % n_parallel_hist > 0)
                             : 0;
 
-      if (block_size < th_block_size) {
+      if (true) {
         // LOG(INFO) << "n_rows = " << n_rows << "\t"
+        //           << "n_parallel_hist = " << n_parallel_hist << "\t"
         //           << "block_size = " << block_size << "\t"
         //           << "th_block_size = " << th_block_size << "\t"
         //           << "nbins = " << gmat.nbins << "\t"
@@ -168,12 +233,13 @@ class HistUpdater {
         //           ;
         nodes_non_buffer.push_back(nid);
       } else {
-        // LOG(INFO) << "n_rows = " << n_rows << "\t"
-        //           << "block_size = " << block_size << "\t"
-        //           << "th_block_size = " << th_block_size << "\t"
-        //           << "nbins = " << gmat.nbins << "\t"
-        //           << "buffer" << "\t"
-        //           ;
+        LOG(INFO) << "n_rows = " << n_rows << "\t"
+                  << "n_parallel_hist = " << n_parallel_hist << "\t"
+                  << "block_size = " << block_size << "\t"
+                  << "th_block_size = " << th_block_size << "\t"
+                  << "nbins = " << gmat.nbins << "\t"
+                  << "buffer" << "\t"
+                  ;
         nodes_buffer.push_back(nid);
       }
     }
@@ -266,11 +332,10 @@ class HistUpdater {
   const xgboost::tree::TrainParam& param_;
   std::shared_ptr<xgboost::common::ColumnSampler> column_sampler_;
 
-  USMVector<SplitQuery, MemoryType::on_device> split_queries_device_;
-  USMVector<SplitQuery, MemoryType::on_host> split_queries_host_;
-
-  USMVector<SplitEntry<GradientSumT>, MemoryType::on_device> best_splits_device_;
-  USMVector<SplitEntry<GradientSumT>, MemoryType::on_host> best_splits_host_;
+  UnifiedHostDeviceBuffer<SplitQuery> split_queries_;
+  UnifiedHostDeviceBuffer<SplitEntry<GradientSumT>> best_splits_;
+  /*! \brief TreeNode Data: statistics for each constructed node */
+  UnifiedHostDeviceBuffer<NodeEntry<GradientSumT>> snode_;
 
   TreeEvaluator<GradientSumT> tree_evaluator_;
   FeatureInteractionConstraintHost interaction_constraints_;
@@ -295,10 +360,6 @@ class HistUpdater {
   common::HistCollection<GradientSumT> hist_;
   /*! \brief culmulative local parent histogram of gradients. */
   common::HistCollection<GradientSumT> hist_local_worker_;
-
-  /*! \brief TreeNode Data: statistics for each constructed node */
-  USMVector<NodeEntry<GradientSumT>, MemoryType::on_host> snode_host_;
-  USMVector<NodeEntry<GradientSumT>, MemoryType::on_device> snode_device_;
 
   xgboost::common::Monitor builder_monitor_;
   xgboost::common::Monitor kernel_monitor_;

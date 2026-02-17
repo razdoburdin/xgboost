@@ -305,6 +305,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
                               const GHistIndexMatrix& gmat,
                               HistCollection<FPType>* histograms,
                               GHistRow<FPType, MemoryType::on_device>* hist_buffer,
+                              const DeviceProperties& device_prop,
                               ::sycl::event event) {
   const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
   const GradientPair::ValueT* pgh =
@@ -317,7 +318,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
   ::sycl::event event_batch = event;
   const auto* rows = row_set->RowSetDevice(qu, &event_batch);
   auto** hist_collection = histograms->GetDevicePointers();
-  size_t work_group_size = std::min<size_t>(n_columns, 1024);
+  size_t work_group_size = std::min<size_t>(n_columns, device_prop.max_work_group_size);
 
   FPType* hist_buffer_data = reinterpret_cast<FPType*> (hist_buffer->Data());
   size_t n_parallel_hist = hist_buffer->Size() / nbins;
@@ -396,6 +397,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
                               RowSetCollection* row_set,
                               const GHistIndexMatrix& gmat,
                               HistCollection<FPType>* histograms,
+                              const DeviceProperties& device_prop,
                               ::sycl::event event) {
   const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
   const GradientPair::ValueT* pgh =
@@ -404,7 +406,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
   const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
   const size_t nbins = gmat.nbins;
 
-  size_t work_group_size = std::min<size_t>(n_columns, 1024);
+  size_t work_group_size = std::min<size_t>(n_columns, device_prop.max_work_group_size);
   const size_t n_work_groups = n_columns / work_group_size + (n_columns % work_group_size > 0);
 
   size_t n_nodes = nodes.size();
@@ -413,8 +415,8 @@ template<typename FPType, typename BinIdxType, bool isDense>
   const auto* rows = row_set->RowSetDevice(qu, &event_batch);
   auto** hist_collection = histograms->GetDevicePointers();
 
-  size_t l2_size = 8 * 1024 * 1024;
-  size_t node_batch_size = std::max<size_t>(1, l2_size / (2 * sizeof(FPType) * nbins));
+  size_t l2_size = device_prop.l2_size;
+  size_t node_batch_size = 8 ; //std::max<size_t>(1, l2_size / (2 * sizeof(FPType) * nbins));
   if (node_batch_size > n_nodes) node_batch_size = n_nodes;
   size_t n_node_batch = n_nodes / node_batch_size + (n_nodes % node_batch_size > 0);
 
@@ -432,8 +434,21 @@ template<typename FPType, typename BinIdxType, bool isDense>
       events[nidx] = qu->memset(hist, 0, 2 * sizeof(FPType) * nbins, event_batch);
     }
 
-    size_t block_size = 32;
-    size_t n_blocks = size / block_size + (size % block_size > 0);
+    size_t n_sub_groups = work_group_size / device_prop.min_sub_group_size
+                       + (work_group_size % device_prop.min_sub_group_size > 0);
+    size_t n_sub_groups_per_core = std::min<size_t>(device_prop.eu_per_core, n_sub_groups);
+
+    // size_t block_size = 1;
+    // size_t n_blocks = size / block_size + (size % block_size > 0);
+
+    constexpr size_t kMaxGPUUtilisation = 64;
+    size_t n_blocks = std::min<size_t>(size,
+                                       kMaxGPUUtilisation * device_prop.max_compute_units / (n_work_groups * nodes_in_batch));
+
+    // LOG(INFO)
+    //           << "n_blocks = " << n_blocks
+    //           ;
+    // LOG(INFO) << "n_work_groups = " << n_blocks * nodes_in_batch * n_work_groups;
 
     event_batch = qu->submit([&](::sycl::handler& cgh) {
       cgh.depends_on(events);
@@ -452,6 +467,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
           size_t n_rows = rows[nid].Size();
           FPType* hist = reinterpret_cast<FPType*>(hist_collection[nid]);
 
+          size_t block_size = n_rows / n_blocks + (n_rows % n_blocks > 0);
 
           size_t begin = block * block_size;
           size_t end = std::min(begin + block_size, n_rows);
@@ -625,23 +641,23 @@ template <typename FPType>
   switch (gmat.index.GetBinTypeSize()) {
     case BinTypeSize::kUint8BinsTypeSize:
       if (gmat.IsDense()) {
-        return BuildHistKernel<FPType, uint8_t, true>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
+        return BuildHistKernel<FPType, uint8_t, true>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, device_prop, event);
       } else {
-        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
+        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, device_prop, event);
       }
       break;
     case BinTypeSize::kUint16BinsTypeSize:
       if (gmat.IsDense()) {
-        return BuildHistKernel<FPType, uint16_t, true>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
+        return BuildHistKernel<FPType, uint16_t, true>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, device_prop, event);
       } else {
-        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
+        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, device_prop, event);
       }
       break;
     case BinTypeSize::kUint32BinsTypeSize:
       if (gmat.IsDense()) {
-        return BuildHistKernel<FPType, uint32_t, true>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
+        return BuildHistKernel<FPType, uint32_t, true>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, device_prop, event);
       } else {
-        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, event);
+        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, hist_buffer, device_prop, event);
       }
       break;
     default:
@@ -663,23 +679,23 @@ template <typename FPType>
   switch (gmat.index.GetBinTypeSize()) {
     case BinTypeSize::kUint8BinsTypeSize:
       if (gmat.IsDense()) {
-        return BuildHistKernel<FPType, uint8_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+        return BuildHistKernel<FPType, uint8_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, device_prop, event);
       } else {
-        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, device_prop, event);
       }
       break;
     case BinTypeSize::kUint16BinsTypeSize:
       if (gmat.IsDense()) {
-        return BuildHistKernel<FPType, uint16_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+        return BuildHistKernel<FPType, uint16_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, device_prop, event);
       } else {
-        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, device_prop, event);
       }
       break;
     case BinTypeSize::kUint32BinsTypeSize:
       if (gmat.IsDense()) {
-        return BuildHistKernel<FPType, uint32_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+        return BuildHistKernel<FPType, uint32_t, true>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, device_prop, event);
       } else {
-        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, event);
+        return BuildHistKernel<FPType, uint32_t, false>(qu_, gpair, nodes, nodes_ptr, row_indices, gmat, histograms, device_prop, event);
       }
       break;
     default:

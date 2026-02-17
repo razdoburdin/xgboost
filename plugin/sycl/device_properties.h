@@ -40,6 +40,7 @@ class DeviceProperties {
  public:
   bool is_gpu;
   bool usm_host_allocations;
+  bool host_unified_memory;
   size_t max_compute_units;
   size_t max_work_group_size;
   size_t min_sub_group_size;
@@ -57,6 +58,7 @@ class DeviceProperties {
   explicit DeviceProperties(const ::sycl::device& device):
     is_gpu(device.is_gpu()),
     usm_host_allocations(device.has(::sycl::aspect::usm_host_allocations)),
+    host_unified_memory(device.get_info<::sycl::info::device::host_unified_memory>()),
     max_compute_units(device.get_info<::sycl::info::device::max_compute_units>()),
     max_work_group_size(device.get_info<::sycl::info::device::max_work_group_size>()),
     min_sub_group_size(device.get_info<::sycl::info::device::sub_group_sizes>().front()),
@@ -68,6 +70,8 @@ class DeviceProperties {
       LOG(INFO) << "Detected max_work_group_size = " << max_work_group_size;
       LOG(INFO) << "Detected min_sub_group_size = " << min_sub_group_size;
       LOG(INFO) << "Detected max_sub_group_size = " << max_sub_group_size;
+      LOG(INFO) << "Detected usm_host_allocations = " << usm_host_allocations;
+      LOG(INFO) << "Detected host_unified_memory = " << host_unified_memory;
       GetL2Size(device);
       if (is_gpu) {
         GetSRAMSize(device);
