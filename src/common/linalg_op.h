@@ -271,11 +271,11 @@ void VecScaDiv(Context const* ctx, linalg::VectorView<float> x, double div) {
 template <auto _tag = detail::SysTag()>
 void LogE(Context const* ctx, linalg::VectorView<float> x, float rt_eps = 0.0f) {
   CHECK_EQ(x.Device().ordinal, ctx->Device().ordinal);
-  #if defined(SYCL_LANGUAGE_VERSION)
-    TransformKernel(ctx, x, [=] XGBOOST_DEVICE(float v) { return ::sycl::log(v + rt_eps); });
-  #else
-    TransformKernel(ctx, x, [=] XGBOOST_DEVICE(float v) { return log(v + rt_eps); });
-  #endif
+#if defined(SYCL_LANGUAGE_VERSION)
+  TransformKernel(ctx, x, [=] XGBOOST_DEVICE(float v) { return ::sycl::log(v + rt_eps); });
+#else
+  TransformKernel(ctx, x, [=] XGBOOST_DEVICE(float v) { return log(v + rt_eps); });
+#endif
 }
 
 template <typename T, std::enable_if_t<std::is_floating_point_v<T>>* = nullptr>
