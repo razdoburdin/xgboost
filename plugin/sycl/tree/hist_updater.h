@@ -215,7 +215,7 @@ class HistUpdater {
     bool isDense = gmat.IsDense();
     const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
 
-    size_t th_block_size = static_cast<size_t>((1.0 * gmat.nbins) / n_columns);
+    size_t th_block_size = static_cast<size_t>((0.125 * gmat.nbins) / n_columns);
     for (size_t nidx = 0; nidx < nodes_for_explicit_hist_build_.size(); ++nidx) {
       bst_node_t nid = nodes_for_explicit_hist_build_[nidx].nid;
       size_t n_rows = row_set_collection_[nid].Size();
@@ -223,7 +223,17 @@ class HistUpdater {
                             ? n_rows / n_parallel_hist + (n_rows % n_parallel_hist > 0)
                             : 0;
 
-      if (true) {
+      bool use_private_hist = (block_size >= th_block_size);
+      if (use_private_hist) {
+        // LOG(INFO) << "n_rows = " << n_rows << "\t"
+        //           << "n_parallel_hist = " << n_parallel_hist << "\t"
+        //           << "block_size = " << block_size << "\t"
+        //           << "th_block_size = " << th_block_size << "\t"
+        //           << "nbins = " << gmat.nbins << "\t"
+        //           << "buffer" << "\t"
+        //           ;
+        nodes_buffer.push_back(nid);
+      } else {
         // LOG(INFO) << "n_rows = " << n_rows << "\t"
         //           << "n_parallel_hist = " << n_parallel_hist << "\t"
         //           << "block_size = " << block_size << "\t"
@@ -232,15 +242,6 @@ class HistUpdater {
         //           << "pure atomic" << "\t"
         //           ;
         nodes_non_buffer.push_back(nid);
-      } else {
-        LOG(INFO) << "n_rows = " << n_rows << "\t"
-                  << "n_parallel_hist = " << n_parallel_hist << "\t"
-                  << "block_size = " << block_size << "\t"
-                  << "th_block_size = " << th_block_size << "\t"
-                  << "nbins = " << gmat.nbins << "\t"
-                  << "buffer" << "\t"
-                  ;
-        nodes_buffer.push_back(nid);
       }
     }
 

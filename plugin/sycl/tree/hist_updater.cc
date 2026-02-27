@@ -626,15 +626,20 @@ void HistUpdater<GradientSumT>::InitData(
     size_t n_sub_groups_per_core = std::min<size_t>(device_properties_.eu_per_core, n_sub_groups);
 
     size_t n_parallel_hist = device_properties_.l2_size / (2 * sizeof(GradientSumT) * nbins);
+
+    size_t n_wgs = n_columns / device_properties_.max_work_group_size + (n_columns % device_properties_.max_work_group_size > 0);
+    if (n_wgs > 1) {
+      n_parallel_hist *= n_wgs;
+    }
+
     constexpr size_t kMaxGPUUtilisation = 8;
     n_parallel_hist = std::min<size_t>(n_parallel_hist, kMaxGPUUtilisation * device_properties_.max_compute_units / n_sub_groups_per_core);
 
-    // if (!isDense) {
-    //   constexpr size_t kMinGPUUtilisation = 2;
-    //   n_parallel_hist = std::max<size_t>(n_parallel_hist, kMinGPUUtilisation * device_properties_.max_compute_units / n_sub_groups_per_core);
-    // }
-
-    hist_buffer_.Reset(n_parallel_hist);
+    if (n_parallel_hist >= device_properties_.max_compute_units / n_sub_groups_per_core) {
+      hist_buffer_.Reset(n_parallel_hist);
+    } else {
+      hist_buffer_.Reset(0);
+    }
   }
 
   builder_monitor_.Stop("InitData");
