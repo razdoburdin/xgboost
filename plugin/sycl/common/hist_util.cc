@@ -499,15 +499,26 @@ template<typename FPType, typename BinIdxType, bool isDense>
     float conflicts_per_bin = isDense
                               ? std::min<float>(size, device_prop.max_compute_units / wg_per_columns) / gmat.min_num_bins
                               : std::min<float>(size, device_prop.max_compute_units) / nbins; // bins aren't grouped by features.
+    // float n_wgs = std::min<float>(size, device_prop.max_compute_units / wg_per_columns);
+    // float conflicts_per_bin = n_wgs / gmat.min_num_bins;
+    // float atomic_penalty = n_columns * (size / n_wgs) * conflicts_per_bin;
 
     if (conflicts_per_bin < 0.5) {
+    // if (nodes_in_batch * n_work_groups < device_prop.n_cores) {
       for (size_t nidx = 0; nidx < nodes_in_batch; ++nidx) {
         bst_node_t nid = nodes[nidx + first_node];
         event_batch = BuildHistKernel<FPType, BinIdxType, isDense>(qu, gpair, (*row_set)[nid], gmat, &((*histograms)[nid]), event_batch);
       }
     } else {
-      size_t block_size = 32;
-      size_t n_blocks = size / block_size + (size % block_size > 0);
+      size_t max_block_size = 32;
+      size_t n_blocks = size / max_block_size + (size % max_block_size > 0);
+
+      size_t n_sub_groups = work_group_size / device_prop.min_sub_group_size
+                         + (work_group_size % device_prop.min_sub_group_size > 0);
+      size_t n_sub_groups_per_core = std::min<size_t>(device_prop.eu_per_core, n_sub_groups);
+
+      constexpr float kMaxGPUUtilisation = 8;
+      n_blocks = std::max<size_t>(n_blocks, kMaxGPUUtilisation * device_prop.max_compute_units / (n_sub_groups_per_core * nodes_in_batch * n_work_groups));
 
       event_batch = qu->submit([&](::sycl::handler& cgh) {
         cgh.depends_on(events);
@@ -526,7 +537,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
             size_t n_rows = rows[nid].Size();
             FPType* hist = reinterpret_cast<FPType*>(hist_collection[nid]);
 
-            // size_t block_size = n_rows / n_blocks + (n_rows % n_blocks > 0);
+            size_t block_size = n_rows / n_blocks + (n_rows % n_blocks > 0);
 
             size_t begin = block * block_size;
             size_t end = std::min(begin + block_size, n_rows);

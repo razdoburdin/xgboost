@@ -620,14 +620,15 @@ void HistUpdater<GradientSumT>::InitData(
     hist_buffer_.Init(qu_, nbins);
     bool isDense = gmat.IsDense();
     const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
+    size_t work_group_size = std::min<size_t>(n_columns, device_properties_.max_work_group_size);
 
-    size_t n_sub_groups = n_columns / device_properties_.min_sub_group_size
-                       + (n_columns % device_properties_.min_sub_group_size > 0);
+    size_t n_sub_groups = work_group_size / device_properties_.min_sub_group_size
+                       + (work_group_size % device_properties_.min_sub_group_size > 0);
     size_t n_sub_groups_per_core = std::min<size_t>(device_properties_.eu_per_core, n_sub_groups);
 
     size_t n_parallel_hist = device_properties_.l2_size / (2 * sizeof(GradientSumT) * nbins);
 
-    size_t n_wgs = n_columns / device_properties_.max_work_group_size + (n_columns % device_properties_.max_work_group_size > 0);
+    size_t n_wgs = n_columns / work_group_size + (n_columns % work_group_size > 0);
     if (n_wgs > 1) {
       n_parallel_hist *= n_wgs;
     }

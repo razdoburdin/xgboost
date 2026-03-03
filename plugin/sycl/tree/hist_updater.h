@@ -215,15 +215,29 @@ class HistUpdater {
     bool isDense = gmat.IsDense();
     const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
 
-    size_t th_block_size = static_cast<size_t>((0.125 * gmat.nbins) / n_columns);
     for (size_t nidx = 0; nidx < nodes_for_explicit_hist_build_.size(); ++nidx) {
       bst_node_t nid = nodes_for_explicit_hist_build_[nidx].nid;
-      size_t n_rows = row_set_collection_[nid].Size();
-      size_t block_size = (n_parallel_hist > 0)
-                            ? n_rows / n_parallel_hist + (n_rows % n_parallel_hist > 0)
-                            : 0;
 
-      bool use_private_hist = (block_size >= th_block_size);
+      bool use_private_hist = false;
+      size_t n_rows = row_set_collection_[nid].Size();
+      if (n_parallel_hist > 0) {
+        size_t block_size = n_rows / n_parallel_hist + (n_rows % n_parallel_hist > 0);
+
+        float wg_per_columns = std::max(1.0f, static_cast<float>(n_columns) / 32);
+        float n_wgs = std::min<float>(n_rows, device_properties_.max_compute_units / wg_per_columns);
+        float conflicts_per_bin = n_wgs / gmat.min_num_bins;
+        float atomic_penalty = n_columns * (n_rows / n_wgs) * conflicts_per_bin;
+      
+
+        size_t n_sub_groups = n_columns / device_properties_.min_sub_group_size
+                            + (n_columns % device_properties_.min_sub_group_size > 0);
+        size_t n_sub_groups_per_core = std::min<size_t>(device_properties_.eu_per_core, n_sub_groups);
+        float utilization = static_cast<float>(n_parallel_hist) / (device_properties_.max_compute_units / n_sub_groups_per_core);
+
+        float block_penalty = 2 * sizeof(GradientSumT) * float(gmat.nbins) * std::sqrt(utilization);
+        use_private_hist = atomic_penalty > block_penalty;
+      }
+
       if (use_private_hist) {
         // LOG(INFO) << "n_rows = " << n_rows << "\t"
         //           << "n_parallel_hist = " << n_parallel_hist << "\t"
@@ -232,7 +246,7 @@ class HistUpdater {
         //           << "nbins = " << gmat.nbins << "\t"
         //           << "buffer" << "\t"
         //           ;
-        nodes_buffer.push_back(nid);
+        if (n_rows > 0) nodes_buffer.push_back(nid);
       } else {
         // LOG(INFO) << "n_rows = " << n_rows << "\t"
         //           << "n_parallel_hist = " << n_parallel_hist << "\t"
@@ -241,7 +255,7 @@ class HistUpdater {
         //           << "nbins = " << gmat.nbins << "\t"
         //           << "pure atomic" << "\t"
         //           ;
-        nodes_non_buffer.push_back(nid);
+        if (n_rows > 0) nodes_non_buffer.push_back(nid);
       }
     }
 
