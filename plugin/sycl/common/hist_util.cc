@@ -399,46 +399,46 @@ template<typename FPType, typename BinIdxType, bool isDense>
       const size_t row_block_idx = hist_idx;
       FPType* hist_buff = hist_buffer_data + hist_idx * hist_buff_offset;
       for (size_t nidx = 0; nidx < n_nodes; ++nidx) {
-        for (size_t elem_idx = feat; elem_idx < 2 * nbins; elem_idx += work_group_size) {
-          hist_buff[elem_idx] = 0;
-        }
-
         bst_node_t nid = nodes_ptr[nidx];
-        const size_t* rid = rows[nid].begin;
+        size_t n_rows = rows[nid].Size();
+        if (n_rows > 0) {
+          const size_t* rid = rows[nid].begin;
+          FPType* hist = reinterpret_cast<FPType*>(hist_collection[nid]);
+          for (size_t elem_idx = feat; elem_idx < 2 * nbins; elem_idx += work_group_size) {
+            hist_buff[elem_idx] = 0;
+          }
 
-        FPType* hist = reinterpret_cast<FPType*>(hist_collection[nid]);
-        for (size_t wg = 0; wg < n_wgs; ++wg) {
-          size_t n_rows = rows[nid].Size();
+          for (size_t wg = 0; wg < n_wgs; ++wg) {
+            size_t block_size = n_rows / n_row_blocks + (n_rows % n_row_blocks > 0);
 
-          size_t block_size = n_rows / n_row_blocks + (n_rows % n_row_blocks > 0);
+            size_t begin = row_block_idx * block_size;
+            size_t end = std::min(begin + block_size, n_rows);
 
-          size_t begin = row_block_idx * block_size;
-          size_t end = std::min(begin + block_size, n_rows);
+            for (size_t i = begin; i < end; ++i) {
+              const size_t icol_start = n_columns * rid[i];
+              const size_t idx_gh = rid[i];
+              const FPType pgh_row[2] = {pgh[2 * idx_gh], pgh[2 * idx_gh + 1]};
+              const BinIdxType* gr_index_local = gradient_index + icol_start;
 
-          for (size_t i = begin; i < end; ++i) {
-            const size_t icol_start = n_columns * rid[i];
-            const size_t idx_gh = rid[i];
-            const FPType pgh_row[2] = {pgh[2 * idx_gh], pgh[2 * idx_gh + 1]};
-            const BinIdxType* gr_index_local = gradient_index + icol_start;
+              size_t fid = feat + work_group_size * wg;
+              pid.barrier(::sycl::access::fence_space::local_space);
+              if (fid < n_columns) {
+                uint32_t idx_bin = static_cast<uint32_t>(gr_index_local[fid]);
+                if constexpr (isDense) {
+                  idx_bin += offsets[fid];
+                }
 
-            size_t fid = feat + work_group_size * wg;
-            pid.barrier(::sycl::access::fence_space::local_space);
-            if (fid < n_columns) {
-              uint32_t idx_bin = static_cast<uint32_t>(gr_index_local[fid]);
-              if constexpr (isDense) {
-                idx_bin += offsets[fid];
+                hist_buff[2 * idx_bin]     += pgh_row[0];
+                hist_buff[2 * idx_bin + 1] += pgh_row[1];
               }
-
-              hist_buff[2 * idx_bin]     += pgh_row[0];
-              hist_buff[2 * idx_bin + 1] += pgh_row[1];
             }
           }
-        }
 
-        pid.barrier(::sycl::access::fence_space::local_space);
-        for (size_t elem_idx = feat; elem_idx < 2 * nbins; elem_idx += work_group_size) {
-          AtomicRef<FPType> sum(hist[elem_idx]);
-          sum += hist_buff[elem_idx];
+          pid.barrier(::sycl::access::fence_space::local_space);
+          for (size_t elem_idx = feat; elem_idx < 2 * nbins; elem_idx += work_group_size) {
+            AtomicRef<FPType> sum(hist[elem_idx]);
+            sum += hist_buff[elem_idx];
+          }
         }
       }
     });
@@ -469,7 +469,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
   const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
   const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
 
-  size_t work_group_size = std::min<size_t>(n_columns, device_prop.max_work_group_size);
+  size_t work_group_size = std::min<size_t>(n_columns, 32);
   const size_t n_work_groups = n_columns / work_group_size + (n_columns % work_group_size > 0);
 
   size_t n_nodes = nodes.size();
@@ -487,23 +487,24 @@ template<typename FPType, typename BinIdxType, bool isDense>
     size_t last_node = std::min<size_t>(first_node + node_batch_size, n_nodes);
     size_t nodes_in_batch = last_node - first_node;
 
-    size_t size = 0;
+    size_t max_size = 0;
     for (size_t nidx = 0; nidx < nodes_in_batch; ++nidx) {
       bst_node_t nid = nodes[nidx + first_node];
-      size = std::max(size, (*row_set)[nid].Size());
+      max_size = std::max(max_size, (*row_set)[nid].Size());
       FPType* hist = reinterpret_cast<FPType*>((*histograms)[nid].Data());
       events[nidx] = qu->memset(hist, 0, 2 * sizeof(FPType) * nbins, event_batch);
     }
 
     float wg_per_columns = std::max(1.0f, static_cast<float>(n_columns) / 32);
-    float conflicts_per_bin = isDense
-                              ? std::min<float>(size, device_prop.max_compute_units / wg_per_columns) / gmat.min_num_bins
-                              : std::min<float>(size, device_prop.max_compute_units) / nbins; // bins aren't grouped by features.
-    // float n_wgs = std::min<float>(size, device_prop.max_compute_units / wg_per_columns);
-    // float conflicts_per_bin = n_wgs / gmat.min_num_bins;
-    // float atomic_penalty = n_columns * (size / n_wgs) * conflicts_per_bin;
+    // float conflicts_per_bin = isDense
+    //                           ? std::min<float>(max_size, device_prop.max_compute_units / wg_per_columns) / gmat.min_num_bins
+    //                           : std::min<float>(max_size, device_prop.max_compute_units) / nbins; // bins aren't grouped by features.
+    float n_wgs = std::min<float>(max_size, device_prop.max_compute_units / wg_per_columns);
+    float conflicts_per_bin = n_wgs / gmat.min_num_bins;
+    float atomic_penalty = n_columns * (max_size / n_wgs) * conflicts_per_bin;
 
-    if (conflicts_per_bin < 0.5) {
+    if (false) {
+    // if (conflicts_per_bin < 0.5) {
     // if (nodes_in_batch * n_work_groups < device_prop.n_cores) {
       for (size_t nidx = 0; nidx < nodes_in_batch; ++nidx) {
         bst_node_t nid = nodes[nidx + first_node];
@@ -511,7 +512,7 @@ template<typename FPType, typename BinIdxType, bool isDense>
       }
     } else {
       size_t max_block_size = 32;
-      size_t n_blocks = size / max_block_size + (size % max_block_size > 0);
+      size_t n_blocks = max_size / max_block_size + (max_size % max_block_size > 0);
 
       size_t n_sub_groups = work_group_size / device_prop.min_sub_group_size
                          + (work_group_size % device_prop.min_sub_group_size > 0);
@@ -519,6 +520,14 @@ template<typename FPType, typename BinIdxType, bool isDense>
 
       constexpr float kMaxGPUUtilisation = 8;
       n_blocks = std::max<size_t>(n_blocks, kMaxGPUUtilisation * device_prop.max_compute_units / (n_sub_groups_per_core * nodes_in_batch * n_work_groups));
+
+      // LOG(INFO)
+      //         << "conflicts_per_bin = " << conflicts_per_bin <<"\t"
+      //         << "atomic_penalty = " << atomic_penalty <<"\t"
+      //         << "n_blocks = " << n_blocks <<"\t"
+      //         << "nodes_in_batch = " << nodes_in_batch <<"\t"
+      //         << "n_work_groups = " << n_work_groups <<"\t"
+      //         ;
 
       event_batch = qu->submit([&](::sycl::handler& cgh) {
         cgh.depends_on(events);
@@ -532,18 +541,18 @@ template<typename FPType, typename BinIdxType, bool isDense>
           const size_t local_id = group.get_local_id()[2];
           const size_t j = group_id * work_group_size + local_id;
 
-          if (j < n_columns) {
-            bst_node_t nid = nodes_ptr[node_idx];
-            size_t n_rows = rows[nid].Size();
+          bst_node_t nid = nodes_ptr[node_idx];
+          size_t n_rows = rows[nid].Size();
+          if ((j < n_columns) && (n_rows > 0)) {
+            const size_t* rid = rows[nid].begin;
             FPType* hist = reinterpret_cast<FPType*>(hist_collection[nid]);
 
             size_t block_size = n_rows / n_blocks + (n_rows % n_blocks > 0);
 
             size_t begin = block * block_size;
             size_t end = std::min(begin + block_size, n_rows);
-            for (size_t i = begin; i < end; ++i) {
-              const size_t* rid = rows[nid].begin;
 
+            for (size_t i = begin; i < end; ++i) {
               const size_t icol_start = n_columns * rid[i];
               const size_t idx_gh = rid[i];
               const FPType pgh_row[2] = {pgh[2 * idx_gh], pgh[2 * idx_gh + 1]};

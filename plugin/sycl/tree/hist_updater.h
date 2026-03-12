@@ -218,8 +218,8 @@ class HistUpdater {
     for (size_t nidx = 0; nidx < nodes_for_explicit_hist_build_.size(); ++nidx) {
       bst_node_t nid = nodes_for_explicit_hist_build_[nidx].nid;
 
-      bool use_private_hist = false;
       size_t n_rows = row_set_collection_[nid].Size();
+      bool use_private_hist = false;
       if (n_parallel_hist > 0) {
         size_t block_size = n_rows / n_parallel_hist + (n_rows % n_parallel_hist > 0);
 
@@ -239,23 +239,9 @@ class HistUpdater {
       }
 
       if (use_private_hist) {
-        // LOG(INFO) << "n_rows = " << n_rows << "\t"
-        //           << "n_parallel_hist = " << n_parallel_hist << "\t"
-        //           << "block_size = " << block_size << "\t"
-        //           << "th_block_size = " << th_block_size << "\t"
-        //           << "nbins = " << gmat.nbins << "\t"
-        //           << "buffer" << "\t"
-        //           ;
-        if (n_rows > 0) nodes_buffer.push_back(nid);
+        nodes_buffer.push_back(nid);
       } else {
-        // LOG(INFO) << "n_rows = " << n_rows << "\t"
-        //           << "n_parallel_hist = " << n_parallel_hist << "\t"
-        //           << "block_size = " << block_size << "\t"
-        //           << "th_block_size = " << th_block_size << "\t"
-        //           << "nbins = " << gmat.nbins << "\t"
-        //           << "pure atomic" << "\t"
-        //           ;
-        if (n_rows > 0) nodes_non_buffer.push_back(nid);
+        nodes_non_buffer.push_back(nid);
       }
     }
 
