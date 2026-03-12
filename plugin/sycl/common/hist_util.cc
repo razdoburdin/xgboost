@@ -495,21 +495,22 @@ template<typename FPType, typename BinIdxType, bool isDense>
       events[nidx] = qu->memset(hist, 0, 2 * sizeof(FPType) * nbins, event_batch);
     }
 
-    float wg_per_columns = std::max(1.0f, static_cast<float>(n_columns) / 32);
-    // float conflicts_per_bin = isDense
-    //                           ? std::min<float>(max_size, device_prop.max_compute_units / wg_per_columns) / gmat.min_num_bins
-    //                           : std::min<float>(max_size, device_prop.max_compute_units) / nbins; // bins aren't grouped by features.
-    float n_wgs = std::min<float>(max_size, device_prop.max_compute_units / wg_per_columns);
-    float conflicts_per_bin = n_wgs / gmat.min_num_bins;
-    float atomic_penalty = n_columns * (max_size / n_wgs) * conflicts_per_bin;
+    // Histogram size in bytes (grad + hess per bin).
+    // When histogram is large, Path 2's row-blocking causes cache thrashing
+    // as each work-item strides through the entire histogram for block_size rows.
+    // Path 1 (one row per work-item) has better memory latency hiding
+    // with more concurrent work-items.
+    const size_t hist_bytes = nbins * 2 * sizeof(FPType);
+    const bool use_per_node = (hist_bytes >= device_prop.l1_size);
 
-    if (false) {
-    // if (conflicts_per_bin < 0.5) {
-    // if (nodes_in_batch * n_work_groups < device_prop.n_cores) {
+    if (use_per_node) {
       for (size_t nidx = 0; nidx < nodes_in_batch; ++nidx) {
         bst_node_t nid = nodes[nidx + first_node];
-        event_batch = BuildHistKernel<FPType, BinIdxType, isDense>(qu, gpair, (*row_set)[nid], gmat, &((*histograms)[nid]), event_batch);
+        events[nidx] = BuildHistKernel<FPType, BinIdxType, isDense>(qu, gpair, (*row_set)[nid], gmat, &((*histograms)[nid]), events[nidx]);
       }
+      event_batch = qu->submit([&](::sycl::handler& cgh) {
+          cgh.depends_on(events);
+      });
     } else {
       size_t max_block_size = 32;
       size_t n_blocks = max_size / max_block_size + (max_size % max_block_size > 0);
@@ -520,14 +521,6 @@ template<typename FPType, typename BinIdxType, bool isDense>
 
       constexpr float kMaxGPUUtilisation = 8;
       n_blocks = std::max<size_t>(n_blocks, kMaxGPUUtilisation * device_prop.max_compute_units / (n_sub_groups_per_core * nodes_in_batch * n_work_groups));
-
-      // LOG(INFO)
-      //         << "conflicts_per_bin = " << conflicts_per_bin <<"\t"
-      //         << "atomic_penalty = " << atomic_penalty <<"\t"
-      //         << "n_blocks = " << n_blocks <<"\t"
-      //         << "nodes_in_batch = " << nodes_in_batch <<"\t"
-      //         << "n_work_groups = " << n_work_groups <<"\t"
-      //         ;
 
       event_batch = qu->submit([&](::sycl::handler& cgh) {
         cgh.depends_on(events);
