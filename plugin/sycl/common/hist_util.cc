@@ -247,62 +247,6 @@ template<typename FPType, typename BinIdxType, bool isDense>
                             const RowSetCollection::Elem& row_indices,
                             const GHistIndexMatrix& gmat,
                             GHistRow<FPType, MemoryType::on_device>* hist,
-                            const tree::HistDispatcher<FPType>& dispatcher,
-                            ::sycl::event event_priv) {
-  const size_t size = row_indices.Size();
-  const size_t* rid = row_indices.begin;
-  const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
-  const GradientPair::ValueT* pgh =
-    reinterpret_cast<const GradientPair::ValueT*>(gpair.ConstDevicePointer());
-  const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
-  const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
-  FPType* hist_data = reinterpret_cast<FPType*>(hist->Data());
-  const size_t nbins = gmat.nbins;
-
-  size_t work_group_size = dispatcher.work_group_size;
-  const size_t n_work_groups = n_columns / work_group_size + (n_columns % work_group_size > 0);
-
-  auto event_fill = qu->fill(hist_data, FPType(0), nbins * 2, event_priv);
-  auto event_main = qu->submit([&](::sycl::handler& cgh) {
-    cgh.depends_on(event_fill);
-    cgh.parallel_for<>(::sycl::nd_range<2>(::sycl::range<2>(size, n_work_groups * work_group_size),
-                                           ::sycl::range<2>(1, work_group_size)),
-                       [=](::sycl::nd_item<2> pid) {
-      const int i = pid.get_global_id(0);
-      auto group  = pid.get_group();
-
-      const size_t icol_start = n_columns * rid[i];
-      const size_t idx_gh = rid[i];
-      const FPType pgh_row[2] = {pgh[2 * idx_gh], pgh[2 * idx_gh + 1]};
-      const BinIdxType* gr_index_local = gradient_index + icol_start;
-
-      const size_t group_id = group.get_group_id()[1];
-      const size_t local_id = group.get_local_id()[1];
-      const size_t j = group_id * work_group_size + local_id;
-      if (j < n_columns) {
-        uint32_t idx_bin = static_cast<uint32_t>(gr_index_local[j]);
-        if constexpr (isDense) {
-          idx_bin += offsets[j];
-        }
-        if (idx_bin < nbins) {
-          AtomicRef<FPType> gsum(hist_data[2 * idx_bin]);
-          AtomicRef<FPType> hsum(hist_data[2 * idx_bin + 1]);
-          gsum += pgh_row[0];
-          hsum += pgh_row[1];
-        }
-      }
-    });
-  });
-  return event_main;
-}
-
-// Kernel with atomic using
-template<typename FPType, typename BinIdxType, bool isDense>
-::sycl::event BuildHistKernel(::sycl::queue* qu,
-                            const HostDeviceVector<GradientPair>& gpair,
-                            const RowSetCollection::Elem& row_indices,
-                            const GHistIndexMatrix& gmat,
-                            GHistRow<FPType, MemoryType::on_device>* hist,
                             ::sycl::event event_priv) {
   const size_t size = row_indices.Size();
   const size_t* rid = row_indices.begin;
@@ -349,6 +293,100 @@ template<typename FPType, typename BinIdxType, bool isDense>
     });
   });
   return event_main;
+}
+
+template<typename FPType>
+::sycl::event BuildHistKernelL1(::sycl::queue* qu,
+                              const HostDeviceVector<GradientPair>& gpair,
+                              const std::vector<bst_node_t>& nodes,
+                              const bst_node_t* nodes_ptr,
+                              RowSetCollection* row_set,
+                              const GHistIndexMatrix& gmat,
+                              HistCollection<FPType>* histograms,
+                              const DeviceProperties& device_prop,
+                              ::sycl::event event) {
+  using BinIdxType = uint8_t;
+  const size_t n_columns = gmat.nfeatures;
+  const GradientPair::ValueT* pgh =
+    reinterpret_cast<const GradientPair::ValueT*>(gpair.ConstDevicePointer());
+  const BinIdxType* gradient_index = gmat.index.data<BinIdxType>();
+  const uint32_t* offsets = gmat.cut.cut_ptrs_.ConstDevicePointer();
+  const size_t nbins = gmat.nbins;
+  size_t n_nodes = nodes.size();
+
+  ::sycl::event event_batch = event;
+  const auto* rows = row_set->RowSetDevice(qu, &event_batch);
+  auto** hist_collection = histograms->GetDevicePointers();
+  size_t work_group_size = std::min<size_t>(n_columns, device_prop.max_work_group_size);
+  size_t n_wgs = n_columns / work_group_size + (n_columns % work_group_size > 0);
+
+  // size_t n_parallel_hist = (device_prop.l1_size / (2 * sizeof(FPType) * nbins)) * device_prop.n_cores;
+  size_t n_parallel_hist = 4 * device_prop.n_cores;
+  size_t n_row_blocks = n_parallel_hist;
+
+  for (size_t nidx = 0; nidx < n_nodes; ++nidx) {
+    bst_node_t nid = nodes[nidx];
+    FPType* hist = reinterpret_cast<FPType*>((*histograms)[nid].Data());
+    event_batch = qu->memset(hist, 0, 2 * sizeof(FPType) * nbins, event_batch);
+  }
+
+  event_batch = qu->submit([&](::sycl::handler& cgh) {
+    cgh.depends_on(event_batch);
+    cgh.parallel_for<>(::sycl::nd_range<2>(::sycl::range<2>(n_row_blocks, work_group_size),
+                                           ::sycl::range<2>(           1, work_group_size)),
+                        [=](::sycl::nd_item<2> pid) {
+      const size_t hist_idx = pid.get_global_id(0);
+      size_t feat = pid.get_global_id(1);
+
+      const size_t row_block_idx = hist_idx;
+      for (size_t nidx = 0; nidx < n_nodes; ++nidx) {
+        bst_node_t nid = nodes_ptr[nidx];
+        size_t n_rows = rows[nid].Size();
+        if (n_rows > 0) {
+          const size_t* rid = rows[nid].begin;
+          FPType* hist = reinterpret_cast<FPType*>(hist_collection[nid]);
+          size_t block_size = n_rows / n_row_blocks + (n_rows % n_row_blocks > 0);
+
+          for (size_t fid = feat; fid < n_columns; fid += work_group_size) {
+            FPType hist_buff[512];
+            size_t n_bins_feature = offsets[fid+1] - offsets[fid];
+            // Not all elements of hist_buff are actually used: n_bins_feature <= kMaxNumBins
+            // We initililize only the requared elements to prevent the unused go to cache.
+            for (int bin = 0; bin < n_bins_feature; ++bin) {
+              hist_buff[2 * bin] = 0.0;
+              hist_buff[2 * bin + 1] = 0.0;
+            }
+
+            size_t begin = row_block_idx * block_size;
+            size_t end = std::min(begin + block_size, n_rows);
+
+            for (size_t i = begin; i < end; ++i) {
+              const size_t icol_start = n_columns * rid[i];
+              const size_t idx_gh = rid[i];
+              const FPType pgh_row[2] = {pgh[2 * idx_gh], pgh[2 * idx_gh + 1]};
+              const BinIdxType* gr_index_local = gradient_index + icol_start;
+
+              uint32_t bin = static_cast<uint32_t>(gr_index_local[fid]);
+
+              hist_buff[2 * bin]     += pgh_row[0];
+              hist_buff[2 * bin + 1] += pgh_row[1];
+            }
+
+            for (int bin = 0; bin < n_bins_feature; ++bin) {
+              uint32_t idx_bin = bin + offsets[fid];
+              AtomicRef<FPType> grad(hist[2 * idx_bin]);
+              AtomicRef<FPType> hess(hist[2 * idx_bin + 1]);
+
+              grad += hist_buff[2 * bin];
+              hess += hist_buff[2 * bin + 1];
+            }
+          }
+        }
+      }
+    });
+  });
+
+  return event_batch;
 }
 
 template<typename FPType, typename BinIdxType, bool isDense>
@@ -566,135 +604,6 @@ template<typename FPType, typename BinIdxType, bool isDense>
   return event_batch;
 }
 
-template<typename FPType, typename BinIdxType>
-::sycl::event BuildHistDispatchKernel(
-                ::sycl::queue* qu,
-                const HostDeviceVector<GradientPair>& gpair,
-                const RowSetCollection::Elem& row_indices,
-                const GHistIndexMatrix& gmat,
-                GHistRow<FPType, MemoryType::on_device>* hist,
-                bool isDense,
-                GHistRow<FPType, MemoryType::on_device>* hist_buffer,
-                const DeviceProperties& device_prop,
-                ::sycl::event events_priv,
-                bool force_atomic_use) {
-  const size_t size = row_indices.Size();
-  const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
-  const size_t nbins = gmat.nbins;
-  const size_t max_num_bins = gmat.max_num_bins;
-  const size_t min_num_bins = gmat.min_num_bins;
-
-  size_t max_n_blocks = hist_buffer->Size() / nbins;
-  auto dispatcher = tree::HistDispatcher<FPType>
-                       (device_prop, isDense, size, max_n_blocks, nbins,
-                        n_columns, max_num_bins, min_num_bins);
-
-  // force_atomic_use flag is used only for testing
-  bool use_atomic = true; //dispatcher.use_atomics || force_atomic_use;
-  if (!use_atomic) {
-    if (isDense) {
-      if (dispatcher.use_local_hist) {
-        return BuildHistKernelLocal<FPType, BinIdxType>(qu, gpair, row_indices,
-                                                        gmat, hist, hist_buffer,
-                                                        dispatcher, events_priv);
-      } else {
-        return BuildHistKernel<FPType, BinIdxType, true>(qu, gpair, row_indices,
-                                                         gmat, hist, hist_buffer,
-                                                         dispatcher, events_priv);
-      }
-    } else {
-      return BuildHistKernel<FPType, uint32_t, false>(qu, gpair, row_indices,
-                                                      gmat, hist, hist_buffer,
-                                                      dispatcher, events_priv);
-    }
-  } else {
-    if (isDense) {
-      return BuildHistKernel<FPType, BinIdxType, true>(qu, gpair, row_indices,
-                                                       gmat, hist,
-                                                       dispatcher, events_priv);
-    } else {
-      return BuildHistKernel<FPType, uint32_t, false>(qu, gpair, row_indices,
-                                                      gmat, hist,
-                                                      dispatcher, events_priv);
-    }
-  }
-}
-
-template<typename FPType>
-::sycl::event BuildHistKernel(::sycl::queue* qu,
-                            const HostDeviceVector<GradientPair>& gpair,
-                            const RowSetCollection::Elem& row_indices,
-                            const GHistIndexMatrix& gmat, const bool isDense,
-                            GHistRow<FPType, MemoryType::on_device>* hist,
-                            GHistRow<FPType, MemoryType::on_device>* hist_buffer,
-                            const DeviceProperties& device_prop,
-                            ::sycl::event event_priv,
-                            bool force_atomic_use) {
-  const bool is_dense = isDense;
-  switch (gmat.index.GetBinTypeSize()) {
-    case BinTypeSize::kUint8BinsTypeSize:
-      return BuildHistDispatchKernel<FPType, uint8_t>(qu, gpair, row_indices,
-                                                      gmat, hist, is_dense, hist_buffer,
-                                                      device_prop,
-                                                      event_priv, force_atomic_use);
-      break;
-    case BinTypeSize::kUint16BinsTypeSize:
-      return BuildHistDispatchKernel<FPType, uint16_t>(qu, gpair, row_indices,
-                                                       gmat, hist, is_dense, hist_buffer,
-                                                       device_prop,
-                                                       event_priv, force_atomic_use);
-      break;
-    case BinTypeSize::kUint32BinsTypeSize:
-      return BuildHistDispatchKernel<FPType, uint32_t>(qu, gpair, row_indices,
-                                                       gmat, hist, is_dense, hist_buffer,
-                                                       device_prop,
-                                                       event_priv, force_atomic_use);
-      break;
-    default:
-      CHECK(false);  // no default behavior
-  }
-}
-
-template <typename GradientSumT>
-::sycl::event GHistBuilder<GradientSumT>::BuildHist(
-              const HostDeviceVector<GradientPair>& gpair,
-              const RowSetCollection::Elem& row_indices,
-              const GHistIndexMatrix &gmat,
-              GHistRowT<MemoryType::on_device>* hist,
-              bool isDense,
-              GHistRowT<MemoryType::on_device>* hist_buffer,
-              const DeviceProperties& device_prop,
-              ::sycl::event event_priv,
-              bool force_atomic_use) {
-  return BuildHistKernel<GradientSumT>(qu_, gpair, row_indices, gmat,
-                                       isDense, hist, hist_buffer,
-                                       device_prop, event_priv,
-                                       force_atomic_use);
-}
-
-template
-::sycl::event GHistBuilder<float>::BuildHist(
-              const HostDeviceVector<GradientPair>& gpair,
-              const RowSetCollection::Elem& row_indices,
-              const GHistIndexMatrix& gmat,
-              GHistRow<float, MemoryType::on_device>* hist,
-              bool isDense,
-              GHistRow<float, MemoryType::on_device>* hist_buffer,
-              const DeviceProperties& device_prop,
-              ::sycl::event event_priv,
-              bool force_atomic_use);
-template
-::sycl::event GHistBuilder<double>::BuildHist(
-              const HostDeviceVector<GradientPair>& gpair,
-              const RowSetCollection::Elem& row_indices,
-              const GHistIndexMatrix& gmat,
-              GHistRow<double, MemoryType::on_device>* hist,
-              bool isDense,
-              GHistRow<double, MemoryType::on_device>* hist_buffer,
-              const DeviceProperties& device_prop,
-              ::sycl::event event_priv,
-              bool force_atomic_use);
-
 template <typename FPType>
 ::sycl::event GHistBuilder<FPType>::BuildHist(
               const HostDeviceVector<GradientPair>& gpair,
@@ -771,6 +680,47 @@ template <typename FPType>
       CHECK(false);  // no default behavior
   }
 }
+
+template <typename FPType>
+::sycl::event GHistBuilder<FPType>::BuildHistL1(
+              const HostDeviceVector<GradientPair>& gpair,
+              const std::vector<bst_node_t>& nodes,
+              const bst_node_t* nodes_device_ptr,
+              RowSetCollection* row_indices,
+              const GHistIndexMatrix& gmat,
+              HistCollection<FPType>* histograms,
+              const DeviceProperties& device_prop,
+              ::sycl::event event) {
+  switch (gmat.index.GetBinTypeSize()) {
+    case BinTypeSize::kUint8BinsTypeSize:
+      return BuildHistKernelL1<FPType>(qu_, gpair, nodes, nodes_device_ptr, row_indices, gmat, histograms, device_prop, event);
+      break;
+    default:
+      CHECK(false);  // no default behavior
+  }
+}
+
+template
+::sycl::event GHistBuilder<float>::BuildHistL1(
+              const HostDeviceVector<GradientPair>& gpair,
+              const std::vector<bst_node_t>& nodes,
+              const bst_node_t* nodes_device_ptr,
+              RowSetCollection* row_indices,
+              const GHistIndexMatrix& gmat,
+              HistCollection<float>* histograms,
+              const DeviceProperties& device_prop,
+              ::sycl::event event);
+
+template
+::sycl::event GHistBuilder<double>::BuildHistL1(
+              const HostDeviceVector<GradientPair>& gpair,
+              const std::vector<bst_node_t>& nodes,
+              const bst_node_t* nodes_device_ptr,
+              RowSetCollection* row_indices,
+              const GHistIndexMatrix& gmat,
+              HistCollection<double>* histograms,
+              const DeviceProperties& device_prop,
+              ::sycl::event event);
 
 template
 ::sycl::event GHistBuilder<float>::BuildHist(

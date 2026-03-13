@@ -164,17 +164,6 @@ class GHistBuilder {
 
   // Construct a histogram via histogram aggregation
   ::sycl::event BuildHist(const HostDeviceVector<GradientPair>& gpair,
-                          const RowSetCollection::Elem& row_indices,
-                          const GHistIndexMatrix& gmat,
-                          GHistRowT<MemoryType::on_device>* HistCollection,
-                          bool isDense,
-                          GHistRowT<MemoryType::on_device>* hist_buffer,
-                          const DeviceProperties& device_prop,
-                          ::sycl::event event,
-                          bool force_atomic_use = false);
-
-  // Construct a histogram via histogram aggregation
-  ::sycl::event BuildHist(const HostDeviceVector<GradientPair>& gpair,
                           const std::vector<bst_node_t>& nodes,
                           const bst_node_t* nodes_device_ptr,
                           RowSetCollection* row_indices,
@@ -195,6 +184,16 @@ class GHistBuilder {
                           const DeviceProperties& device_prop,
                           ::sycl::event event,
                           bool force_atomic_use = false);
+
+  // Construct a histogram via histogram aggregation
+  ::sycl::event BuildHistL1(const HostDeviceVector<GradientPair>& gpair,
+                          const std::vector<bst_node_t>& nodes,
+                          const bst_node_t* nodes_device_ptr,
+                          RowSetCollection* row_indices,
+                          const GHistIndexMatrix& gmat,
+                          HistCollection<GradientSumT>* histograms,
+                          const DeviceProperties& device_prop,
+                          ::sycl::event event);
 
   uint32_t GetNumBins() const {
       return nbins_;

@@ -193,23 +193,12 @@ class HistUpdater {
 
   inline ::sycl::event BuildHist(
                         const HostDeviceVector<GradientPair>& gpair,
-                        const common::RowSetCollection::Elem row_indices,
-                        const common::GHistIndexMatrix& gmat,
-                        GHistRowT<MemoryType::on_device>* hist,
-                        GHistRowT<MemoryType::on_device>* hist_buffer,
-                        ::sycl::event event_priv) {
-    return hist_builder_.BuildHist(gpair, row_indices, gmat, hist,
-                                   data_layout_ != kSparseData, hist_buffer,
-                                   device_properties_, event_priv);
-  }
-
-  inline ::sycl::event BuildHist(
-                        const HostDeviceVector<GradientPair>& gpair,
                         const common::GHistIndexMatrix& gmat,
                         ::sycl::event event) {
     size_t n_parallel_hist = hist_buffer_.GetNBlocks();
 
     std::vector<bst_node_t> nodes_buffer;
+    std::vector<bst_node_t> nodes_l1_buffer;
     std::vector<bst_node_t> nodes_non_buffer;
 
     bool isDense = gmat.IsDense();
@@ -239,7 +228,14 @@ class HistUpdater {
       }
 
       if (use_private_hist) {
-        nodes_buffer.push_back(nid);
+        size_t n_parallel_hist_l1 = (device_properties_.l1_size / (2 * sizeof(GradientSumT) * gmat.nbins)) * device_properties_.n_cores;
+        // float av_num_bins = float(gmat.nbins) / n_columns;
+        // if (isDense && (n_rows > gmat.max_num_bins * n_parallel_hist_l1)) {
+        if (isDense && (n_rows > 256 * 4 * 56)) {
+          nodes_l1_buffer.push_back(nid);
+        } else {
+          nodes_buffer.push_back(nid);
+        }
       } else {
         nodes_non_buffer.push_back(nid);
       }
@@ -251,6 +247,11 @@ class HistUpdater {
       event_out = hist_builder_.BuildHist(gpair, nodes_buffer, nids_buffer_device_.DataConst(), &row_set_collection_,
                                     gmat, &hist_, &(hist_buffer_.GetDeviceBuffer()),
                                     device_properties_, event_out);
+    }
+    if (nodes_l1_buffer.size() > 0) {
+      nids_l1_buffer_device_.Init(qu_, nodes_l1_buffer);
+      event_out = hist_builder_.BuildHistL1(gpair, nodes_l1_buffer, nids_l1_buffer_device_.DataConst(), &row_set_collection_,
+                                    gmat, &hist_, device_properties_, event_out);
     }
     if (nodes_non_buffer.size() > 0) {
       nids_non_buffer_device_.Init(qu_, nodes_non_buffer);
@@ -379,6 +380,7 @@ class HistUpdater {
   // list of nodes whose histograms would be built explicitly.
   std::vector<ExpandEntry> nodes_for_explicit_hist_build_;
   USMVector<bst_node_t, MemoryType::on_device> nids_buffer_device_;
+  USMVector<bst_node_t, MemoryType::on_device> nids_l1_buffer_device_;
   USMVector<bst_node_t, MemoryType::on_device> nids_non_buffer_device_;
 
   std::unique_ptr<HistSynchronizer<GradientSumT>> hist_synchronizer_;
