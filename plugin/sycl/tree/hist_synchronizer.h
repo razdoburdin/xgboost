@@ -37,14 +37,16 @@ class BatchHistSynchronizer: public HistSynchronizer<GradientSumT> {
     hist_sync_events_.resize(builder->nodes_for_explicit_hist_build_.size());
     for (int i = 0; i < builder->nodes_for_explicit_hist_build_.size(); i++) {
       const auto entry = builder->nodes_for_explicit_hist_build_[i];
-      auto& this_hist = builder->hist_[entry.nid];
 
       if (!(tree).IsRoot(entry.nid)) {
         const size_t parent_id = tree.Parent(entry.nid);
-        auto& parent_hist = builder->hist_[parent_id];
-        auto& sibling_hist = builder->hist_[entry.GetSiblingId(tree, parent_id)];
-        hist_sync_events_[i] = common::SubtractionHist(builder->qu_, &sibling_hist, parent_hist,
-                                                       this_hist, nbins, ::sycl::event());
+        auto sibling_id = entry.GetSiblingId(tree, parent_id);
+        auto& this_hist = builder->hist_int64_[entry.nid];
+        auto& parent_hist = builder->hist_int64_[parent_id];
+        auto& sibling_hist = builder->hist_int64_[sibling_id];
+        hist_sync_events_[i] = common::SubtractionHist(builder->qu_, &sibling_hist,
+                                                        parent_hist, this_hist,
+                                                        nbins, ::sycl::event());
       }
     }
     builder->qu_->wait_and_throw();
@@ -70,22 +72,20 @@ class DistributedHistSynchronizer: public HistSynchronizer<GradientSumT> {
     const size_t nbins = builder->hist_builder_.GetNumBins();
     for (int node = 0; node < builder->nodes_for_explicit_hist_build_.size(); node++) {
       const auto entry = builder->nodes_for_explicit_hist_build_[node];
-      auto& this_hist = builder->hist_[entry.nid];
-      // // Store posible parent node
-      auto& this_local = builder->hist_local_worker_[entry.nid];
+
+      auto& this_hist = builder->hist_int64_[entry.nid];
+      auto& this_local = builder->hist_local_worker_int64_[entry.nid];
       common::CopyHist(builder->qu_, &this_local, this_hist, nbins);
 
       if (!tree.IsRoot(entry.nid)) {
         const size_t parent_id = tree.Parent(entry.nid);
         auto sibling_nid = entry.GetSiblingId(tree, parent_id);
-        auto& parent_hist = builder->hist_local_worker_[parent_id];
-
-        auto& sibling_hist = builder->hist_[sibling_nid];
+        auto& parent_hist = builder->hist_local_worker_int64_[parent_id];
+        auto& sibling_hist = builder->hist_int64_[sibling_nid];
         common::SubtractionHist(builder->qu_, &sibling_hist, parent_hist,
-                                this_hist, nbins, ::sycl::event());
+                                     this_hist, nbins, ::sycl::event());
         builder->qu_->wait_and_throw();
-        // Store posible parent node
-        auto& sibling_local = builder->hist_local_worker_[sibling_nid];
+        auto& sibling_local = builder->hist_local_worker_int64_[sibling_nid];
         common::CopyHist(builder->qu_, &sibling_local, sibling_hist, nbins);
       }
     }
@@ -105,14 +105,13 @@ class DistributedHistSynchronizer: public HistSynchronizer<GradientSumT> {
     for (int node = 0; node < nodes.size(); node++) {
       const auto entry = nodes[node];
       if (!(tree.IsLeftChild(entry.nid))) {
-        auto& this_hist = builder->hist_[entry.nid];
-
         if (!tree.IsRoot(entry.nid)) {
           const size_t parent_id = tree.Parent(entry.nid);
-          auto& parent_hist = builder->hist_[parent_id];
-          auto& sibling_hist = builder->hist_[entry.GetSiblingId(tree, parent_id)];
+          auto& this_hist = builder->hist_int64_[entry.nid];
+          auto& parent_hist = builder->hist_int64_[parent_id];
+          auto& sibling_hist = builder->hist_int64_[entry.GetSiblingId(tree, parent_id)];
           common::SubtractionHist(builder->qu_, &this_hist, parent_hist,
-                                  sibling_hist, nbins, ::sycl::event());
+                                       sibling_hist, nbins, ::sycl::event());
           builder->qu_->wait_and_throw();
         }
       }

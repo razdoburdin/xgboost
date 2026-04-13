@@ -410,7 +410,7 @@ class Predictor : public xgboost::Predictor {
       n_reads *= std::log2(static_cast<float>(num_features));
     }
 
-    float cost_callibration = device_prop_.usm_host_allocations
+    float cost_callibration = device_prop_.host_unified_memory
                             ? kCostCalibrationIntegrated
                             : kCostCalibrationDescrete;
 

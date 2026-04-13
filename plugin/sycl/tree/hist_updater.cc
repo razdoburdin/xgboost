@@ -30,20 +30,20 @@ void HistUpdater<GradientSumT>::ReduceHists(const std::vector<int>& sync_ids,
     reduce_buffer_.resize(sync_ids.size() * nbins);
   }
   for (size_t i = 0; i < sync_ids.size(); i++) {
-    auto& this_hist = hist_[sync_ids[i]];
-    const GradientPairT* psrc = reinterpret_cast<const GradientPairT*>(this_hist.DataConst());
-    qu_->memcpy(reduce_buffer_.data() + i * nbins, psrc, nbins*sizeof(GradientPairT)).wait();
+    auto& this_hist = hist_int64_[sync_ids[i]];
+    const GradientPairInt64* psrc = this_hist.DataConst();
+    qu_->memcpy(reduce_buffer_.data() + i * nbins, psrc, nbins*sizeof(GradientPairInt64)).wait();
   }
 
   auto buffer_vec = ::xgboost::linalg::MakeVec(
-      reinterpret_cast<GradientSumT*>(reduce_buffer_.data()), 2 * nbins * sync_ids.size());
+      reinterpret_cast<int64_t*>(reduce_buffer_.data()), 2 * nbins * sync_ids.size());
   auto rc = collective::Allreduce(ctx_, buffer_vec, collective::Op::kSum);
   SafeColl(rc);
 
   for (size_t i = 0; i < sync_ids.size(); i++) {
-    auto& this_hist = hist_[sync_ids[i]];
-    GradientPairT* psrc = reinterpret_cast<GradientPairT*>(this_hist.Data());
-    qu_->memcpy(psrc, reduce_buffer_.data() + i * nbins, nbins*sizeof(GradientPairT)).wait();
+    auto& this_hist = hist_int64_[sync_ids[i]];
+    GradientPairInt64* psrc = this_hist.Data();
+    qu_->memcpy(psrc, reduce_buffer_.data() + i * nbins, nbins*sizeof(GradientPairInt64)).wait();
   }
 }
 
@@ -99,7 +99,7 @@ void HistUpdater<GradientSumT>::BuildLocalHistograms(
   //                       &(hist_buffer_.GetDeviceBuffer()), event);
   //   }
   // }
-  event = BuildHist(gpair, gmat, event);
+  event = BuildHist(gmat, event);
   qu_->wait_and_throw();
   builder_monitor_.Stop("BuildLocalHistograms");
 }
@@ -501,11 +501,9 @@ void HistUpdater<GradientSumT>::InitData(
 
     // initialize histogram collection
     uint32_t nbins = gmat.cut.Ptrs().back();
-    hist_.Init(qu_, nbins);
-    hist_local_worker_.Init(qu_, nbins);
 
     // initialize histogram builder
-    hist_builder_ = common::GHistBuilder<GradientSumT>(qu_, nbins);
+    hist_builder_ = common::GHistBuilder(qu_, nbins);
 
     USMVector<size_t, MemoryType::on_device>* row_indices = &(row_set_collection_.Data());
     row_indices->Resize(qu_, info.num_row_);
@@ -617,30 +615,36 @@ void HistUpdater<GradientSumT>::InitData(
 
   {
     uint32_t nbins = gmat.cut.Ptrs().back();
-    hist_buffer_.Init(qu_, nbins);
-    bool isDense = gmat.IsDense();
-    const size_t n_columns = isDense ? gmat.nfeatures : gmat.row_stride;
-    size_t work_group_size = std::min<size_t>(n_columns, device_properties_.max_work_group_size);
 
-    size_t n_sub_groups = work_group_size / device_properties_.min_sub_group_size
-                       + (work_group_size % device_properties_.min_sub_group_size > 0);
-    size_t n_sub_groups_per_core = std::min<size_t>(device_properties_.eu_per_core, n_sub_groups);
+    // Pre-quantize all gradients once
+    gpair_quantized_.Resize(qu_, info.num_row_);
+    {
+      const GradientPair* gpair_device = gpair.ConstDevicePointer();
+      builder_monitor_.Start("Configure Quantizer");
+      size_t n_gpair = row_set_collection_.Data().Size();
+      quantiser_.Configure(qu_, gpair_device, n_gpair);
+      builder_monitor_.Stop("Configure Quantizer");
 
-    size_t n_parallel_hist = device_properties_.l2_size / (2 * sizeof(GradientSumT) * nbins);
-
-    size_t n_wgs = n_columns / work_group_size + (n_columns % work_group_size > 0);
-    if (n_wgs > 1) {
-      n_parallel_hist *= n_wgs;
+      builder_monitor_.Start("Quantize");
+      GradientPairInt64* gpair_q = gpair_quantized_.Data();
+      auto quantiser = quantiser_;
+      qu_->submit([&](::sycl::handler& cgh) {
+        cgh.parallel_for<>(::sycl::range<1>(info.num_row_), [=](::sycl::item<1> pid) {
+          size_t i = pid.get_id(0);
+          gpair_q[i] = quantiser.ToFixedPoint(gpair_device[i]);
+        });
+      }).wait();
+      builder_monitor_.Stop("Quantize");
     }
 
-    constexpr size_t kMaxGPUUtilisation = 8;
-    n_parallel_hist = std::min<size_t>(n_parallel_hist, kMaxGPUUtilisation * device_properties_.max_compute_units / n_sub_groups_per_core);
+    hist_int64_.Init(qu_, nbins);
+    hist_local_worker_int64_.Init(qu_, nbins);
+    hist_buffer_int64_.Init(qu_, nbins);
+    
+    const size_t n_rows = row_set_collection_.Data().Size();
+    dispatcher_.Init(device_properties_, gmat, n_rows);
 
-    if (n_parallel_hist >= device_properties_.max_compute_units / n_sub_groups_per_core) {
-      hist_buffer_.Reset(n_parallel_hist);
-    } else {
-      hist_buffer_.Reset(0);
-    }
+    hist_buffer_int64_.Reset(dispatcher_.BufferSize());
   }
 
   builder_monitor_.Stop("InitData");
@@ -713,14 +717,18 @@ void HistUpdater<GradientSumT>::InitNewNode(int nid,
         const std::vector<uint32_t>& row_ptr = gmat.cut.Ptrs();
         const uint32_t ibegin = row_ptr[fid_least_bins_];
         const uint32_t iend = row_ptr[fid_least_bins_ + 1];
-        const auto* hist = reinterpret_cast<GradStats<GradientSumT>*>(hist_[nid].Data());
+        const auto* hist = hist_int64_[nid].DataConst();
 
-        std::vector<GradStats<GradientSumT>> ets(iend - ibegin);
+        std::vector<GradientPairInt64> ets(iend - ibegin);
         qu_->memcpy(ets.data(), hist + ibegin,
-                   (iend - ibegin) * sizeof(GradStats<GradientSumT>)).wait_and_throw();
+                   (iend - ibegin) * sizeof(GradientPairInt64)).wait_and_throw();
+        GradientPairInt64 sum_q(0, 0);
         for (const auto& et : ets) {
-          grad_stat += et;
+          sum_q += et;
         }
+        GradientPairPrecise sum_fp = quantiser_.ToFloatingPoint(sum_q);
+        grad_stat = GradStats<GradientSumT>(static_cast<GradientSumT>(sum_fp.GetGrad()),
+                                             static_cast<GradientSumT>(sum_fp.GetHess()));
       } else {
         const common::RowSetCollection::Elem e = row_set_collection_[nid];
         const size_t* row_idxs = e.begin;
@@ -791,7 +799,7 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
     for (size_t idx = 0; idx < features_set->Size(); idx++) {
       const size_t fid = features_set->ConstHostVector()[idx];
       if (interaction_constraints_.Query(nid, fid)) {
-        auto this_hist = hist_[nid].DataConst();
+        auto this_hist = hist_int64_[nid].DataConst();
         split_queries_host[pos] = SplitQuery{nid, fid, this_hist};
         ++pos;
       }
@@ -815,6 +823,9 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
   const bst_float* cut_val = gmat.cut.cut_values_.ConstDevicePointer();
 
   const float min_child_weight = param_.min_child_weight;
+  const int64_t min_child_weight_q = static_cast<int64_t>(
+      min_child_weight * quantiser_.GetFixedPointHess());
+  auto quantiser = quantiser_;
 
   event = qu_->submit([&](::sycl::handler& cgh) {
     cgh.depends_on(event);
@@ -825,11 +836,12 @@ void HistUpdater<GradientSumT>::EvaluateSplits(
       auto sg = pid.get_sub_group();
       int nid = split_queries[i].nid;
       int fid = split_queries[i].fid;
-      const GradientPairT* hist_data = split_queries[i].hist;
+      const GradientPairInt64* hist_data = split_queries[i].hist;
 
       best_splits[i] = snode[nid].best;
       EnumerateSplit(sg, cut_ptr, cut_val, hist_data, snode[nid],
-                     &(best_splits[i]), fid, nid, evaluator, min_child_weight);
+                     &(best_splits[i]), fid, nid, evaluator, min_child_weight,
+                     min_child_weight_q, quantiser);
     });
   });
   best_splits_.CopyToHost(qu_, total_features, &event);
@@ -853,32 +865,40 @@ void HistUpdater<GradientSumT>::EnumerateSplit(
     const ::sycl::sub_group& sg,
     const uint32_t* cut_ptr,
     const bst_float* cut_val,
-    const GradientPairT* hist_data,
+    const GradientPairInt64* hist_data,
     const NodeEntry<GradientSumT>& snode,
     SplitEntry<GradientSumT>* p_best,
     bst_uint fid,
     bst_uint nodeID,
     typename TreeEvaluator<GradientSumT>::SplitEvaluator const &evaluator,
-    float min_child_weight) {
+    float min_child_weight,
+    int64_t min_child_weight_q,
+    const GradientQuantiser& quantiser) {
   SplitEntry<GradientSumT> best;
 
   int32_t ibegin = static_cast<int32_t>(cut_ptr[fid]);
   int32_t iend = static_cast<int32_t>(cut_ptr[fid + 1]);
 
-  GradStats<GradientSumT> sum(0, 0);
+  // Accumulate in int64 for exact prefix sums
+  int64_t sum_grad_q = 0;
+  int64_t sum_hess_q = 0;
 
   int32_t sub_group_size = sg.get_local_range().size();
   const size_t local_id = sg.get_local_id()[0];
 
-  /* TODO(razdoburdin)
-   * Currently the first additions are fast and the last are slow.
-   * Maybe calculating of reduce overgroup in seprate kernel and reusing it here can be faster
-   */
   for (int32_t i = ibegin + local_id; i < iend; i += sub_group_size) {
-    sum.Add(::sycl::inclusive_scan_over_group(sg, hist_data[i].GetGrad(), std::plus<>()),
-            ::sycl::inclusive_scan_over_group(sg, hist_data[i].GetHess(), std::plus<>()));
+    sum_grad_q += ::sycl::inclusive_scan_over_group(
+        sg, hist_data[i].GetQuantisedGrad(), std::plus<int64_t>());
+    sum_hess_q += ::sycl::inclusive_scan_over_group(
+        sg, hist_data[i].GetQuantisedHess(), std::plus<int64_t>());
 
-    if (sum.GetHess() >= min_child_weight) {
+    // Fast int64 hessian check for left child
+    if (sum_hess_q >= min_child_weight_q) {
+      // Dequantize only for candidate bins passing the filter
+      GradientPairPrecise left_fp = quantiser.ToFloatingPoint(
+          GradientPairInt64(sum_grad_q, sum_hess_q));
+      GradStats<GradientSumT> sum(static_cast<GradientSumT>(left_fp.GetGrad()),
+                                   static_cast<GradientSumT>(left_fp.GetHess()));
       GradStats<GradientSumT> c = snode.stats - sum;
       if (c.GetHess() >= min_child_weight) {
         bst_float loss_chg = evaluator.CalcSplitGain(nodeID, fid, sum, c) - snode.root_gain;
@@ -892,7 +912,8 @@ void HistUpdater<GradientSumT>::EnumerateSplit(
       size_t end = i - local_id + sub_group_size;
       if (end > iend) end = iend;
       for (size_t j = i + 1; j < end; ++j) {
-        sum.Add(hist_data[j].GetGrad(), hist_data[j].GetHess());
+        sum_grad_q += hist_data[j].GetQuantisedGrad();
+        sum_hess_q += hist_data[j].GetQuantisedHess();
       }
     }
   }

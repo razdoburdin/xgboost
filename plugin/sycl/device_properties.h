@@ -47,6 +47,7 @@ class DeviceProperties {
   size_t max_sub_group_size;
   size_t eu_per_core;
   size_t n_cores;
+  size_t local_mem_size = 0;
   float sram_size_per_eu = 0;
   size_t l2_size = 0;
   size_t l1_size = 0;
@@ -60,11 +61,12 @@ class DeviceProperties {
     usm_host_allocations(device.has(::sycl::aspect::usm_host_allocations)),
     host_unified_memory(device.get_info<::sycl::info::device::host_unified_memory>()),
     max_compute_units(device.get_info<::sycl::info::device::max_compute_units>()),
-    max_work_group_size(device.get_info<::sycl::info::device::max_work_group_size>()),
+    max_work_group_size(1024),
     min_sub_group_size(device.get_info<::sycl::info::device::sub_group_sizes>().front()),
     max_sub_group_size(device.get_info<::sycl::info::device::sub_group_sizes>().back()),
     eu_per_core(device.get_info<::sycl::ext::intel::info::device::gpu_eu_count_per_subslice>()),
-    n_cores(max_compute_units / eu_per_core) {
+    n_cores(max_compute_units / eu_per_core),
+    local_mem_size(device.get_info<::sycl::info::device::local_mem_size>()) {
       LOG(INFO) << "Detected " << n_cores << " cores";
       LOG(INFO) << "Detected " << max_compute_units << " EUs";
       LOG(INFO) << "Detected max_work_group_size = " << max_work_group_size;
@@ -72,6 +74,8 @@ class DeviceProperties {
       LOG(INFO) << "Detected max_sub_group_size = " << max_sub_group_size;
       LOG(INFO) << "Detected usm_host_allocations = " << usm_host_allocations;
       LOG(INFO) << "Detected host_unified_memory = " << host_unified_memory;
+      LOG(INFO) << "Detected local_mem_size = "
+                << ::xgboost::common::HumanMemUnit(local_mem_size);
       GetL2Size(device);
       if (is_gpu) {
         GetSRAMSize(device);

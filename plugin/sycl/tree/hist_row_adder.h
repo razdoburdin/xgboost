@@ -28,12 +28,12 @@ class BatchHistRowsAdder: public HistRowsAdder<GradientSumT> {
     builder->builder_monitor_.Start("AddHistRows");
 
     for (auto const& entry : builder->nodes_for_explicit_hist_build_) {
-      builder->hist_.AddHistRow(entry.nid);
+      builder->hist_int64_.AddHistRow(entry.nid);
     }
     for (auto const& node : builder->nodes_for_subtraction_trick_) {
-      builder->hist_.AddHistRow(node.nid);
+      builder->hist_int64_.AddHistRow(node.nid);
     }
-    builder->hist_.PushPointersToDevice();
+    builder->hist_int64_.PushPointersToDevice();
 
     builder->builder_monitor_.Stop("AddHistRows");
   }
@@ -60,17 +60,19 @@ class DistributedHistRowsAdder: public HistRowsAdder<GradientSumT> {
     sync_ids->clear();
     for (auto const& nid : merged_node_ids) {
       if ((*p_tree)[nid].IsLeftChild()) {
-        builder->hist_.AddHistRow(nid);
-        builder->hist_local_worker_.AddHistRow(nid);
+        builder->hist_int64_.AddHistRow(nid);
+        builder->hist_local_worker_int64_.AddHistRow(nid);
         sync_ids->push_back(nid);
       }
     }
     for (auto const& nid : merged_node_ids) {
       if (!((*p_tree)[nid].IsLeftChild())) {
-        builder->hist_.AddHistRow(nid);
-        builder->hist_local_worker_.AddHistRow(nid);
+        builder->hist_int64_.AddHistRow(nid);
+        builder->hist_local_worker_int64_.AddHistRow(nid);
       }
     }
+    builder->hist_int64_.PushPointersToDevice();
+    builder->hist_local_worker_int64_.PushPointersToDevice();
     builder->builder_monitor_.Stop("AddHistRows");
   }
 };

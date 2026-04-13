@@ -22,6 +22,7 @@
 #include "hist_synchronizer.h"
 #include "hist_row_adder.h"
 #include "hist_dispatcher.h"
+#include "gradient_quantiser.h"
 
 #include "../../src/common/random.h"
 #include "../data.h"
@@ -110,8 +111,6 @@ class UnifiedHostDeviceBuffer {
 template<typename GradientSumT>
 class HistUpdater {
  public:
-  template <MemoryType memory_type = MemoryType::shared>
-  using GHistRowT = common::GHistRow<GradientSumT, memory_type>;
   using GradientPairT = xgboost::detail::GradientPairInternal<GradientSumT>;
 
   explicit HistUpdater(const Context* ctx,
@@ -160,7 +159,7 @@ class HistUpdater {
   struct SplitQuery {
     bst_node_t nid;
     size_t fid;
-    const GradientPairT* hist;
+    const GradientPairInt64* hist;
   };
 
   void InitSampling(const HostDeviceVector<GradientPair>& gpair,
@@ -174,11 +173,14 @@ class HistUpdater {
   // Returns the sum of gradients corresponding to the data points that contains a non-missing
   // value for the particular feature fid.
   static void EnumerateSplit(const ::sycl::sub_group& sg,
-      const uint32_t* cut_ptr, const bst_float* cut_val, const GradientPairT* hist_data,
+      const uint32_t* cut_ptr, const bst_float* cut_val,
+      const GradientPairInt64* hist_data,
       const NodeEntry<GradientSumT> &snode, SplitEntry<GradientSumT>* p_best, bst_uint fid,
       bst_uint nodeID,
       typename TreeEvaluator<GradientSumT>::SplitEvaluator const &evaluator,
-      float min_child_weight);
+      float min_child_weight,
+      int64_t min_child_weight_q,
+      const GradientQuantiser& quantiser);
 
   void ApplySplit(std::vector<ExpandEntry> nodes,
                       const common::GHistIndexMatrix& gmat,
@@ -192,10 +194,9 @@ class HistUpdater {
                 const RegTree& tree);
 
   inline ::sycl::event BuildHist(
-                        const HostDeviceVector<GradientPair>& gpair,
                         const common::GHistIndexMatrix& gmat,
                         ::sycl::event event) {
-    size_t n_parallel_hist = hist_buffer_.GetNBlocks();
+    size_t n_parallel_hist = dispatcher_.BufferSize();
 
     std::vector<bst_node_t> nodes_buffer;
     std::vector<bst_node_t> nodes_l1_buffer;
@@ -209,6 +210,7 @@ class HistUpdater {
 
       size_t n_rows = row_set_collection_[nid].Size();
       bool use_private_hist = false;
+      bool use_l1 = false;
       if (n_parallel_hist > 0) {
         size_t block_size = n_rows / n_parallel_hist + (n_rows % n_parallel_hist > 0);
 
@@ -216,49 +218,61 @@ class HistUpdater {
         float n_wgs = std::min<float>(n_rows, device_properties_.max_compute_units / wg_per_columns);
         float conflicts_per_bin = n_wgs / gmat.min_num_bins;
         float atomic_penalty = n_columns * (n_rows / n_wgs) * conflicts_per_bin;
-      
 
         size_t n_sub_groups = n_columns / device_properties_.min_sub_group_size
                             + (n_columns % device_properties_.min_sub_group_size > 0);
         size_t n_sub_groups_per_core = std::min<size_t>(device_properties_.eu_per_core, n_sub_groups);
         float utilization = static_cast<float>(n_parallel_hist) / (device_properties_.max_compute_units / n_sub_groups_per_core);
 
-        float block_penalty = 2 * sizeof(GradientSumT) * float(gmat.nbins) * std::sqrt(utilization);
+        float block_penalty = sizeof(GradientPairInt64) * float(gmat.nbins) * std::sqrt(utilization);
         use_private_hist = atomic_penalty > block_penalty;
+
+        size_t hist_size = sizeof(GradientPairInt64) * gmat.nbins;
+        size_t max_wgs = std::min<size_t>(device_properties_.max_sub_group_size * device_properties_.eu_per_core,
+                                          device_properties_.max_work_group_size);
+        size_t work_group_size = std::min<size_t>(n_columns, max_wgs);
+
+        size_t n_sub_per_core = std::min<size_t>(device_properties_.eu_per_core,
+            (work_group_size + device_properties_.max_sub_group_size - 1)
+            / device_properties_.max_sub_group_size);
+        use_l1 = isDense
+            && (n_rows > gmat.max_num_bins * n_parallel_hist)
+            && (device_properties_.eu_per_core % n_sub_per_core == 0)
+            && (hist_size * device_properties_.eu_per_core
+                <= device_properties_.l1_size * n_sub_per_core);
       }
 
-      if (use_private_hist) {
-        size_t n_parallel_hist_l1 = (device_properties_.l1_size / (2 * sizeof(GradientSumT) * gmat.nbins)) * device_properties_.n_cores;
-        // float av_num_bins = float(gmat.nbins) / n_columns;
-        // if (isDense && (n_rows > gmat.max_num_bins * n_parallel_hist_l1)) {
-        if (isDense && (n_rows > 256 * 4 * 56)) {
-          nodes_l1_buffer.push_back(nid);
-        } else {
-          nodes_buffer.push_back(nid);
-        }
+      if (use_l1) {
+        nodes_l1_buffer.push_back(nid);
+      } else if (use_private_hist) {
+        nodes_buffer.push_back(nid);
       } else {
         nodes_non_buffer.push_back(nid);
       }
     }
 
     ::sycl::event event_out = event;
+
+    const GradientPairInt64* pgh = gpair_quantized_.DataConst();
     if (nodes_buffer.size() > 0) {
       nids_buffer_device_.Init(qu_, nodes_buffer);
-      event_out = hist_builder_.BuildHist(gpair, nodes_buffer, nids_buffer_device_.DataConst(), &row_set_collection_,
-                                    gmat, &hist_, &(hist_buffer_.GetDeviceBuffer()),
+      event_out = hist_builder_.BuildHist(pgh, nodes_buffer, nids_buffer_device_.DataConst(),
+                                    &row_set_collection_, gmat, &hist_int64_,
+                                    &(hist_buffer_int64_.GetDeviceBuffer()),
                                     device_properties_, event_out);
     }
     if (nodes_l1_buffer.size() > 0) {
-      nids_l1_buffer_device_.Init(qu_, nodes_l1_buffer);
-      event_out = hist_builder_.BuildHistL1(gpair, nodes_l1_buffer, nids_l1_buffer_device_.DataConst(), &row_set_collection_,
-                                    gmat, &hist_, device_properties_, event_out);
+      event_out = hist_builder_.BuildHistL1(pgh, nodes_l1_buffer, &row_set_collection_,
+                                    gmat, &hist_int64_, &(hist_buffer_int64_.GetDeviceBuffer()),
+                                    device_properties_, event_out);
     }
     if (nodes_non_buffer.size() > 0) {
       nids_non_buffer_device_.Init(qu_, nodes_non_buffer);
-      event_out = hist_builder_.BuildHist(gpair, nodes_non_buffer, nids_non_buffer_device_.DataConst(), &row_set_collection_,
-                              gmat, &hist_, device_properties_, event_out);
+      event_out = hist_builder_.BuildHist(pgh, nodes_non_buffer, nids_non_buffer_device_.DataConst(),
+                                  &row_set_collection_, gmat, &hist_int64_,
+                                  device_properties_, event_out);
     }
-    return event_out;                          
+    return event_out;
   }
 
   void InitNewNode(int nid,
@@ -356,12 +370,15 @@ class HistUpdater {
   enum DataLayout { kDenseDataZeroBased, kDenseDataOneBased, kSparseData };
   DataLayout data_layout_;
 
-  common::GHistBuilder<GradientSumT> hist_builder_;
-  common::ParallelGHistBuilder<GradientSumT> hist_buffer_;
-  /*! \brief culmulative histogram of gradients. */
-  common::HistCollection<GradientSumT> hist_;
-  /*! \brief culmulative local parent histogram of gradients. */
-  common::HistCollection<GradientSumT> hist_local_worker_;
+  common::GHistBuilder hist_builder_;
+
+  // Int64 quantized histogram members
+  GradientQuantiser quantiser_;
+  USMVector<GradientPairInt64, MemoryType::on_device> gpair_quantized_;
+  common::HistCollectionInt64 hist_int64_;
+
+  common::HistCollectionInt64 hist_local_worker_int64_;
+  common::ParallelGHistBuilderInt64 hist_buffer_int64_;
 
   xgboost::common::Monitor builder_monitor_;
   xgboost::common::Monitor kernel_monitor_;
@@ -379,6 +396,7 @@ class HistUpdater {
   std::vector<ExpandEntry> nodes_for_subtraction_trick_;
   // list of nodes whose histograms would be built explicitly.
   std::vector<ExpandEntry> nodes_for_explicit_hist_build_;
+  HistDispatcher dispatcher_;
   USMVector<bst_node_t, MemoryType::on_device> nids_buffer_device_;
   USMVector<bst_node_t, MemoryType::on_device> nids_l1_buffer_device_;
   USMVector<bst_node_t, MemoryType::on_device> nids_non_buffer_device_;
@@ -386,7 +404,7 @@ class HistUpdater {
   std::unique_ptr<HistSynchronizer<GradientSumT>> hist_synchronizer_;
   std::unique_ptr<HistRowsAdder<GradientSumT>> hist_rows_adder_;
 
-  std::vector<GradientPairT> reduce_buffer_;
+  std::vector<GradientPairInt64> reduce_buffer_;
 };
 
 }  // namespace tree

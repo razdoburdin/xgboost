@@ -120,14 +120,7 @@ struct SplitEntryContainer {
       return false;
     }
   }
-  /*!
-   * \brief update the split entry, replace it if e is better
-   * \param new_loss_chg loss reduction of new candidate
-   * \param split_index feature index to split on
-   * \param new_split_value the split point
-   * \param default_left whether the missing value goes to left
-   * \return whether the proposed split is better and can replace current split
-   */
+
   bool Update(bst_float new_loss_chg, unsigned split_index,
               bst_float new_split_value, bool default_left,
               const GradientT &left_sum,

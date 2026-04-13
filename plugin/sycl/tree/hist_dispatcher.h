@@ -16,9 +16,69 @@ namespace tree {
 
 struct BlockParams { size_t size, nblocks; };
 
-template <typename FPType>
+constexpr size_t CeilDiv(size_t num, size_t denum) {
+  return num / denum + (num % denum > 0);
+}
+
 class HistDispatcher {
  public:
+  enum HistKernelType {
+    CommonHistSerial, // large hist, few conflicts
+    CommonHistBatch,  // small hist, few conflicts
+    PrivateHistL2,    // large hist, a lot of conflicts
+    PrivateHistL1,    // small hist, a lot of conflicts
+  };
+
+  using GPairType = GradientPairInt64;
+  constexpr static size_t kMaxGPUUtilisation = 4;
+  constexpr static size_t KMinBlockSize = 32;
+
+  class PrivateHistL2Prop {
+   public:
+    void Init(const DeviceProperties& device_prop, bool isDense,
+              size_t nbins, size_t n_columns, size_t n_rows) {
+      size_t work_group_size = std::min<size_t>(n_columns, device_prop.max_work_group_size);
+      size_t n_sub_groups = CeilDiv(work_group_size, device_prop.min_sub_group_size);
+      size_t n_sub_groups_per_core = std::min<size_t>(device_prop.eu_per_core, n_sub_groups);
+
+      // all histogram buffers must fit in L2
+      size_t hist_bytes = sizeof(GPairType) * nbins;
+      size_t l2_limit = device_prop.l2_size / hist_bytes;
+
+      // keep reduction part smaller than accumulation
+      size_t occupancy = device_prop.max_compute_units / n_sub_groups_per_core;
+      size_t reduce_limit = std::max(occupancy,
+        static_cast<size_t>(
+            static_cast<double>(n_rows) * n_columns / (kMaxGPUUtilisation * nbins)));
+      reduce_limit = (reduce_limit / occupancy) * occupancy;
+
+      size_t n_tasks = device_prop.max_compute_units * kMaxGPUUtilisation / n_sub_groups;
+      size_t occupancy_limit = device_prop.max_compute_units *
+                               CeilDiv(n_tasks, device_prop.max_compute_units);
+
+      size_t tiny_block_limit = ((n_rows / KMinBlockSize) / device_prop.max_compute_units) *
+                                device_prop.max_compute_units;
+
+      n_parallel_hist = std::min({l2_limit, reduce_limit, occupancy_limit, tiny_block_limit});
+    }
+
+    size_t n_parallel_hist = 0;
+  };
+
+  void Init(const DeviceProperties& device_prop, const common::GHistIndexMatrix& gmat, size_t n_rows) {
+    size_t nbins = gmat.cut.Ptrs().back();
+    size_t n_columns = gmat.IsDense() ? gmat.nfeatures : gmat.row_stride;
+    private_hist_l2_prop.Init(device_prop, gmat.IsDense(), nbins, n_columns, n_rows);
+  }
+
+  size_t BufferSize() const {
+    return private_hist_l2_prop.n_parallel_hist;
+  }
+
+  PrivateHistL2Prop private_hist_l2_prop;
+};
+
+#if(0)
   // Max n_blocks/max_compute_units ration.
   // Higher -> better GPU utilisation with higer memory overhead.
   constexpr static int kMaxGPUUtilisation = 4;
@@ -30,8 +90,6 @@ class HistDispatcher {
   constexpr static float KLocalHistSRAM = 32. * 1024;
   // Max workgroups size, used by atomic-based hist-building
   constexpr static size_t kMaxWorkGroupSizeAtomic = 32;
-  // Max workgroups size, used for local histograms
-  constexpr static size_t kMaxWorkGroupSizeLocal = 256;
   // Atomic efficency normalization
   constexpr static float kAtomicEfficiencyNormalization = 16 * 1024;
   // Block kernel launch penalty normalization
@@ -131,7 +189,9 @@ class HistDispatcher {
       work_group_size = std::min(kMaxWorkGroupSizeAtomic,
                                  work_group_size);
     } else if (use_local_hist) {
-      work_group_size = std::min(kMaxWorkGroupSizeLocal,
+      size_t max_wgs_local = std::min<size_t>(device_prop.max_sub_group_size * device_prop.eu_per_core,
+                                               device_prop.max_work_group_size);
+      work_group_size = std::min(max_wgs_local,
                                  work_group_size);
     }
   }
@@ -155,6 +215,7 @@ size_t GetRequiredBufferSize(const DeviceProperties& device_prop, size_t max_n_r
   // LOG(INFO) << "device_prop.max_compute_units = " << device_prop.max_compute_units;
   return build_params.use_atomics ? 0 : build_params.block.nblocks;
 }
+#endif
 
 }  // namespace tree
 }  // namespace sycl
