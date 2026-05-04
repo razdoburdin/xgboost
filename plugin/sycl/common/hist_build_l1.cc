@@ -189,7 +189,7 @@ static ::sycl::event BuildHistKernelL1(::sycl::queue* qu,
     });
 
     GradientPairInt64* hist_data = (*histograms)[nid].Data();
-    event_batch = ReduceHistParallel(qu, hist_data, hist_buffer_data, nblocks, nbins, hist_buff_offset, event_batch);
+    event_batch = ReduceHistParallel(qu, hist_data, hist_buffer_data, nblocks, nbins, event_batch);
   }
 
   return event_batch;
