@@ -11,9 +11,9 @@ namespace common {
 
 ::sycl::event ReduceHistParallel(::sycl::queue* qu,
                                  GradientPairInt64* hist_data,
-                                 GradientPairInt64* hist_buffer_data,
+                                 const GradientPairInt64* hist_buffer_data,
                                  size_t nblocks, size_t nbins,
-                                 const ::sycl::event& event_main);
+                                 ::sycl::event event_main);
 
 }  // namespace common
 }  // namespace sycl
