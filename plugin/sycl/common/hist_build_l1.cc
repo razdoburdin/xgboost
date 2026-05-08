@@ -75,7 +75,7 @@ namespace common {
     const size_t* rid = (*row_set)[nid].begin;
 
     int64_t* hist_data = reinterpret_cast<int64_t*>((*histograms)[nid].Data());
-    event_batch = qu->memset(hist_data, 0, 2 * sizeof(int64_t) * nbins, event_batch);
+    event_batch = qu->fill(hist_data, int64_t(0), 2 * nbins, event_batch);
 
     event_batch = qu->submit([&](::sycl::handler& cgh) {
       cgh.depends_on(event_batch);

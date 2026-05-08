@@ -13,7 +13,7 @@ namespace common {
   size_t n_groups = nblocks / kGroupSize + (nblocks % kGroupSize > 0);
 
   int64_t* hist = reinterpret_cast<int64_t*>(hist_data);
-  auto event_init = qu->memset(hist, 0, 2 * sizeof(int64_t) * nbins, event);
+  auto event_init = qu->fill(hist, int64_t(0), 2 * nbins, event);
 
   auto event_save = qu->submit([&](::sycl::handler& cgh) {
     cgh.depends_on(event_init);

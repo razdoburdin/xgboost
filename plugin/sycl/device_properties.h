@@ -32,7 +32,7 @@ class DeviceProperties {
       }
       default:
         sram_size_per_eu = 0;
-        l1_size = device.get_info<::sycl::info::device::local_mem_size>();
+        l1_size = 64 * 1024; //device.get_info<::sycl::info::device::local_mem_size>();
     }
     LOG(INFO) << "Detected L1 Size = " << ::xgboost::common::HumanMemUnit(l1_size);
   }

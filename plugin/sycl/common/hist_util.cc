@@ -134,7 +134,7 @@ template<typename BinIdxType, bool isDense>
   for (size_t nidx = 0; nidx < n_nodes; ++nidx) {
     bst_node_t nid = nodes[nidx];
     int64_t* hist = reinterpret_cast<int64_t*>((*histograms)[nid].Data());
-    event_batch = qu->memset(hist, 0, 2 * sizeof(int64_t) * nbins, event_batch);
+    event_batch = qu->fill(hist, int64_t(0), 2 * nbins, event_batch);
   }
 
   event_batch = qu->submit([&](::sycl::handler& cgh) {
@@ -177,7 +177,9 @@ template<typename BinIdxType, bool isDense>
                 if constexpr (isDense) {
                   idx_bin += offsets[fid];
                 }
-                hist_buff[idx_bin] += gpair_q;
+                if (idx_bin < nbins) {
+                  hist_buff[idx_bin] += gpair_q;
+                }
               }
             }
           }
@@ -224,7 +226,7 @@ template<typename BinIdxType, bool isDense>
     for (size_t nidx = 0; nidx < n_nodes; ++nidx) {
       bst_node_t nid = nodes[nidx];
       int64_t* hist = reinterpret_cast<int64_t*>((*histograms)[nid].Data());
-      events[nidx] = qu->memset(hist, 0, hist_size, event);
+      events[nidx] = qu->fill(hist, int64_t(0), 2 * nbins, event);
       events[nidx] = BuildHistKernel<BinIdxType, isDense>(
           qu, pgh, (*row_set)[nid], gmat, &((*histograms)[nid]), events[nidx]);
     }
@@ -258,7 +260,7 @@ template<typename BinIdxType, bool isDense>
       bst_node_t nid = nodes[nidx + first_node];
       max_size = std::max(max_size, (*row_set)[nid].Size());
       int64_t* hist = reinterpret_cast<int64_t*>((*histograms)[nid].Data());
-      events[nidx] = qu->memset(hist, 0, hist_size, event_batch);
+      events[nidx] = qu->fill(hist, int64_t(0), 2 * nbins, event_batch);
     }
 
     size_t max_block_size = 32;

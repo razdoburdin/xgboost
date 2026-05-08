@@ -195,7 +195,7 @@ class PartitionBuilder {
     nodes_events_.resize(n_nodes_);
 
     parts_size_.ResizeNoCopy(qu_, 2 * n_nodes_);
-    *event = qu_->memset(parts_size_.Data(), 0, parts_size_.Size() * sizeof(size_t), *event);
+    *event = qu_->fill(parts_size_.Data(), size_t(0), parts_size_.Size(), *event);
 
     for (size_t node_in_set = 0; node_in_set < n_nodes_; node_in_set++) {
       const int32_t nid = nodes[node_in_set].nid;
